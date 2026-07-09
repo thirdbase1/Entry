@@ -22,5 +22,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 apps/agent/.eve/
+apps/agent/.output/
 .vercel/output/
 apps/web/.next/

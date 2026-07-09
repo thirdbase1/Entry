@@ -40,6 +40,7 @@ model User {
   AiUserFiles     AiUserFiles[]
   AiUserDocs      AiUserDocs[]
   eveChatSessions EveChatSession[]
+  modelProviders UserModelProvider[]
 
   @@index([email])
   @@map("users")
@@ -426,6 +427,52 @@ model AppConfig {
   lastUpdatedByUser User? @relation(fields: [lastUpdatedBy], references: [id], onDelete: SetNull)
 
   @@map("app_configs")
+}
+
+/// BYOK (bring-your-own-key) provider connections. One connection =
+/// one base URL + optional API key + a compatibility mode (which AI SDK
+/// client shape to talk with). A connection can expose many models
+/// (UserModelProviderModel below) — the "fetch models" action calls the
+/// connection's own discovery endpoint and upserts rows there; each model
+/// is individually toggle-able on/off for the chat model selector.
+enum ByokCompatibility {
+  OPENAI // OpenAI-compatible chat completions API — covers the vast majority of providers (Groq, Together, Fireworks, OpenRouter, DeepInfra, Mistral, xAI, local vLLM/LM Studio/Ollama, etc.)
+  ANTHROPIC // Anthropic Messages API shape
+  GOOGLE // Google Generative Language API shape
+}
+
+model UserModelProvider {
+  id              String            @id @default(uuid()) @db.VarChar
+  userId          String            @map("user_id") @db.VarChar
+  label           String            @db.VarChar // user-facing name, e.g. "My Groq key"
+  compatibility   ByokCompatibility @default(OPENAI)
+  baseUrl         String            @map("base_url") @db.VarChar
+  encryptedApiKey String?           @map("encrypted_api_key") @db.Text // null for key-less endpoints (e.g. local Ollama)
+  lastFetchedAt   DateTime?         @map("last_fetched_at") @db.Timestamptz(3)
+  lastError       String?           @map("last_error") @db.VarChar
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user   User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  models UserModelProviderModel[]
+
+  @@index([userId])
+  @@map("user_model_providers")
+}
+
+model UserModelProviderModel {
+  id         String   @id @default(uuid()) @db.VarChar
+  providerId String   @map("provider_id") @db.VarChar
+  modelId    String   @map("model_id") @db.VarChar // the provider's own model slug, e.g. "llama-3.3-70b-versatile"
+  label      String?  @db.VarChar // optional friendly display name, defaults to modelId in the UI
+  isEnabled  Boolean  @default(true) @map("is_enabled") // whether this model shows in the chat model selector
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  provider UserModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, modelId])
+  @@index([providerId])
+  @@map("user_model_provider_models")
 }
 
 model UserSettings {

@@ -59,3 +59,5 @@ export const prisma: PrismaClient = new Proxy({} as PrismaClient, {
 
 export * from './generated/client';
 export * from './generated/enums';
+
+export { encryptApiKey, decryptApiKey, maskApiKey } from './crypto/byok.js';

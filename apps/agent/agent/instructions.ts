@@ -2,39 +2,35 @@ import { defineInstructions } from 'eve/instructions';
 import { buildPersonaInstructions } from './lib/persona.js';
 
 /**
- * Root = persona (shared with all 3 subagents) + this agent's own routing
- * block. Only the root needs routing: it's the only agent reachable over
- * HTTP (eve's single /eve/v1/session* endpoint), so it's the only one that
- * ever has to decide whether to delegate.
+ * Root = shared persona + this agent's own routing block.
  *
- * Routing signal fix: previously this depended on the model noticing one
- * sentence ("Preferred model for this turn: gemini") buried inside a larger
- * freeform clientContext string that also carried disabled-tool info. Now
- * chat-config.tsx sends a small dedicated JSON object
- * (`{ requestedModel: "gemini" }`) as its own clientContext entry, and the
- * rule below is a hard imperative stated first, not mixed into prose — much
- * less for the model to miss or misparse.
+ * Routing now goes through the `run_model` TOOL, not declared subagents.
+ * Why: eve pins a subagent's model at build time, which can't represent
+ * "any model the user picks" or BYOK (arbitrary provider/key added at
+ * runtime, unknown at build time). run_model resolves the model at
+ * request time instead, and gives it the exact same 9 tools this agent
+ * has — no capability loss when a different model handles the turn.
+ *
+ * Routing signal: chat-config.tsx sends a small dedicated JSON object as
+ * clientContext, e.g. {"requestedModel":"anthropic/claude-opus-4.8"} or
+ * {"byokModelId":"<uuid>"}. The rule below is a hard imperative
+ * stated first, not mixed into prose.
  */
 export default defineInstructions({
   markdown: `${buildPersonaInstructions()}
 
 <model_routing>
-eve pins this root agent's own model at build time — there is no runtime way
-to swap the model this agent itself runs on for a single turn. Per-turn model
-CHOICE is implemented via delegation to declared subagents, each pinned to a
-different model and each carrying the SAME tools as this root agent (so
-delegating never loses capability): \`claude\` (Claude), \`gemini\` (Gemini),
-\`gpt\` (GPT).
-
 HARD RULE, check this before anything else: if the turn's context contains a
-JSON object with a \`requestedModel\` field (e.g. \`{"requestedModel":"gemini"}\`),
-you MUST immediately call the subagent tool with that exact name, passing the
-user's full message and any other relevant context, and nothing else — do not
-answer yourself first, do not add commentary, do not re-answer after it
-responds. Return the subagent's response essentially verbatim (light
+JSON object with a \`requestedModel\` field (an AI Gateway model slug, e.g.
+\`{"requestedModel":"anthropic/claude-opus-4.8"}\`) or a \`byokModelId\`
+field (e.g. \`{"byokModelId":"5b1e..."}\`), you MUST immediately call the
+\`run_model\` tool — pass \`modelSlug\` (or \`byokModelId\`) exactly as given,
+plus the user's full message as \`task\`, plus any \`parameters\` if given. Do
+not answer yourself first, do not add commentary, do not re-answer after it
+responds. Return \`run_model\`'s \`answer\` essentially verbatim (light
 reformatting only).
 
-If no \`requestedModel\` field is present, handle the turn yourself as normal —
-do not delegate.
+If neither field is present, handle the turn yourself as normal — do not call
+\`run_model\`.
 </model_routing>`,
 });

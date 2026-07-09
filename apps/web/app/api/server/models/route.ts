@@ -30,12 +30,15 @@ export async function GET(_req: NextRequest) {
   } catch (error) {
     // If the Gateway is unreachable (no API key, network), fall back to
     // a curated list matching the original's tempModels so the UI still works.
+    // Gateway alias slugs (provider-prefixed, not dated vendor ids) —
+    // matches the standing "AI Gateway aliases only" rule. Only used if the
+    // live catalog call above fails (no network / no Gateway key).
     const fallback = [
-      { id: 'claude-sonnet-4@20250514', name: 'Claude Sonnet 4', provider: 'anthropic',  description: null },
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google',  description: null },
-      { id: 'gpt-5', name: 'GPT-5', provider: 'openai',  description: null },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google',  description: null },
-      { id: 'o4-mini', name: 'o4 Mini', provider: 'openai',  description: null },
+      { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', provider: 'anthropic', description: null },
+      { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', description: null },
+      { id: 'openai/gpt-5.1', name: 'GPT-5.1', provider: 'openai', description: null },
+      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', description: null },
+      { id: 'openai/gpt-5.1-mini', name: 'GPT-5.1 Mini', provider: 'openai', description: null },
     ];
     return NextResponse.json({ models: fallback });
   }

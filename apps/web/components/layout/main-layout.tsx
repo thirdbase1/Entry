@@ -1,6 +1,6 @@
 'use client';
 
-import { EditIcon, AllDocsIcon, FileIcon, PageIcon } from '@blocksuite/icons/rc';
+import { EditIcon, AllDocsIcon, FileIcon, PageIcon, SettingsIcon } from '@blocksuite/icons/rc';
 import { ChatIcon } from '@/components/icons/chat-icon';
 import { AnimatePresence, motion } from 'framer-motion';
 import Link from 'next/link';
@@ -83,6 +83,7 @@ function SidebarContent() {
   const pathname = usePathname();
   const inChats = pathname === '/chats';
   const inLibrary = pathname.startsWith('/library');
+  const inSettings = pathname.startsWith('/settings');
 
   return (
     <div className="size-full flex flex-col">
@@ -105,6 +106,15 @@ function SidebarContent() {
           )}>
             <AllDocsIcon className="w-5 h-5 text-muted-foreground" />
             <div className="text-sm">Library</div>
+          </li>
+        </Link>
+        <Link href="/settings">
+          <li className={cn(
+            'flex items-center gap-3 h-[30px] px-2 rounded hover:bg-accent transition-colors cursor-pointer',
+            inSettings && 'bg-accent'
+          )}>
+            <SettingsIcon className="w-5 h-5 text-muted-foreground" />
+            <div className="text-sm">Settings</div>
           </li>
         </Link>
       </div>
