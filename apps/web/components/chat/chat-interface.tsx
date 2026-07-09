@@ -156,7 +156,6 @@ function ChatInterfaceInner({
   const isBusy = agent.status === 'submitted' || agent.status === 'streaming';
   const messages = agent.data.messages;
   const downArrowRef = useRef<DownArrowRef>(null);
-  const [showArrow, setShowArrow] = useState(false);
 
   const scrollToBottom = useCallback(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });

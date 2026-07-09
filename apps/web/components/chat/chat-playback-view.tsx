@@ -69,7 +69,15 @@ export function ChatPlaybackView({
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 rounded-full border bg-card text-card-foreground shadow-lg px-4 h-12">
         {!finished ? (
           <>
-            <span className="text-sm text-muted-foreground">Replaying… ({revealCount}/{allMessages.length})</span>
+            <span className="text-sm text-muted-foreground">
+              {playing ? 'Replaying…' : 'Paused'} ({revealCount}/{allMessages.length})
+            </span>
+            <button
+              onClick={() => setPlaying(p => !p)}
+              className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-card hover:bg-accent h-8 px-3"
+            >
+              {playing ? 'Pause' : 'Resume'}
+            </button>
             <button
               onClick={() => setRevealCount(allMessages.length)}
               className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 h-8 px-3"
@@ -81,7 +89,10 @@ export function ChatPlaybackView({
           <>
             <span className="text-sm text-muted-foreground">Replay finished</span>
             <button
-              onClick={() => setRevealCount(0)}
+              onClick={() => {
+                setPlaying(true);
+                setRevealCount(0);
+              }}
               className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-card hover:bg-accent h-8 px-3"
             >
               Watch again

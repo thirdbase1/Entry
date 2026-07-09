@@ -23,6 +23,17 @@ interface TodoItem {
   status: string;
 }
 
+/** Real shape of eve's built-in `todo` tool output (verified directly
+ * against node_modules/eve/dist/src/runtime/framework-tools/todo.js —
+ * same source todo-list-result.tsx already reads correctly): `{ todos:
+ * [{content, priority, status}], counts }`. No `id`/`title` fields exist
+ * at all. */
+interface RawTodoItem {
+  content: string;
+  priority: 'high' | 'medium' | 'low';
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+}
+
 const statusToCardStatus = (status: string): CardStatus => {
   if (status === 'completed' || status === 'done') return 'done';
   if (status === 'in_progress' || status === 'in-progress' || status === 'processing') return 'inProgress';
@@ -73,26 +84,42 @@ const getIcon = (status: CardStatus) => {
   }
 };
 
-/** Extract todos from eve message parts that are todo-list tool results. */
+/**
+ * Extract todos from eve message parts carrying `todo` tool results.
+ *
+ * This used to check for toolName 'todo_list_write'/'todo_list' and read
+ * `.result` with `.id`/`.title` fields — NONE of that matches eve's real
+ * built-in tool (name is 'todo', output lives on `.output` not `.result`,
+ * items only ever have `content`/`priority`/`status`, no `id`/`title` at
+ * all). Net effect: this always returned zero todos, so the whole
+ * aggregated bar above the chat input never rendered, for any
+ * conversation, ever — a totally dead feature.
+ *
+ * Also important: eve's `todo` tool does a FULL-LIST REPLACE on every
+ * call (see todo.js's executeTodoTool — each call's output is the
+ * complete current list, not a diff/append). So this must only read the
+ * MOST RECENT `todo` call in the conversation, not concatenate every
+ * call's output — doing the latter would multiply every item by however
+ * many times the model updated the list over the conversation.
+ */
 function extractAllTodosFromMessages(messages: readonly EveMessage[]): TodoItem[] {
-  const todos: TodoItem[] = [];
+  let latest: EveDynamicToolPart | undefined;
   for (const msg of messages) {
     for (const part of msg.parts as readonly EveMessagePart[]) {
       if (part.type !== 'dynamic-tool') continue;
       const toolPart = part as EveDynamicToolPart;
       const toolName = toolPart.toolMetadata?.eve?.name ?? toolPart.toolName;
-      if (toolName !== 'todo_list_write' && toolName !== 'todo_list') continue;
-      const result = (toolPart as any).result as { todos?: TodoItem[] } | undefined;
-      if (result?.todos && Array.isArray(result.todos)) {
-        for (const todo of result.todos) {
-          if (todo.id && todo.title) {
-            todos.push({ id: todo.id, title: todo.title, status: todo.status ?? 'todo' });
-          }
-        }
-      }
+      if (toolName !== 'todo') continue;
+      if (toolPart.state !== 'output-available') continue;
+      latest = toolPart; // messages are in chronological order — last match wins
     }
   }
-  return todos;
+  if (!latest) return [];
+  const output = latest.output as { todos?: RawTodoItem[] } | undefined;
+  if (!output?.todos || !Array.isArray(output.todos)) return [];
+  return output.todos
+    .filter(todo => todo?.content)
+    .map((todo, i) => ({ id: `${latest!.toolCallId}-${i}`, title: todo.content, status: todo.status ?? 'pending' }));
 }
 
 function groupTodosByStatus(todos: TodoItem[]) {

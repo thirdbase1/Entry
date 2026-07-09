@@ -17,6 +17,7 @@ import { ChooseResult } from './renderers/choose-result';
 import { TodoListResult } from './renderers/todo-list-result';
 import { PythonCodeResult } from './renderers/python-code-result';
 import { MakeItRealResult } from './renderers/make-it-real-result';
+import { RunModelCard } from './renderers/run-model-card';
 
 interface MessageRendererProps {
   message: { id: string; role: 'user' | 'assistant'; parts: readonly EveMessagePart[] };
@@ -74,6 +75,8 @@ function ToolPart({
       return <PythonCodeResult part={part} />;
     case 'todo':
       return <TodoListResult part={part} />;
+    case 'run_model':
+      return <RunModelCard part={part} />;
     case 'choose': {
       const input = (part.state === 'output-available' ? part.output : part.input) as { options?: string[] } | undefined;
       const options = input?.options ?? [];

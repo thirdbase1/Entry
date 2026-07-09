@@ -172,6 +172,23 @@ export async function getFile(
   return prisma.aiUserFiles.findFirst({ where: { userId, ...options } });
 }
 
+/**
+ * Reconstructs a file's full extracted text by concatenating its embedding
+ * chunks in order. Files have no single `content` column like docs do
+ * (AiUserFiles only stores fileName/mimeType/size/blobId) — the actual
+ * extracted text only exists chunked in AiUserFileEmbedding, produced by
+ * the indexing job after upload. Returns '' if indexing hasn't finished
+ * yet (or produced no embeddings), so callers can fall back gracefully.
+ */
+export async function getFileContent(userId: string, fileId: string): Promise<string> {
+  const chunks = await prisma.aiUserFileEmbedding.findMany({
+    where: { userId, fileId },
+    orderBy: { chunk: 'asc' },
+    select: { content: true },
+  });
+  return chunks.map(c => c.content).join('\n');
+}
+
 export async function updateFile(userId: string, fileId: string, metadata = ''): Promise<CopilotUserFile> {
   return prisma.aiUserFiles.update({
     where: { userId_fileId: { userId, fileId } },

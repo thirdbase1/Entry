@@ -302,7 +302,18 @@ export async function resolveContextForSend(attached: AttachedContext[]): Promis
           const text = extractChatTextClient(data.events, 10);
           return `[Attached prior chat: "${ctx.label}"]\n${text || '(no messages yet)'}`;
         }
-        return `[Attached file: "${ctx.label}"]`;
+        // File records have no `content` column of their own — the real
+        // extracted text lives chunked in AiUserFileEmbedding, joined
+        // server-side by getFileContent() and returned as `content` on
+        // this GET route. This used to just return a bare label with
+        // ZERO actual file content attached — silently useless.
+        const fileRes = await fetch(`/api/copilot/files/${ctx.id}`);
+        if (!fileRes.ok) return `[Referenced file "${ctx.label}" — could not be loaded]`;
+        const fileData = await fileRes.json();
+        const fileContent = typeof fileData.content === 'string' ? fileData.content.trim() : '';
+        return fileContent
+          ? `[Attached file: "${ctx.label}"]\n${fileContent}`
+          : `[Attached file: "${ctx.label}" — still indexing, content not available yet]`;
       } catch {
         return `[Referenced "${ctx.label}" — could not be loaded]`;
       }
