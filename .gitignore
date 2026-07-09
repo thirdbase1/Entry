@@ -21,3 +21,6 @@ packages/db/src/generated/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+apps/agent/.eve/
+.vercel/output/
+apps/web/.next/
