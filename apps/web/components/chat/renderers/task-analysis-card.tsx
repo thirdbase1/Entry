@@ -1,31 +1,39 @@
 'use client';
 
+/**
+ * Ported 1:1 from pages/chats/renderers/task-analysis-card.tsx — same
+ * GenericToolResult shell as ai-reasoning-card.tsx, ThinkingIcon, static
+ * "Task Analysis" title, content = reasoning + suggestedApproach joined by
+ * a blank line. Adapted field names for eve's task_analysis tool output
+ * (plan/summary) mapped onto the original's reasoning/suggestedApproach
+ * slots — reasoning <- summary, suggestedApproach <- plan steps joined as
+ * a numbered markdown list (closest equivalent content shape).
+ */
 import type { EveDynamicToolPart } from 'eve/react';
+import { ThinkingIcon } from '@blocksuite/icons/rc';
+import { MarkdownText } from '@/components/ui/markdown';
+import { GenericToolResult } from './generic-tool-result';
+import { GenericToolCalling } from './generic-tool-calling';
 
 export function TaskAnalysisCard({ part }: { part: EveDynamicToolPart }) {
-  const output = part.state === 'output-available' ? (part.output as { plan?: string[]; summary?: string } | undefined) : undefined;
+  const output = part.state === 'output-available' ? (part.output as { plan?: string[]; summary?: string; reasoning?: string; suggestedApproach?: string } | undefined) : undefined;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
 
+  if (isRunning || !output) {
+    return <GenericToolCalling icon={<ThinkingIcon />} title="Calling task_analysis …" />;
+  }
+
+  const reasoning = output.reasoning ?? output.summary ?? '';
+  const approach = output.suggestedApproach ?? (output.plan?.length ? output.plan.map((s, i) => `${i + 1}. ${s}`).join('\n') : '');
+  const text = [reasoning, approach].filter(Boolean).join('\n\n');
+
   return (
-    <div className="rounded-lg border border-border bg-card w-full p-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-foreground mb-2">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-muted-foreground">
-          <path d="M9 11l3 3L22 4" />
-          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-        </svg>
-        {isRunning ? 'Analyzing task…' : 'Task Analysis'}
+    <GenericToolResult icon={<ThinkingIcon />} title={<span className="text-sm font-medium">Task Analysis</span>}>
+      <div className="px-4 max-h-150 overflow-y-auto">
+        <div className="max-w-none my-2">
+          <MarkdownText text={text} className="prose prose-sm text-[13px] text-muted-foreground" />
+        </div>
       </div>
-      {output?.summary && <p className="text-sm text-muted-foreground mb-2">{output.summary}</p>}
-      {output?.plan && output.plan.length > 0 && (
-        <ul className="space-y-1">
-          {output.plan.map((step, i) => (
-            <li key={i} className="text-sm text-foreground flex gap-2">
-              <span className="text-muted-foreground">{i + 1}.</span>
-              {step}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    </GenericToolResult>
   );
 }

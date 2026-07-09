@@ -57,7 +57,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   verifyMagicLink: async (_email, token) => {
     set({ isLoading: true, error: null });
     try {
-      const { error } = await authClient.magicLink.verify({ query: { token, callbackURL: '/' } });
+      const { error } = await authClient.magicLink.verify({ query: { token, callbackURL: '/chats' } });
       if (error) throw new Error(error.message || 'Invalid code');
       const { data: session } = await authClient.getSession();
       set({ user: session?.user as User ?? null, isLoading: false });
@@ -70,7 +70,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   signInOAuth: async (provider) => {
     set({ isLoading: true, error: null });
     try {
-      await authClient.signIn.social({ provider, callbackURL: '/' });
+      // Land directly on the dashboard after a successful OAuth round-trip
+      // instead of the marketing page ('/') — avoids depending on the
+      // landing page's client-side "am I logged in now?" redirect dance,
+      // which was the root cause of users getting stuck looking at the
+      // landing page after Google sign-in instead of reaching /chats.
+      await authClient.signIn.social({ provider, callbackURL: '/chats' });
     } catch (err) {
       set({ isLoading: false, error: err instanceof Error ? err.message : 'OAuth login failed' });
       throw err;

@@ -1,6 +1,6 @@
 'use client';
 
-import { PageIcon } from '@blocksuite/icons/rc';
+import { CopyIcon, PageIcon } from '@blocksuite/icons/rc';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
 
@@ -70,6 +70,7 @@ export function DocCard({ content, title = 'Document', description }: DocCardPro
                 onClick={handleCopy}
                 className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-muted hover:bg-accent text-muted-foreground transition-colors"
               >
+                <CopyIcon className="w-3 h-3" />
                 {copied ? 'Copied' : 'Copy'}
               </button>
             </div>

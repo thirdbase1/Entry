@@ -1,24 +1,28 @@
 'use client';
 
 /**
- * Ported from pages/chats/renderers/make-it-real-result.tsx. Reuses the
- * same DocCard the doc_compose renderer uses (original also reused
- * MakeItRealResult for both doc_compose AND make_it_real results — see
- * chat-content-stream-objects.tsx's dispatch, both hit the same
- * component) — kept that sharing here as DocCard too, just a distinct
- * description string to tell the two apart.
+ * Ported 1:1 from pages/chats/renderers/make-it-real-result.tsx — original
+ * is deliberately simpler than doc-compose-result/DocCard: just the shared
+ * GenericToolResult shell (PageIcon, title, no content preview, no copy
+ * button), clickable to open the doc panel. Previously this reused
+ * DocCard (which adds a content preview + copy button doc-compose has but
+ * make-it-real's original never did) — reverted to match the original's
+ * actual simpler card.
  */
 import type { EveDynamicToolPart } from 'eve/react';
-import { DocCard } from '@/components/doc-panel/doc-card';
+import { PageIcon } from '@blocksuite/icons/rc';
+import { useOpenDocContext } from '@/contexts/doc-panel-context';
+import { GenericToolResult } from './generic-tool-result';
 import { GeneratingCard } from './generating-card';
 
 export function MakeItRealResult({ part }: { part: EveDynamicToolPart }) {
   const input = part.input as { markdown?: string } | undefined;
-  const output = part.state === 'output-available' ? (part.output as { content?: string } | undefined) : undefined;
+  const output = part.state === 'output-available' ? (part.output as { content?: string; title?: string } | undefined) : undefined;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
+  const { openDoc } = useOpenDocContext();
 
   if (isRunning) {
-    return <GeneratingCard title="Making it real…" content={input?.markdown} />;
+    return <GeneratingCard title="Generating..." content={input?.markdown} />;
   }
 
   if (part.state === 'output-error') {
@@ -30,5 +34,13 @@ export function MakeItRealResult({ part }: { part: EveDynamicToolPart }) {
   }
 
   const content = output?.content ?? input?.markdown ?? '';
-  return <DocCard content={content} title="Redesigned document" description="Click to open in the doc editor" />;
+  const title = output?.title ?? 'Redesigned document';
+
+  const handleClick = () => {
+    const tempId = 'temp-' + Date.now();
+    sessionStorage.setItem(`doc:${tempId}`, JSON.stringify({ content, title }));
+    openDoc(tempId);
+  };
+
+  return <GenericToolResult icon={<PageIcon />} title={title} onClick={handleClick} />;
 }

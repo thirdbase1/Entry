@@ -1,61 +1,42 @@
 'use client';
 
+/**
+ * Ported 1:1 from the "Default tool result display" branch of
+ * chat-content-stream-objects.tsx (the original's fallback for any
+ * tool-result without a dedicated renderer): GenericToolResult shell,
+ * CheckBoxCheckSolidIcon, title `${toolName} result` using the RAW
+ * tool name (confirmed against the original — it does NOT humanize/
+ * title-case the name, e.g. "web_search_cloudsway result" verbatim), body
+ * = a JSON.stringify <pre> block. Running state reuses the shared
+ * GenericToolCalling ticking-timer placeholder with the same raw-name
+ * title format: `Calling ${toolName} ...`.
+ */
 import type { EveDynamicToolPart } from 'eve/react';
-import { useState } from 'react';
+import { CheckBoxCheckSolidIcon } from '@blocksuite/icons/rc';
+import { GenericToolResult } from './generic-tool-result';
+import { GenericToolCalling } from './generic-tool-calling';
 
-function humanizeToolName(name: string) {
-  return name
-    .split('_')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-/** Fallback card for any tool call that doesn't have a dedicated renderer. */
 export function GenericToolCard({ part }: { part: EveDynamicToolPart }) {
-  const [expanded, setExpanded] = useState(false);
   const name = part.toolMetadata?.eve?.name ?? part.toolName;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
-  const isError = part.state === 'output-error';
+
+  if (isRunning) {
+    return <GenericToolCalling title={`Calling ${name} …`} />;
+  }
+
+  if (part.state === 'output-error') {
+    return (
+      <GenericToolResult icon={<CheckBoxCheckSolidIcon />} title={`${name} failed`}>
+        <div className="p-3 text-sm text-destructive">{part.errorText}</div>
+      </GenericToolResult>
+    );
+  }
 
   return (
-    <div className="rounded-lg border border-border bg-card w-full overflow-hidden">
-      <button
-        onClick={() => setExpanded(e => !e)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent transition-colors"
-      >
-        <span
-          className={
-            isRunning
-              ? 'w-2 h-2 rounded-full bg-primary animate-pulse'
-              : isError
-                ? 'w-2 h-2 rounded-full bg-destructive'
-                : 'w-2 h-2 rounded-full bg-muted-foreground'
-          }
-        />
-        <span className="font-medium text-foreground">{humanizeToolName(name)}</span>
-        <span className="text-muted-foreground text-xs ml-auto">
-          {isRunning ? 'Running…' : isError ? 'Failed' : 'Done'}
-        </span>
-      </button>
-      {expanded && (
-        <div className="px-3 pb-3 text-xs text-muted-foreground space-y-2">
-          {part.input !== undefined && (
-            <div>
-              <div className="font-medium mb-1">Input</div>
-              <pre className="bg-muted rounded p-2 overflow-x-auto">{JSON.stringify(part.input, null, 2)}</pre>
-            </div>
-          )}
-          {part.state === 'output-available' && (
-            <div>
-              <div className="font-medium mb-1">Output</div>
-              <pre className="bg-muted rounded p-2 overflow-x-auto">{JSON.stringify(part.output, null, 2)}</pre>
-            </div>
-          )}
-          {part.state === 'output-error' && (
-            <div className="text-destructive">{part.errorText}</div>
-          )}
-        </div>
-      )}
-    </div>
+    <GenericToolResult icon={<CheckBoxCheckSolidIcon />} title={`${name} result`}>
+      <pre className="whitespace-pre-wrap break-all text-xs max-h-48 overflow-auto p-3">
+        {JSON.stringify(part.output, null, 2)}
+      </pre>
+    </GenericToolResult>
   );
 }

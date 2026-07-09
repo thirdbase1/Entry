@@ -1,20 +1,33 @@
 'use client';
 
 /**
- * Ported from pages/chats/renderers/ai-reasoning-card.tsx — collapsible
- * "Thinking… Ns" / "Thought for Ns" header over the reasoning text.
- * Simplified from the original: no fake progressive-typing simulation
- * (that existed because the original's GraphQL layer delivered full
- * reasoning text in one shot; eve streams real reasoning deltas token by
- * token already, so the real streaming IS the progressive effect —
- * faking a second one on top would double up).
+ * Ported 1:1 from pages/chats/renderers/ai-reasoning-card.tsx. Uses the
+ * real shared GenericToolResult shell (rounded-2xl, h-14 header, expand
+ * icon toggle, box-shadow, AnimatePresence height animation — collapsed by
+ * default like every other tool card in the original) instead of a
+ * hand-rolled simplified collapsible. Icon is a spinner only while
+ * `loading`, none once finished (matches original: `icon={loading ?
+ * <Loading /> : null}`). Title is "Thinking… Ns" while loading, "Thought
+ * for Ns" once done, "Thoughts" if there was never a duration — exact
+ * original copy/format.
+ *
+ * Simplified from the original in one intentional way: no fake
+ * progressive-typing simulation over the full text (that existed because
+ * the original's GraphQL layer delivered full reasoning text in one shot;
+ * eve streams real reasoning deltas token by token already, so the real
+ * streaming IS the progressive effect — faking a second one on top would
+ * double up).
  */
 import { useEffect, useRef, useState } from 'react';
-import { cn } from '@/lib/utils';
+import { MarkdownText } from '@/components/ui/markdown';
+import { GenericToolResult } from './generic-tool-result';
+
+function Spinner() {
+  return <span className="inline-block w-4 h-4 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin" />;
+}
 
 export function AIReasoningCard({ text, loading = false }: { text: string; loading?: boolean }) {
   const [elapsed, setElapsed] = useState(0);
-  const [expanded, setExpanded] = useState(false);
   const startRef = useRef(Date.now());
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -32,33 +45,29 @@ export function AIReasoningCard({ text, loading = false }: { text: string; loadi
 
   if (!text) return null;
 
-  return (
-    <div className="rounded-lg border border-border bg-card w-full overflow-hidden">
-      <button
-        onClick={() => setExpanded(e => !e)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent transition-colors"
-      >
-        {loading && <span className="w-2 h-2 rounded-full bg-primary animate-pulse shrink-0" />}
-        <span className="font-medium text-foreground">
-          {loading ? `Thinking… ${elapsed}s` : `Thought for ${elapsed || ''}${elapsed ? 's' : ''}`.trim()}
-        </span>
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          className={cn('ml-auto text-muted-foreground transition-transform', expanded && 'rotate-180')}
-        >
-          <path d="M6 9l6 6 6-6" />
-        </svg>
-      </button>
-      {(expanded || loading) && (
-        <div ref={contentRef} className="px-3 pb-3 text-xs text-muted-foreground max-h-40 overflow-y-auto whitespace-pre-wrap">
-          {text}
-        </div>
-      )}
+  const statusText = loading ? (
+    <div className="flex items-center gap-1">
+      <span className="text-sm font-medium">Thinking...</span>
+      <span className="text-sm font-normal">{elapsed}s</span>
     </div>
+  ) : elapsed > 0 ? (
+    <div className="flex items-center gap-1">
+      <span className="text-sm font-medium">Thought for</span>
+      <span className="text-sm font-normal">{elapsed}s</span>
+    </div>
+  ) : (
+    <div className="flex items-center gap-1">
+      <span className="text-sm font-medium">Thoughts</span>
+    </div>
+  );
+
+  return (
+    <GenericToolResult icon={loading ? <Spinner /> : null} title={statusText}>
+      <div className="px-4 max-h-150 overflow-y-auto">
+        <div ref={contentRef} className="max-w-none my-2">
+          <MarkdownText text={text} loading={loading} className="prose prose-sm text-[13px] text-muted-foreground" />
+        </div>
+      </div>
+    </GenericToolResult>
   );
 }

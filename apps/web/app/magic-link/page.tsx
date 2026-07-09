@@ -23,7 +23,7 @@ function MagicLinkPageInner() {
 
     const email = params.get('email');
     const token = params.get('token');
-    const redirectUri = params.get('redirect_uri') || '/';
+    const redirectUri = params.get('redirect_uri') || '/chats';
 
     if (!email || !token) {
       router.replace('/sign-in?error=Invalid%20magic%20link');

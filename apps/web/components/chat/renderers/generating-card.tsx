@@ -30,7 +30,7 @@ export function GeneratingCard({
   }, [content]);
 
   return (
-    <div className="rounded-lg border border-border bg-card w-full p-4">
+    <div className="rounded-xl border border-border bg-card w-full p-4">
       <header className="flex items-center gap-2">
         {icon ?? <span className="w-3.5 h-3.5 rounded-full border-2 border-primary border-t-transparent animate-spin shrink-0" />}
         {title && <div className="text-sm font-medium text-foreground truncate flex-1">{title}</div>}
@@ -39,7 +39,7 @@ export function GeneratingCard({
         <div
           ref={contentRef}
           className="mt-3 max-h-20 overflow-hidden text-xs text-muted-foreground leading-5 whitespace-pre-wrap"
-          style={{ maskImage: 'linear-gradient(to bottom, black 0%, black 50%, transparent 100%)' }}
+          style={{ maskImage: 'linear-gradient(to bottom, transparent 0%, black 50%, transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 50%, transparent 100%)' }}
         >
           {content}
         </div>

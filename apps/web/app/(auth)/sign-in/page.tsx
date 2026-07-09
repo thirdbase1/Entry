@@ -10,6 +10,7 @@
  * existed to remove).
  */
 'use client';
+import { GoogleDuotoneIcon, GithubDuotoneIcon } from '@blocksuite/icons/rc';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useState } from 'react';
@@ -24,26 +25,20 @@ import { AuthLayout } from '../auth-layout';
 import styles from './sign-in.module.css';
 
 type Step = 'methodSelect' | 'password' | 'magic';
-type OAuthProvider = 'google' | 'github';
+type OAuthProvider = 'Google' | 'GitHub';
 
-function GoogleIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20">
-      <path fill="#4285F4" d="M19.6 10.23c0-.68-.06-1.36-.18-2H10v3.79h5.4a4.6 4.6 0 0 1-2 3.02v2.5h3.24c1.9-1.75 2.96-4.34 2.96-7.31Z" />
-      <path fill="#34A853" d="M10 20c2.7 0 4.96-.9 6.62-2.44l-3.24-2.5c-.9.6-2.05.96-3.38.96-2.6 0-4.8-1.76-5.59-4.12H1.06v2.59A10 10 0 0 0 10 20Z" />
-      <path fill="#FBBC05" d="M4.41 11.9a6 6 0 0 1 0-3.8V5.51H1.06a10 10 0 0 0 0 8.98l3.35-2.59Z" />
-      <path fill="#EA4335" d="M10 3.98c1.47 0 2.79.5 3.83 1.5l2.87-2.87A9.6 9.6 0 0 0 10 0 10 10 0 0 0 1.06 5.51L4.41 8.1C5.2 5.74 7.4 3.98 10 3.98Z" />
-    </svg>
-  );
-}
+const providerIcons: Record<OAuthProvider, React.ReactNode> = {
+  Google: <GoogleDuotoneIcon />,
+  GitHub: <GithubDuotoneIcon />,
+};
 
 function OAuthButton({ provider, redirectUrl }: { provider: OAuthProvider; redirectUrl?: string }) {
   const handleClick = async () => {
     try {
       const { authClient } = await import('@/lib/auth-client');
       await authClient.signIn.social({
-        provider,
-        callbackURL: redirectUrl ?? '/',
+        provider: provider.toLowerCase(),
+        callbackURL: redirectUrl ?? '/chats',
       });
     } catch {
       // stay on the page; user can retry
@@ -52,7 +47,7 @@ function OAuthButton({ provider, redirectUrl }: { provider: OAuthProvider; redir
 
   return (
     <button onClick={handleClick} className={styles.oauthButton}>
-      {provider === 'google' ? <GoogleIcon /> : null}
+      {providerIcons[provider] ?? null}
       Continue with {provider}
     </button>
   );
@@ -61,7 +56,7 @@ function OAuthButton({ provider, redirectUrl }: { provider: OAuthProvider; redir
 function SignInPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectUrl = searchParams.get('redirect') || '/';
+  const redirectUrl = searchParams.get('redirect') || '/chats';
 
   const { user, isLoading, error, clearError, checkUserByEmail, signInPassword, sendMagicLink, verifyMagicLink } = useAuthStore();
 
@@ -161,7 +156,7 @@ function SignInPageInner() {
               <span className={styles.orText}>OR</span>
               <div className={cn('flex-1', styles.line, 'reverse')} />
             </div>
-            <OAuthButton provider="google" redirectUrl={redirectUrl} />
+            <OAuthButton provider="Google" redirectUrl={redirectUrl} />
           </>
         )}
 
