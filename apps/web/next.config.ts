@@ -147,9 +147,6 @@ const nextConfig: NextConfig = {
   // `resolve.extensionAlias` is the documented workaround, so this app
   // builds with `next build --webpack` until Turbopack gains parity.
   webpack(config) {
-    console.log('[DEBUG next.config webpack()] running, config.resolve.alias type:', typeof config.resolve.alias, Array.isArray(config.resolve.alias) ? 'array' : 'not-array');
-    console.log('[DEBUG next.config webpack()] __dirname:', __dirname);
-
     config.resolve.extensionAlias = {
       '.js': ['.ts', '.tsx', '.js'],
     };
@@ -160,10 +157,15 @@ const nextConfig: NextConfig = {
     // bypasses the plugin and reliably resolves all @/ paths.
     // See: https://nextjs.org/docs/messages/invalid-resolve-alias
     if (config.resolve.alias && typeof config.resolve.alias === 'object' && !Array.isArray(config.resolve.alias)) {
-      config.resolve.alias['@/'] = resolve(__dirname, './');
-      console.log('[DEBUG next.config webpack()] set alias @/ ->', resolve(__dirname, './'));
-    } else {
-      console.log('[DEBUG next.config webpack()] SKIPPED alias set, alias was:', config.resolve.alias);
+      // NOTE: the alias key must be '@' (no trailing slash). Webpack's
+      // enhanced-resolve AliasPlugin does a prefix match by checking
+      // request === key OR request.startsWith(key + '/') — so a key of
+      // '@/' would require the request to start with '@//' (wrong,
+      // never matches). '@' is correct: '@/components/x'.startsWith('@' + '/')
+      // = '@/components/x'.startsWith('@/') = true, then the matched
+      // prefix '@' is replaced, leaving '/components/x' appended to
+      // our resolved path.
+      config.resolve.alias['@'] = resolve(__dirname, './');
     }
 
 
