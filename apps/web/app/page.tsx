@@ -122,9 +122,18 @@ function LandingContent({ onGetStarted }: { onGetStarted: () => void }) {
             Agentic AI
           </h1>
           <p className={styles.subtitle}>
-            Search, think, and complete general tasks — Entry is a
-            multimodal, agentic AI that combines the power of the best
-            foundation models.
+            {/* Manual break matching the real open-agent.io's exact wrap
+                point. Natural CSS reflow alone puts the break in a
+                different spot here because "Entry" is shorter than
+                "Open-agent" (fewer characters at the same container
+                width) — forcing the same break point guarantees the
+                same two-line shape on desktop regardless of that word-
+                length difference. Hidden below the tablet breakpoint so
+                it doesn't fight the mobile subtitle's own reflow/padding
+                rules further down this stylesheet. */}
+            Search, think, and complete general tasks — Entry is a multimodal, agentic
+            <br className={styles.subtitleBreak} />
+            {' '}AI that combines the power of the best foundation models.
           </p>
           <button onClick={onGetStarted} className={styles.ctaButton}>
             Get Started

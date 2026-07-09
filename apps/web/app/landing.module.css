@@ -124,6 +124,9 @@
   font-weight: 500;
   line-height: 1.8125rem;
 }
+.subtitleBreak {
+  display: block;
+}
 .ctaButton {
   color: #fff;
   cursor: pointer;
@@ -315,6 +318,9 @@
     max-width: 90%;
     margin-bottom: 1.5rem;
     font-size: 1.1rem;
+  }
+  .subtitleBreak {
+    display: none;
   }
   .productImageWrapper {
     width: 90%;

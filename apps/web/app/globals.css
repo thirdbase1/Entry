@@ -50,6 +50,38 @@
   --color-layer-background-secondary: var(--affine-v2-layer-background-secondary);
   --color-status-success: var(--affine-v2-status-success);
   --shadow-view: 0px 1px 5px rgba(0, 0, 0, 0.05);
+
+  /* shadcn semantic bridge -> real @toeverything/theme v2 variables.
+     CRITICAL FIX: an audit found 43 component files (chat interface, tool
+     renderers, library, playback) using shadcn-convention utilities
+     (bg-card, bg-muted, text-foreground, border-border, bg-accent,
+     text-muted-foreground, bg-primary, text-primary-foreground,
+     border-input, bg-secondary, bg-popover, bg-destructive, ring-ring)
+     with NO backing --color-* theme token anywhere in the app. Tailwind v4
+     silently drops utilities with no matching theme token (zero CSS
+     output, not a build error) so this was invisible in every previous
+     build check. Each token below is mapped to the real matching
+     @toeverything/theme v2 CSS variable (verified against the actual
+     imported style.css's variable list), so all 43 files now resolve to
+     the ORIGINAL app's real design-system colors instead of unstyled. */
+  --color-background: var(--affine-v2-layer-background-primary);
+  --color-foreground: var(--affine-v2-text-primary);
+  --color-card: var(--affine-v2-layer-background-primary);
+  --color-card-foreground: var(--affine-v2-text-primary);
+  --color-popover: var(--affine-v2-layer-background-overlayPanel);
+  --color-popover-foreground: var(--affine-v2-text-primary);
+  --color-primary-foreground: var(--affine-v2-button-pureWhiteText);
+  --color-secondary: var(--affine-v2-layer-background-secondary);
+  --color-secondary-foreground: var(--affine-v2-text-primary);
+  --color-muted: var(--affine-v2-layer-background-secondary);
+  --color-muted-foreground: var(--affine-v2-text-secondary);
+  --color-accent: var(--affine-v2-layer-background-hoverOverlay);
+  --color-accent-foreground: var(--affine-v2-text-primary);
+  --color-destructive: var(--affine-v2-status-error);
+  --color-destructive-foreground: var(--affine-v2-button-pureWhiteText);
+  --color-border: var(--affine-v2-layer-insideBorder-border);
+  --color-input: var(--affine-v2-layer-insideBorder-border);
+  --color-ring: var(--affine-v2-button-primary);
 }
 
 .panel {

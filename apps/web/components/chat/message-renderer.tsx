@@ -135,7 +135,7 @@ export const MessageRenderer = memo(function MessageRenderer({
   return (
     <div
       className={cn(
-        'flex flex-col self-end p-3 inline-block max-w-full rounded-lg mb-4 bg-muted text-foreground'
+        'flex flex-col self-end p-3 inline-block max-w-full rounded-lg mb-4 bg-[#f3f3f3] text-foreground'
       )}
     >
       {text}

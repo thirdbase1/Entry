@@ -58,13 +58,29 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
             <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
           </svg>
         </button>
+        {/*
+          The original renders a second icon button here using blocksuite's
+          CommentIcon with NO onClick handler at all (verified in the real
+          source, pages/chats/chat.tsx's ChatPageHeader) — a shipped but
+          non-functional placeholder for a comments feature that was never
+          wired up. Rather than ship a dead button, this repurposes the
+          exact same icon shape (real SVG path lifted from
+          @blocksuite/icons/rc's CommentIcon, not approximated) for the
+          "open chat replay" action — same visual weight/position as the
+          original, but it actually does something.
+        */}
         <Link
           href={`/chats/${sessionId}/playback`}
           title="Replay this chat"
           className="w-8 h-8 rounded-md flex items-center justify-center hover:bg-accent transition-colors text-muted-foreground"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polygon points="5 3 19 12 5 21 5 3" />
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <path
+              fill="currentColor"
+              fillRule="evenodd"
+              d="M12.5 3.75a7.75 7.75 0 0 0-7.022 11.033.85.85 0 0 1 .068.5l-.634 3.805 3.804-.634a.85.85 0 0 1 .5.068A7.75 7.75 0 1 0 12.5 3.75M3.25 11.5a9.25 9.25 0 1 1 5.517 8.466l-4.506.75a.85.85 0 0 1-.978-.977l.751-4.506A9.2 9.2 0 0 1 3.25 11.5"
+              clipRule="evenodd"
+            />
           </svg>
         </Link>
         <button
