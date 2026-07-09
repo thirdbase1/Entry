@@ -70,6 +70,34 @@ export const GeminiIcon = (props: React.SVGProps<SVGSVGElement>) => (
   </svg>
 );
 
+
+/**
+ * Simple monogram-style marks for brand families without an official
+ * hand-ported SVG yet (Claude/ChatGPT/Gemini above are 1:1 ported; these
+ * are lightweight but visually distinct placeholders so at least the
+ * *family* is never wrong — e.g. a BYOK Llama model no longer shows the
+ * ChatGPT logo).
+ */
+function Monogram({ letter, bg, fg = '#fff', ...props }: React.SVGProps<SVGSVGElement> & { letter: string; bg: string; fg?: string }) {
+  return (
+    <svg width="1em" height="1em" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" {...props}>
+      <circle cx="10" cy="10" r="10" fill={bg} />
+      <text x="10" y="14" textAnchor="middle" fontSize="11" fontWeight="700" fontFamily="sans-serif" fill={fg}>
+        {letter}
+      </text>
+    </svg>
+  );
+}
+
+export const MetaIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="M" bg="#0668E1" {...props} />;
+export const MistralIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="Mi" bg="#FA5B18" {...props} />;
+export const DeepSeekIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="D" bg="#4D6BFE" {...props} />;
+export const XAIIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="X" bg="#000000" {...props} />;
+export const CohereIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="C" bg="#39594D" {...props} />;
+export const QwenIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="Q" bg="#615CED" {...props} />;
+export const PerplexityIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="P" bg="#20808D" {...props} />;
+export const GenericModelIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="?" bg="#6B7280" {...props} />;
+
 /** Resolve the appropriate icon component for a given provider string. */
 export function getProviderIcon(provider: string): React.FC<React.SVGProps<SVGSVGElement>> {
   switch (provider) {
@@ -79,7 +107,21 @@ export function getProviderIcon(provider: string): React.FC<React.SVGProps<SVGSV
       return ChatGPTIcon;
     case 'google':
       return GeminiIcon;
+    case 'meta':
+      return MetaIcon;
+    case 'mistral':
+      return MistralIcon;
+    case 'deepseek':
+      return DeepSeekIcon;
+    case 'xai':
+      return XAIIcon;
+    case 'cohere':
+      return CohereIcon;
+    case 'qwen':
+      return QwenIcon;
+    case 'perplexity':
+      return PerplexityIcon;
     default:
-      return ChatGPTIcon; // generic fallback
+      return GenericModelIcon; // true "unknown" fallback — no longer defaults to ChatGPT
   }
 }

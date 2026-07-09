@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { gateway } from '@ai-sdk/gateway';
+import { inferModelFamily } from '@/lib/model-provider';
 
 /**
  * GET /api/server/models
@@ -20,7 +21,7 @@ export async function GET(_req: NextRequest) {
       .map(m => ({
         id: m.id,
         name: m.name || m.id,
-        provider: inferProvider(m.id),
+        provider: inferModelFamily(m.id),
         
         description: m.description || null,
       }))
@@ -42,15 +43,4 @@ export async function GET(_req: NextRequest) {
     ];
     return NextResponse.json({ models: fallback });
   }
-}
-
-function inferProvider(modelId: string): string {
-  const id = modelId.toLowerCase();
-  if (id.includes('claude') || id.includes('anthropic')) return 'anthropic';
-  if (id.includes('gpt') || id.includes('o3') || id.includes('o4') || id.includes('openai')) return 'openai';
-  if (id.includes('gemini') || id.includes('google')) return 'google';
-  if (id.includes('llama') || id.includes('meta')) return 'meta';
-  if (id.includes('mistral') || id.includes('mixtral')) return 'mistral';
-  if (id.includes('deepseek')) return 'deepseek';
-  return 'unknown';
 }

@@ -96,43 +96,84 @@ export default defineTool({
     "turn's context contains a requestedModel/byokModelId — see <model_routing> in your " +
     'instructions for the exact trigger rule. Pass the full user task; this tool runs the selected ' +
     'model with the SAME tools you have (web search, browser, python, docs, etc.) and returns its ' +
-    'final answer.',
+    'final answer. On failure this returns a structured `{ error }` instead of throwing, so the ' +
+    "turn always ends with a real message the caller can relay — never silence.",
   inputSchema,
   async execute(input, ctx) {
-    const model = await resolveModel(input, ctx as unknown as ToolExecCtx);
     const execCtx = ctx as unknown as ToolExecCtx;
 
-    const { text, steps } = await generateText({
-      model,
-      temperature: input.parameters?.temperature,
-      maxOutputTokens: input.parameters?.maxOutputTokens,
-      stopWhen: stepCountIs(12),
-      messages: [{ role: 'user', content: input.task }],
-      tools: {
-        choose: tool({ description: choose.description, inputSchema: choose.inputSchema, execute: choose.execute }),
-        web_crawl: tool({ description: webCrawl.description, inputSchema: webCrawl.inputSchema, execute: webCrawl.execute }),
-        web_search: tool({ description: webSearch.description, inputSchema: webSearch.inputSchema, execute: webSearch.execute }),
-        browser_use: tool({
-          description: browserUse.description,
-          inputSchema: browserUse.inputSchema,
-          execute: (toolInput: { task: string }) => browserUse.execute(toolInput, execCtx),
-        }),
-        task_analysis: tool({ description: taskAnalysis.description, inputSchema: taskAnalysis.inputSchema, execute: taskAnalysis.execute }),
-        code_artifact: tool({ description: codeArtifact.description, inputSchema: codeArtifact.inputSchema, execute: codeArtifact.execute }),
-        make_it_real: tool({
-          description: makeItReal.description,
-          inputSchema: makeItReal.inputSchema,
-          execute: (toolInput: { instructions?: string; markdown: string }) => makeItReal.execute(toolInput, execCtx),
-        }),
-        doc_compose: tool({
-          description: docCompose.description,
-          inputSchema: docCompose.inputSchema,
-          execute: (toolInput: { title: string; userPrompt: string }) => docCompose.execute(toolInput, execCtx),
-        }),
-        python_coding: tool({ description: pythonCoding.description, inputSchema: pythonCoding.inputSchema, execute: pythonCoding.execute }),
-      },
-    });
+    // Every failure path below returns a plain object instead of throwing.
+    // Reason: an uncaught throw here can end the whole turn in eve's
+    // terminal "session.failed" state, which the chat UI has no bespoke
+    // renderer for — from the user's side that reads as "I sent a message
+    // and nothing happened at all". Returning `{ error }` instead keeps
+    // the turn in normal tool-result flow, so the orchestrating model
+    // always has real text to relay back (per <model_routing>, it must
+    // pass along run_model's answer — an error string still satisfies that).
+    let model: LanguageModel;
+    try {
+      model = await resolveModel(input, execCtx);
+    } catch (err) {
+      return {
+        answer: '',
+        error: `Could not use the requested model: ${err instanceof Error ? err.message : String(err)}. Check that the provider connection (base URL, API key, model id) is correct in Settings.`,
+        stepsUsed: 0,
+      };
+    }
 
-    return { answer: text, stepsUsed: steps.length };
+    try {
+      const { text, steps, finishReason } = await generateText({
+        model,
+        temperature: input.parameters?.temperature,
+        maxOutputTokens: input.parameters?.maxOutputTokens,
+        stopWhen: stepCountIs(12),
+        messages: [{ role: 'user', content: input.task }],
+        tools: {
+          choose: tool({ description: choose.description, inputSchema: choose.inputSchema, execute: choose.execute }),
+          web_crawl: tool({ description: webCrawl.description, inputSchema: webCrawl.inputSchema, execute: webCrawl.execute }),
+          web_search: tool({ description: webSearch.description, inputSchema: webSearch.inputSchema, execute: webSearch.execute }),
+          browser_use: tool({
+            description: browserUse.description,
+            inputSchema: browserUse.inputSchema,
+            execute: (toolInput: { task: string }) => browserUse.execute(toolInput, execCtx),
+          }),
+          task_analysis: tool({ description: taskAnalysis.description, inputSchema: taskAnalysis.inputSchema, execute: taskAnalysis.execute }),
+          code_artifact: tool({ description: codeArtifact.description, inputSchema: codeArtifact.inputSchema, execute: codeArtifact.execute }),
+          make_it_real: tool({
+            description: makeItReal.description,
+            inputSchema: makeItReal.inputSchema,
+            execute: (toolInput: { instructions?: string; markdown: string }) => makeItReal.execute(toolInput, execCtx),
+          }),
+          doc_compose: tool({
+            description: docCompose.description,
+            inputSchema: docCompose.inputSchema,
+            execute: (toolInput: { title: string; userPrompt: string }) => docCompose.execute(toolInput, execCtx),
+          }),
+          python_coding: tool({ description: pythonCoding.description, inputSchema: pythonCoding.inputSchema, execute: pythonCoding.execute }),
+        },
+      });
+
+      // Some BYOK models/endpoints — especially smaller open-weight models
+      // behind a generic OpenAI-compatible proxy — don't reliably emit a
+      // final non-tool-call turn within the step budget, or don't support
+      // tool-calling at all and silently no-op instead of erroring. Either
+      // way `text` can come back empty with a full step budget burned.
+      // Surface that plainly instead of returning a blank answer.
+      if (!text || !text.trim()) {
+        return {
+          answer: '',
+          error: `The selected model finished without producing a response (finishReason: ${finishReason}, steps used: ${steps.length}/12). This can happen if the model doesn't support tool-calling reliably. Try disabling tools for this model in the config menu, or try a different model.`,
+          stepsUsed: steps.length,
+        };
+      }
+
+      return { answer: text, stepsUsed: steps.length };
+    } catch (err) {
+      return {
+        answer: '',
+        error: `The selected model failed to respond: ${err instanceof Error ? err.message : String(err)}. This usually means the provider's base URL, API key, or model id is wrong, or the endpoint doesn't support the request format used.`,
+        stepsUsed: 0,
+      };
+    }
   },
 });

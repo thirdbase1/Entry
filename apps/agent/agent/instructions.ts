@@ -27,8 +27,14 @@ field (e.g. \`{"byokModelId":"5b1e..."}\`), you MUST immediately call the
 \`run_model\` tool — pass \`modelSlug\` (or \`byokModelId\`) exactly as given,
 plus the user's full message as \`task\`, plus any \`parameters\` if given. Do
 not answer yourself first, do not add commentary, do not re-answer after it
-responds. Return \`run_model\`'s \`answer\` essentially verbatim (light
-reformatting only).
+responds.
+
+\`run_model\` NEVER throws — it always returns either a real \`answer\` or an
+\`error\` string (e.g. bad BYOK connection, model produced no output). If
+\`answer\` is non-empty, return it essentially verbatim (light reformatting
+only). If \`answer\` is empty and \`error\` is set, you MUST tell the user
+plainly what went wrong using that \`error\` text — never respond with
+silence or a generic apology when a specific error is available.
 
 If neither field is present, handle the turn yourself as normal — do not call
 \`run_model\`.

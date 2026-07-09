@@ -18,6 +18,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { getProviderIcon } from '@/components/icons/provider-icons';
+import { inferModelFamily } from '@/lib/model-provider';
 
 export interface ModelOption {
   label: string;
@@ -69,13 +70,20 @@ function useModelOptions() {
           ? byokRes.value.providers.flatMap((p: any) =>
               (p.models ?? [])
                 .filter((m: any) => m.isEnabled)
-                .map((m: any) => ({
-                  label: `${p.label} · ${m.label || m.modelId}`,
-                  value: `byok:${m.id}`,
-                  provider: p.compatibility?.toLowerCase() ?? 'unknown',
-                  Icon: getProviderIcon(p.compatibility?.toLowerCase() ?? 'unknown'),
-                  group: 'Your providers' as const,
-                }))
+                .map((m: any) => {
+                  // Icon comes from the MODEL NAME (e.g. "llama-3.1-70b" -> Meta,
+                  // "claude-3-5-sonnet" -> Anthropic), never from the connection's
+                  // transport/compatibility mode — a Llama model served over an
+                  // OpenAI-compatible endpoint should still show the Meta logo.
+                  const family = inferModelFamily(m.label || m.modelId);
+                  return {
+                    label: `${p.label} · ${m.label || m.modelId}`,
+                    value: `byok:${m.id}`,
+                    provider: family,
+                    Icon: getProviderIcon(family),
+                    group: 'Your providers' as const,
+                  };
+                })
             )
           : [];
 

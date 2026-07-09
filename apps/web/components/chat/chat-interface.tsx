@@ -119,10 +119,22 @@ function ChatInterfaceInner({
   createdRef: React.RefObject<boolean>;
   router: ReturnType<typeof useRouter>;
 }) {
+  // Turn-level failure banner. Without this, a turn that ends in
+  // status "error" (e.g. run_model throwing because a BYOK provider
+  // rejected the request, an invalid base URL, expired key, etc.)
+  // renders literally NOTHING in the chat — no bubble, no error, just
+  // silence. onError + the banner below are what was missing.
+  const [turnError, setTurnError] = useState<string | null>(null);
+
   const agent = useEveAgent({
     initialEvents,
     initialSession,
+    onError(error) {
+      console.error('[eve turn error]', error);
+      setTurnError(error.message || 'Something went wrong generating a response. Please try again.');
+    },
     async onFinish(snapshot) {
+      setTurnError(null);
       const sid = snapshot.session?.sessionId;
       if (!sid) return;
       const title = deriveTitle(snapshot.data.messages);
@@ -190,13 +202,20 @@ function ChatInterfaceInner({
 
   const onSend = useCallback(
     (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string }) => {
+      setTurnError(null);
       void (async () => {
         const [attachedContext, configHint] = await Promise.all([
           resolveContextForSend(opts?.attached ?? []),
           Promise.resolve(buildConfigContext(opts?.model ?? '', opts?.disabledTools ?? [])),
         ]);
         const clientContext = [attachedContext, configHint].filter(Boolean).join('\n\n') || undefined;
-        await agent.send({ message: input, clientContext });
+        await agent.send({ message: input, clientContext }).catch(err => {
+          // agent.send rejects when a turn is already in flight, or on a
+          // pre-flight failure before any stream event arrives — onError
+          // above covers mid-stream failures, this covers that gap too.
+          console.error('[send failed]', err);
+          setTurnError(err instanceof Error ? err.message : 'Failed to send message. Please try again.');
+        });
       })();
     },
     [agent]
@@ -207,6 +226,11 @@ function ChatInterfaceInner({
       <div className="flex flex-col justify-center h-full p-4 gap-4 max-w-[800px] mx-auto">
         <div className="text-[26px] font-medium text-center mb-9 text-foreground">{placeholderTitle}</div>
         <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} initialAttached={initialAttachedContext} />
+        {turnError && (
+          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 text-center">
+            {turnError}
+          </div>
+        )}
       </div>
     );
   }
@@ -235,6 +259,13 @@ function ChatInterfaceInner({
         />
       </div>
       <AggregatedTodoList messages={messages} />
+      {turnError && (
+        <div className="max-w-[832px] mx-auto w-full px-4">
+          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
+            {turnError}
+          </div>
+        </div>
+      )}
       <div className="max-w-[832px] px-4 mx-auto w-full py-4">
         <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} />
       </div>
