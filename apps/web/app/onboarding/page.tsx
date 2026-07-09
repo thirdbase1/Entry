@@ -42,10 +42,15 @@ const Caption = ({ children, className }: { children: React.ReactNode; className
   <p className={`text-sm text-muted-foreground text-center max-w-md mb-6 ${className ?? ''}`}>{children}</p>
 );
 
+// Ported 1:1 from onboarding-next.tsx: the original hardcodes a solid
+// black button with white text (backgroundColor: 'black', color: 'white'),
+// NOT the theme's blue "primary" token — this is deliberate, distinct
+// onboarding-only styling separate from the rest of the app's button system.
 const NextButton = ({ children, onClick, className }: { children: React.ReactNode; onClick: () => void; className?: string }) => (
   <button
     onClick={onClick}
-    className={`inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 h-10 w-[200px] ${className ?? ''}`}
+    style={{ backgroundColor: 'black', color: 'white' }}
+    className={`inline-flex items-center justify-center rounded-md text-sm font-medium hover:opacity-90 h-10 w-[200px] ${className ?? ''}`}
   >
     {children}
   </button>
@@ -173,7 +178,7 @@ const SelectStep: React.FC<StepProps> = ({ onPrev }) => {
         <Caption key="c">Spec & context engineering give agents structure to plan, score, and surface options. You stay in control of the final call. Achieve more, struggle less.</Caption>,
         <div key="cards" className="flex items-stretch gap-4 w-full max-w-[480px] flex-wrap justify-center">
           <SelectCard key="get-started" onClick={handleGetStarted} className="h-full">
-            <svg width="24" height="24" viewBox="0 0 24 24" className="text-primary" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="24" height="24" viewBox="0 0 24 24" className="text-icon-primary" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M5 12h14" />
               <path d="M12 5l7 7-7 7" />
             </svg>

@@ -1,0 +1,359 @@
+/* Ported 1:1 (exact values) from the real open-agent.io marketing site's
+   compiled CSS (static/css/index.5b87d0e7.css). Selectors/values kept as
+   close to the source as possible; class names de-scoped from Vue's
+   data-v-* attribute selectors to plain module classes. */
+
+.videoBg {
+  object-fit: cover;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0;
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  min-height: 100%;
+  transition: opacity 0.4s ease-in;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.videoBg.ready {
+  opacity: 1;
+}
+
+.appWrapper {
+  min-height: 100vh;
+  position: relative;
+  overflow: hidden;
+}
+
+.toolbar {
+  z-index: 10;
+  padding: 1rem 1rem 0;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+.toolbarContent {
+  -webkit-backdrop-filter: blur(10px) saturate(180%);
+  backdrop-filter: blur(10px) saturate(180%);
+  background-color: hsl(var(--card) / 0.75);
+  border: 1px solid hsl(var(--border));
+  border-radius: 1.2rem;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 768px;
+  margin: 0 auto;
+  padding: 1rem;
+  display: flex;
+  position: relative;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+}
+.logo {
+  cursor: pointer;
+  justify-content: center;
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+.logoImage {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 9999px;
+  object-fit: cover;
+}
+.wordmark {
+  font-weight: 600;
+  font-size: 1.1rem;
+}
+.navButton {
+  color: #000;
+  cursor: pointer;
+  background-color: #fff;
+  border: none;
+  border-radius: 0.55rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: transform 0.1s, background-color 0.15s;
+  display: flex;
+}
+.navButton:hover {
+  background-color: #f5f5f5;
+}
+.navButton:active {
+  transform: scale(0.95);
+}
+.navArrow {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.mainContent {
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  min-height: calc(100vh - 6rem);
+  padding: 13rem 0 10rem;
+  display: flex;
+}
+.contentContainer {
+  text-align: center;
+  max-width: 800px;
+  padding: 0 1rem 3rem;
+}
+.mainTitle {
+  color: #1a1a1a;
+  letter-spacing: -0.2rem;
+  margin-bottom: 1.5rem;
+  font-size: 5rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.subtitle {
+  color: #5f5f5f;
+  text-align: center;
+  max-width: 50rem;
+  margin: 0 auto 2rem;
+  font-size: 1.25rem;
+  font-weight: 500;
+  line-height: 1.8125rem;
+}
+.ctaButton {
+  color: #fff;
+  cursor: pointer;
+  background-color: #1a1a1a;
+  border: none;
+  border-radius: 1rem;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1.5rem;
+  font-size: 1.1rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: transform 0.1s, background-color 0.15s;
+  display: inline-flex;
+}
+.ctaButton:hover {
+  background-color: #2a2a2a;
+}
+.ctaButton:active {
+  transform: scale(0.95);
+}
+.ctaArrow {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.productImageContainer {
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  margin-top: 1.5rem;
+  padding: 0 1rem;
+  display: flex;
+}
+.productImageWrapper {
+  aspect-ratio: 16 / 10;
+  justify-content: center;
+  align-items: center;
+  width: 70%;
+  max-width: 70%;
+  display: flex;
+  position: relative;
+  border-radius: 1rem;
+  overflow: hidden;
+  box-shadow: 0 12px 50px rgba(0, 0, 0, 0.15);
+}
+.productImage {
+  object-fit: contain;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.whySection {
+  color: #fff;
+  background-color: #000;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  padding: 6.25rem 7.25rem;
+  display: flex;
+}
+.whyContent {
+  flex-direction: column;
+  align-items: center;
+  gap: 6rem;
+  width: 100%;
+  max-width: 80rem;
+  display: flex;
+}
+.whyTitle {
+  color: #fff;
+  text-align: center;
+  letter-spacing: -0.03125rem;
+  margin: 0;
+  font-size: 3.8rem;
+  font-weight: 600;
+  line-height: normal;
+}
+.featuresGrid {
+  grid-template-columns: 1fr 1fr;
+  gap: 3.5rem 2rem;
+  width: 100%;
+  display: grid;
+}
+.featureCard {
+  flex-direction: column;
+  gap: 1.5rem;
+  display: flex;
+}
+.featureImage {
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border-radius: 1rem;
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.featureText {
+  text-align: center;
+  flex-direction: column;
+  flex: 1;
+  gap: 0.75rem;
+  min-height: 6rem;
+  padding: 0 2rem;
+  display: flex;
+}
+.featureTitle {
+  color: #fff;
+  flex-shrink: 0;
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+.featureDescription {
+  color: #aeaeae;
+  flex: 1;
+  justify-content: center;
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 400;
+  line-height: 1.4;
+  display: flex;
+}
+
+.footer {
+  color: #fff;
+  z-index: 10;
+  background-color: #000;
+  padding: 1rem;
+  position: relative;
+}
+.footerContent {
+  justify-content: space-between;
+  align-items: center;
+  max-width: 768px;
+  margin: 0 auto 1.5rem;
+  display: flex;
+}
+.footerLogoImage {
+  /* Our logo.jpg is already a black-bg/white-mark asset designed for dark
+     surfaces (unlike the original's multi-tone logo.svg, which needed a
+     CSS invert to become legible on the black footer) — used as-is. */
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 9999px;
+}
+.footerSocial {
+  align-items: center;
+  gap: 0.5rem;
+  display: flex;
+}
+.socialLink {
+  color: #fff;
+  justify-content: center;
+  align-items: center;
+  padding: 0.5rem;
+  transition: opacity 0.2s;
+  display: flex;
+}
+.socialLink:hover {
+  opacity: 0.7;
+}
+.footerCopyright {
+  text-align: center;
+  max-width: 768px;
+  margin: 0 auto;
+  padding-top: 4rem;
+}
+.footerCopyright p {
+  opacity: 0.8;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+@media (max-width: 768px) {
+  .mainContent {
+    justify-content: center;
+    min-height: calc(100vh - 5rem);
+    padding: 8rem 1rem 4rem;
+  }
+  .mainTitle {
+    letter-spacing: -0.1rem;
+    font-size: 4rem;
+  }
+  .subtitle {
+    max-width: 90%;
+    margin-bottom: 1.5rem;
+    font-size: 1.1rem;
+  }
+  .productImageWrapper {
+    width: 90%;
+    max-width: 90%;
+  }
+  .whySection {
+    padding: 4rem 2rem;
+  }
+  .whyContent {
+    gap: 3rem;
+  }
+  .whyTitle {
+    font-size: 2.5rem;
+  }
+  .featuresGrid {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+}
+@media (max-width: 480px) {
+  .mainContent {
+    padding: 6.5rem 1rem 3rem;
+  }
+  .mainTitle {
+    letter-spacing: -0.1rem;
+    margin-bottom: 1rem;
+    font-size: 2.4rem;
+  }
+  .subtitle {
+    max-width: 100%;
+    margin-bottom: 1.5rem;
+    padding: 0 1rem;
+    font-size: 0.9rem;
+    line-height: 1.3rem;
+  }
+  .whySection {
+    padding: 2rem 1rem;
+  }
+  .whyTitle {
+    font-size: 2rem;
+  }
+}
