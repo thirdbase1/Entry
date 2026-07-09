@@ -4,8 +4,9 @@
   "version": "0.0.1",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
+    "build": "npm run migrate:deploy && next build --webpack",
+    "start": "next start",
+    "migrate:deploy": "cd ../../packages/db && node ../../node_modules/prisma/build/index.js migrate deploy"
   },
   "dependencies": {
     "@babel/core": "^8.0.1",
