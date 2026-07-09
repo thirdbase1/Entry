@@ -23,6 +23,26 @@ const eveRootAbsolute = resolve(__dirname, '../agent');
 // `transpilePackages` to run these through its compiler. Listed here are
 // the packages actually imported by our doc-composer code.
 const nextConfig: NextConfig = {
+  // Vercel's build containers report "2 cores, 8 GB" in their UI, but
+  // Node's os.cpus().length (which Next.js's `experimental.cpus` default
+  // derives from) often reads the underlying HOST's full core count on
+  // containerized infra, not the cgroup-limited allocation actually given
+  // to this build. Confirmed the hard way: local reproduction via a real
+  // `vercel build` showed "Collecting page data using 16 workers" — way
+  // more workers than the "2 cores" the container is actually billed/
+  // limited to. Each worker independently loads the full server module
+  // graph (Better Auth, Prisma, the entire @blocksuite/* tree via
+  // transpilePackages above), so 16 concurrent workers on an 8 GB box
+  // reliably exceeds available memory and gets SIGKILLed by the OOM
+  // killer with zero error output (looks like a silent "exited with 1"
+  // right after "Compiled successfully" — no stack trace, no OOM message,
+  // because the killed worker process never gets a chance to report
+  // anything). Capping to 1 worker serializes page-data collection —
+  // slower, but bounded, predictable memory use that fits the box.
+  experimental: {
+    cpus: 1,
+    workerThreads: false,
+  },
   // Every @blocksuite/* package ships raw TS source (see the exports-field
   // comment above) and BlockSuite's dependency graph transitively pulls in
   // effectively all of them (confirmed the hard way: a real `next build`

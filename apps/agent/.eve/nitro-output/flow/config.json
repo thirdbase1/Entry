@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "framework": {
+    "name": "nitro",
+    "version": "3.0.260610-beta"
+  },
+  "overrides": {},
+  "routes": [
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/.well-known/workflow/v1/flow",
+      "dest": "/.well-known/workflow/v1/flow"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/__server"
+    }
+  ]
+}
