@@ -60,12 +60,31 @@ export const auth = betterAuth({
     provider: 'postgresql',
   }),
 
-  // Vercel auto-injects VERCEL_PROJECT_PRODUCTION_URL on every deployment —
-  // no manual env var needed. Falls back to Better Auth's own request-header
-  // inference for local dev (no env var set at all locally).
-  baseURL: process.env.VERCEL_PROJECT_PRODUCTION_URL
-    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
-    : undefined,
+  // Deliberately NOT pinned to VERCEL_PROJECT_PRODUCTION_URL: that env var
+  // is the project's raw *.vercel.app domain and does NOT reflect a custom
+  // domain (e.g. entry.oneshotsx.cv) aliased on top of it. Pinning baseURL
+  // to the wrong domain caused a real bug: Google OAuth would complete on
+  // the vercel.app domain, but the session cookie set there is invisible
+  // once the user lands back on the custom domain (different eTLD, cookies
+  // never share) -- the app then sees "no session" and bounces to the
+  // landing page instead of the dashboard, even though login succeeded.
+  // Leaving baseURL undefined lets Better Auth infer it from the live
+  // request's Host header on every request (works in both the Next.js
+  // route handler and server actions via the nextCookies plugin), so it
+  // always matches whatever domain the user is actually on -- custom
+  // domain, vercel.app default, or a preview deployment -- with zero env
+  // var configuration needed, in both prod and local dev.
+  baseURL: undefined,
+
+  // Explicitly trust every domain this app is actually reachable from, so
+  // OAuth state-cookie / origin checks never reject a legitimate request
+  // regardless of which one baseURL inference picks for a given request.
+  trustedOrigins: [
+    'https://entry.oneshotsx.cv',
+    'https://entry-nine-pi.vercel.app',
+    'https://entry-thirdbase1s-projects.vercel.app',
+    'https://entry-oneshotsx-thirdbase1s-projects.vercel.app',
+  ],
 
   // Email/password authentication
   emailAndPassword: {
