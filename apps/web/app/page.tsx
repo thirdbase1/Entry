@@ -155,11 +155,11 @@ function LandingContent({ onGetStarted }: { onGetStarted: () => void }) {
           <div className={styles.featuresGrid}>
             {features.map(f => (
               <div key={f.title} className={styles.featureCard}>
-                <img src={f.image} alt={f.title} className={styles.featureImage} />
                 <div className={styles.featureText}>
                   <h3 className={styles.featureTitle}>{f.title}</h3>
                   <p className={styles.featureDescription}>{f.description}</p>
                 </div>
+                <img src={f.image} alt={f.title} className={styles.featureImage} />
               </div>
             ))}
           </div>
