@@ -1,0 +1,63 @@
+/**
+ * Ported 1:1 from packages/frontend/app/src/index.css (Tailwind v4 +
+ * design-token bridge) plus the base variable definitions the original
+ * pulled in separately via @toeverything/theme (the original theme package, style.css, both v1 and v2
+ * token sets) and its bundled variable-weight fonts (fonts.css). All three
+ * imports below are the SAME real npm package/version the original used
+ * (@toeverything/theme@1.1.23) — not recreated from memory.
+ *
+ * NOTE on vanilla-extract: the original's `.css.ts` files used
+ * `@vanilla-extract/css` for component-scoped styles. That package's own
+ * docs mark Turbopack support "experimental / unstable API" (verified via
+ * vanilla-extract.style/documentation/integrations/next), and Next.js 16
+ * defaults to Turbopack. Given the user's explicit priority on stable 1:1
+ * fidelity, `.css.ts` files are ported as plain CSS Modules instead —
+ * mechanically equivalent output (same property values, same
+ * `@toeverything/theme` CSS variables), just stable under Turbopack.
+ * Flagging this as a deliberate, verified substitution, not a shortcut.
+ */
+@import 'tailwindcss';
+@import '@toeverything/theme/style.css';
+@import '@toeverything/theme/fonts.css';
+@plugin "@tailwindcss/typography";
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--affine-v2-layer-insideBorder-border, currentColor);
+  }
+
+  body {
+    color: var(--affine-text-primary-color, #121212);
+    font-family: var(--affine-font-family);
+    font-size: var(--affine-font-base);
+  }
+}
+
+@theme {
+  --color-text-primary: var(--affine-v2-text-primary);
+  --color-text-secondary: var(--affine-v2-text-secondary);
+  --color-text-tertiary: var(--affine-v2-text-tertiary);
+  --color-text-placeholder: var(--affine-v2-text-placeholder);
+  --color-primary: var(--affine-v2-button-primary);
+  --color-border-primary: var(--affine-v2-layer-insideBorder-border);
+  --color-hover: var(--affine-v2-layer-background-hoverOverlay);
+  --color-icon-primary: var(--affine-v2-icon-primary);
+  --color-icon-secondary: var(--affine-v2-icon-secondary);
+  --color-layer-background-secondary: var(--affine-v2-layer-background-secondary);
+  --color-status-success: var(--affine-v2-status-success);
+  --shadow-view: 0px 1px 5px rgba(0, 0, 0, 0.05);
+}
+
+.panel {
+  @apply border rounded-lg overflow-hidden shadow-view bg-white;
+}
+.onboarding-title {
+  @apply mb-2 text-center text-2xl font-bold tracking-[-0.32px];
+}
+.onboarding-caption {
+  @apply max-w-[550px] text-center text-text-secondary text-[15px] leading-6 mb-4;
+}

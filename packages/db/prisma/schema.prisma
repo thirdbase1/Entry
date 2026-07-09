@@ -1,0 +1,474 @@
+generator client {
+  // Prisma ORM v7: "prisma-client-js" (Rust engine) is removed; "prisma-client"
+  // is the new Rust-free TS/WASM client. Confirmed via prisma.io/docs/guides/upgrade-prisma-orm/v7.
+  // `output` is now required (no more implicit node_modules generation).
+  provider        = "prisma-client"
+  output          = "../src/generated"
+  // "metrics" preview feature was removed in v7 (deprecated since 6.14, gone in 7.0) — dropped.
+  // relationJoins/nativeDistinct/postgresqlExtensions kept; `prisma generate` validates these for real below.
+  previewFeatures = ["relationJoins", "nativeDistinct", "postgresqlExtensions"]
+}
+
+datasource db {
+  // Prisma ORM v7: `url` in schema.prisma is REJECTED now (P1012, confirmed by
+  // actually running `prisma generate`, not just docs prose) — connection URL
+  // now lives solely in prisma.config.ts, and the PrismaClient constructor
+  // takes a driver `adapter` instead.
+  provider   = "postgresql"
+  extensions = [pgvector(map: "vector")]
+}
+
+model User {
+  id            String    @id @default(uuid()) @db.VarChar
+  name          String    @db.VarChar
+  email         String    @unique @db.VarChar
+  emailVerified Boolean   @default(false) @map("email_verified") @db.Boolean
+  image         String?   @map("avatar_url") @db.VarChar
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  /// Indicate whether the user finished the signup progress.
+  registered    Boolean   @default(true)
+  disabled      Boolean   @default(false)
+
+  accounts        Account[]
+  sessions        Session[]
+  features        UserFeature[]
+  aiSessions      AiSession[]
+  appConfigs      AppConfig[]
+  createdAiJobs   AiJobs[]           @relation("createdAiJobs")
+  settings        UserSettings?
+  AiUserFiles     AiUserFiles[]
+  AiUserDocs      AiUserDocs[]
+  eveChatSessions EveChatSession[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Account {
+  id           String    @id @default(uuid()) @db.VarChar
+  userId       String    @map("user_id") @db.VarChar
+  providerId   String    @map("provider_id") @db.VarChar
+  accountId    String    @map("account_id") @db.VarChar
+  refreshToken String?   @map("refresh_token") @db.Text
+  accessToken  String?   @map("access_token") @db.Text
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz(3)
+  password     String?   @db.VarChar
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_accounts")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.VarChar
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  token     String   @unique @db.VarChar
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  ipAddress String?  @map("ip_address") @db.VarChar
+  userAgent String?  @map("user_agent") @db.Text
+  userId    String   @map("user_id") @db.VarChar
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Verification {
+  id         String   @id @default(uuid()) @db.VarChar
+  identifier String   @db.VarChar
+  value      String   @db.Text
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("verifications")
+}
+
+model Feature {
+  id        Int      @id @default(autoincrement())
+  name      String   @map("feature") @db.VarChar
+  configs   Json     @default("{}") @db.Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  userFeatures UserFeature[]
+
+  @@unique([name])
+  @@map("features")
+}
+
+model UserFeature {
+  id        Int       @id @default(autoincrement())
+  userId    String    @map("user_id") @db.VarChar
+  featureId Int       @map("feature_id") @db.Integer
+  // it should be typed as `optional` in the codebase, but we would keep all values exists during data migration.
+  // so it's safe to assert it a non-null value.
+  name      String    @default("") @map("name") @db.VarChar
+  // a little redundant, but fast the queries
+  type      Int       @default(0) @map("type") @db.Integer
+  reason    String    @db.VarChar
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiredAt DateTime? @map("expired_at") @db.Timestamptz(3)
+  activated Boolean   @default(false)
+
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([name])
+  @@index([featureId])
+  @@map("user_features")
+}
+
+model Wishlist {
+  email     String   @id @db.VarChar
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([email])
+  @@map("wishlists")
+}
+
+enum AiPromptRole {
+  system
+  assistant
+  user
+}
+
+model AiPromptMessage {
+  promptId    Int          @map("prompt_id") @db.Integer
+  // if a group of prompts contains multiple sentences, idx specifies the order of each sentence
+  idx         Int          @db.Integer
+  // system/assistant/user
+  role        AiPromptRole
+  // prompt content
+  content     String       @db.Text
+  attachments Json?        @db.Json
+  params      Json?        @db.Json
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  prompt AiPrompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@unique([promptId, idx])
+  @@map("ai_prompts_messages")
+}
+
+model AiPrompt {
+  id             Int      @id @default(autoincrement()) @db.Integer
+  name           String   @unique @db.VarChar(32)
+  // an mark identifying which view to use to display the session
+  // it is only used in the frontend and does not affect the backend
+  action         String?  @db.VarChar
+  model          String   @db.VarChar
+  optionalModels String[] @default([]) @map("optional_models") @db.VarChar
+  config         Json?    @db.Json
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(3)
+  // whether the prompt is modified by the admin panel
+  modified       Boolean  @default(false)
+
+  messages AiPromptMessage[]
+  sessions AiSession[]
+
+  @@map("ai_prompts_metadata")
+}
+
+model AiSessionMessage {
+  id            String       @id @default(uuid()) @db.VarChar
+  sessionId     String       @map("session_id") @db.VarChar
+  role          AiPromptRole
+  content       String       @db.Text
+  streamObjects Json?        @db.Json
+  attachments   Json?        @db.Json
+  params        Json?        @db.Json
+  createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  session AiSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("ai_sessions_messages")
+}
+
+model AiSession {
+  id           String    @id @default(uuid()) @db.VarChar
+  userId       String    @map("user_id") @db.VarChar
+  promptName   String    @map("prompt_name") @db.VarChar(32)
+  promptAction String?   @default("") @map("prompt_action") @db.VarChar(32)
+  pinned       Boolean   @default(false)
+  title        String?   @db.VarChar
+  messageCost  Int       @default(0)
+  tokenCost    Int       @default(0)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt    DateTime? @map("deleted_at") @db.Timestamptz(3)
+
+  // the document id, if the session is created from a document
+  docId    String? @map("doc_id") @db.VarChar
+  // client custom metadata
+  metadata String  @db.VarChar
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  prompt   AiPrompt  @relation(fields: [promptName], references: [name], onDelete: Cascade)
+  messages AiSessionMessage[]
+  // context/chatEmbedding intentionally NOT here — real eve-backed chats use
+  // EveChatSession (see its model comment), and both AiContext.session and
+  // AiUserChatEmbedding.session point there instead of this legacy model.
+
+  @@index([promptName])
+  @@index([userId])
+  @@map("ai_sessions_metadata")
+}
+
+model AiContext {
+  id        String @id @default(uuid()) @db.VarChar
+  sessionId String @map("session_id") @db.VarChar
+  config    Json   @db.Json
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  embeddings AiContextEmbedding[]
+  // Same FK-target bug class as AiUserChatEmbedding (see EveChatSession's
+  // comment): a context is attached to a live chat session, and real chats
+  // are eve-backed, so this must point at EveChatSession, not the legacy
+  // AiSession (which no real session row ever populates).
+  session    EveChatSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("ai_contexts")
+}
+
+model AiContextEmbedding {
+  id        String                      @id @default(uuid()) @db.VarChar
+  contextId String                      @map("context_id") @db.VarChar
+  fileId    String                      @map("file_id") @db.VarChar
+  // a file can be divided into multiple chunks and embedded separately.
+  chunk     Int                         @db.Integer
+  content   String                      @db.VarChar
+  embedding Unsupported("vector(1024)")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  context AiContext @relation(fields: [contextId], references: [id], onDelete: Cascade)
+
+  @@unique([contextId, fileId, chunk])
+  @@index([embedding], map: "ai_context_embeddings_idx")
+  @@map("ai_context_embeddings")
+}
+
+model AiUserChatEmbedding {
+  userId    String                      @map("user_id") @db.VarChar
+  sessionId String                      @map("session_id") @db.VarChar
+  // a document can be divided into multiple chunks and embedded separately.
+  chunk     Int                         @db.Integer
+  content   String                      @db.VarChar
+  embedding Unsupported("vector(1024)")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  // Points at EveChatSession, NOT the legacy AiSession — real chat sessions
+  // in this port are eve-backed (id = eve's own sessionId), so embedding a
+  // "chat" means embedding an EveChatSession's persisted event-log snapshot.
+  // (Originally pointed at AiSession in the 1:1 schema port; corrected once
+  // the embedding pipeline actually needed to read real chat content and
+  // that FK proved unsatisfiable for any session created through the new
+  // eve-backed chat flow.)
+  session EveChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, sessionId, chunk])
+  @@index([embedding], map: "ai_user_chat_embeddings_idx")
+  @@map("ai_user_chat_embeddings")
+}
+
+model AiUserDocs {
+  docId     String @default(uuid()) @map("doc_id") @db.VarChar
+  userId    String @map("user_id") @db.VarChar
+  // always create from exists session
+  sessionId String @map("session_id") @db.VarChar
+  title     String @db.VarChar
+  content   String @db.VarChar
+
+  // client custom metadata
+  metadata String @db.VarChar
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  embeddings AiUserDocEmbedding[]
+
+  @@id([userId, docId])
+  @@map("ai_user_docs")
+}
+
+model AiUserDocEmbedding {
+  userId    String                      @map("user_id") @db.VarChar
+  docId     String                      @map("doc_id") @db.VarChar
+  // a document can be divided into multiple chunks and embedded separately.
+  chunk     Int                         @db.Integer
+  content   String                      @db.VarChar
+  embedding Unsupported("vector(1024)")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  doc AiUserDocs @relation(fields: [userId, docId], references: [userId, docId], onDelete: Cascade)
+
+  @@id([userId, docId, chunk])
+  @@index([embedding], map: "ai_user_doc_embeddings_idx")
+  @@map("ai_user_doc_embeddings")
+}
+
+model AiUserFiles {
+  userId   String @map("user_id") @db.VarChar
+  fileId   String @map("file_id") @db.VarChar
+  blobId   String @default("") @map("blob_id") @db.VarChar
+  fileName String @map("file_name") @db.VarChar
+  mimeType String @map("mime_type") @db.VarChar
+  size     Int    @db.Integer
+
+  // client custom metadata
+  metadata String @db.VarChar
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  embeddings AiUserFileEmbedding[]
+
+  @@id([userId, fileId])
+  @@map("ai_user_files")
+}
+
+model AiUserFileEmbedding {
+  userId    String                      @map("user_id") @db.VarChar
+  fileId    String                      @map("file_id") @db.VarChar
+  // a file can be divided into multiple chunks and embedded separately.
+  chunk     Int                         @db.Integer
+  content   String                      @db.VarChar
+  embedding Unsupported("vector(1024)")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  file AiUserFiles @relation(fields: [userId, fileId], references: [userId, fileId], onDelete: Cascade)
+
+  @@id([userId, fileId, chunk])
+  @@index([embedding], map: "ai_user_file_embeddings_idx")
+  @@map("ai_user_file_embeddings")
+}
+
+enum AiJobStatus {
+  pending
+  running
+  finished
+  claimed
+  failed
+}
+
+enum AiJobType {
+  transcription
+}
+
+model AiJobs {
+  id        String      @id @default(uuid()) @db.VarChar
+  blobId    String      @map("blob_id") @db.VarChar
+  createdBy String?     @map("created_by") @db.VarChar
+  // job type, like "transcription"
+  type      AiJobType
+  status    AiJobStatus @default(pending)
+  // job result
+  payload   Json        @db.Json
+
+  startedAt  DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(3)
+
+  // will delete creator record if creator's account is deleted
+  createdByUser User? @relation(name: "createdAiJobs", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@unique([createdBy, blobId])
+  @@map("ai_jobs")
+}
+
+model DataMigration {
+  id         String    @id @default(uuid()) @db.VarChar
+  name       String    @unique @db.VarChar
+  startedAt  DateTime  @default(now()) @map("started_at") @db.Timestamptz(3)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(3)
+
+  @@map("_data_migrations")
+}
+
+enum RuntimeConfigType {
+  String
+  Number
+  Boolean
+  Object
+  Array
+}
+
+model AppConfig {
+  id            String   @id @db.VarChar
+  value         Json     @db.JsonB
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  lastUpdatedBy String?  @map("last_updated_by") @db.VarChar
+
+  lastUpdatedByUser User? @relation(fields: [lastUpdatedBy], references: [id], onDelete: SetNull)
+
+  @@map("app_configs")
+}
+
+model UserSettings {
+  userId    String   @id @map("user_id") @db.VarChar
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  payload   Json     @db.JsonB
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
+
+/// Chat session index for the eve-backed chat UI (Phase 3). Decoupled from
+/// the legacy AiSession/AiPrompt system (which required an AiPrompt FK —
+/// a relic of the pre-eve custom prompt/session runtime). eve owns the
+/// actual durable session/turn state on its own server; this table only
+/// indexes sessions for the library/sidebar UI and persists a resumable
+/// snapshot (event log + session cursor) so a reload can pick the
+/// conversation back up via useEveAgent's initialEvents/initialSession.
+model EveChatSession {
+  id         String   @id @db.VarChar // the eve sessionId itself
+  userId     String   @map("user_id") @db.VarChar
+  title      String?  @db.VarChar
+  collected  Boolean  @default(false)
+  docId      String?  @map("doc_id") @db.VarChar
+  events     Json?    @db.JsonB // persisted HandleMessageStreamEvent[] snapshot
+  cursor     Json?    @db.JsonB // persisted { sessionId, continuationToken, streamIndex }
+  // Public-sharing schema decision (flagged in an earlier session as a real
+  // gap, resolved here): the original's `/playback` route was genuinely
+  // public/unauthenticated but had no persisted "may anyone view this" bit
+  // to safely gate that with either. Added here rather than left unbuilt.
+  // isPublic is the actual gate (checked live on every public read); the
+  // token is a stable, unguessable (UUID) opaque handle so a chat's real
+  // sessionId is never itself the shareable secret. Token is generated once
+  // and kept even if isPublic later flips false->true again (re-sharing
+  // reuses the same link, common share-link UX), but the DB-level
+  // `isPublic` boolean is what actually blocks reads while off.
+  isPublic   Boolean  @default(false) @map("is_public")
+  shareToken String?  @unique @map("share_token") @db.VarChar
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatEmbedding AiUserChatEmbedding[]
+  context       AiContext[]
+
+  @@index([userId])
+  @@map("eve_chat_sessions")
+}

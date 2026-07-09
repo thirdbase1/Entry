@@ -1,0 +1,35 @@
+{
+  "name": "entry-next",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "next dev apps/web",
+    "build": "npm run db:deploy && cd apps/web && next build --webpack",
+    "start": "next start apps/web",
+    "typecheck": "tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p apps/agent/tsconfig.json",
+    "postinstall": "(cd packages/db && node ../../node_modules/prisma/build/index.js generate) && node scripts/patch-engines.js",
+    "db:migrate": "(cd packages/db && node ../../node_modules/prisma/build/index.js migrate dev)",
+    "db:deploy": "(cd packages/db && node ../../node_modules/prisma/build/index.js migrate deploy)",
+    "db:studio": "(cd packages/db && node ../../node_modules/prisma/build/index.js studio)"
+  },
+  "dependencies": {
+    "better-auth": "^1.6.23"
+  },
+  "overrides": {
+    "postcss": "^8.5.10",
+    "@hono/node-server": "^1.19.13",
+    "@blocksuite/icons": "file:patches/blocksuite-icons-patched.tgz"
+  },
+  "allowScripts": {
+    "@prisma/engines@7.8.0": true,
+    "esbuild@0.28.1": true,
+    "prisma@7.8.0": true,
+    "sharp@0.34.5": true
+  }
+}

@@ -1,0 +1,23 @@
+.vercel
+.env*
+
+# dependencies
+node_modules/
+**/node_modules/
+
+# build output
+.next/
+**/.next/
+dist/
+**/dist/
+.turbo/
+**/.turbo/
+*.tsbuildinfo
+
+# generated prisma client
+packages/db/src/generated/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

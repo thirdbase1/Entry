@@ -1,0 +1,72 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "paths": {
+      "@/*": [
+        "./*"
+      ],
+      "@entry/db": [
+        "../../packages/db/src/db.ts"
+      ],
+      "@entry/auth": [
+        "../../packages/auth/src/index.ts"
+      ],
+      "@entry/cache": [
+        "../../packages/cache/src/index.ts"
+      ],
+      "@entry/features": [
+        "../../packages/features/src/index.ts"
+      ],
+      "@entry/copilot": [
+        "../../packages/copilot/src/index.ts"
+      ],
+      "@entry/mail": [
+        "../../packages/mail/src/index.ts"
+      ],
+      "@entry/oauth": [
+        "../../packages/oauth/src/index.ts"
+      ],
+      "@entry/queue": [
+        "../../packages/queue/src/index.ts"
+      ],
+      "@entry/ws": [
+        "../../packages/ws/src/index.ts"
+      ],
+      "@entry/ai": [
+        "../../packages/ai/src/index.ts"
+      ]
+    },
+    "allowJs": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "baseUrl": "."
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "next-env.d.ts",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

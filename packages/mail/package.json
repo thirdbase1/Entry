@@ -1,0 +1,16 @@
+{
+  "name": "@entry/mail",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@sendbyte/node": "^0.2.1",
+    "react": "^19.2.0",
+    "react-email": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.6.0"
+  }
+}

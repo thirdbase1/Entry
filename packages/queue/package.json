@@ -1,0 +1,13 @@
+{
+  "name": "@entry/queue",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@vercel/queue": "^0.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,97 @@
+/**
+ * Ported from packages/frontend/component/src/ui/button/button.css.ts —
+ * scoped to the `variant="secondary"` (default) + `size="default"`
+ * combination, the only configuration actually used by the ported pages
+ * so far (sign-in's "Resend code" button takes no variant/size props,
+ * which default to secondary/default per the original's ButtonProps
+ * jsdoc). Same computed values, translated from vanilla-extract's
+ * CSS-variable-per-variant pattern into a single CSS Module class (see
+ * app/globals.css for why CSS Modules replace vanilla-extract here).
+ * Extend with more classes/variants as later pages need them — do not
+ * silently reuse this for a different variant/size without porting its
+ * real values too.
+ */
+.button {
+  --gap: 4px;
+  --border-width: 1px;
+  --h: 28px;
+  --padding: 4px 12px;
+  --icon-size: 16px;
+  --font-size: var(--affine-font-xs);
+  --font-weight: 500;
+  --line-height: 20px;
+  --bg: var(--affine-v2-button-secondary);
+  --fg: var(--affine-v2-text-primary);
+  --icon-color: var(--affine-v2-icon-primary);
+  --border-color: var(--affine-v2-layer-insideBorder-blackBorder);
+
+  flex-shrink: 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  outline: 0;
+  border-radius: 8px;
+  transition: all 0.3s, transform 0.1s;
+  cursor: pointer;
+
+  background-color: var(--bg);
+  color: var(--fg);
+  border-width: var(--border-width);
+  border-style: solid;
+  border-color: var(--border-color);
+
+  height: var(--h);
+  gap: var(--gap);
+  padding: var(--padding);
+  font-size: var(--font-size);
+  font-weight: var(--font-weight);
+  line-height: var(--line-height);
+}
+
+.button::before {
+  content: '';
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  transition: inherit;
+  border-radius: inherit;
+  opacity: 0;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  background-color: var(--affine-v2-layer-background-hoverOverlay);
+  border-color: transparent;
+  pointer-events: none;
+  border-width: inherit;
+  border-style: inherit;
+}
+
+.button:hover::before {
+  opacity: 1;
+}
+
+.button:active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.button:disabled::before {
+  display: none;
+}
+
+.button:focus-visible::after {
+  content: '';
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 1px var(--affine-v2-layer-insideBorder-primaryBorder);
+}

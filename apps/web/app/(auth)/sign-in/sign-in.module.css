@@ -1,0 +1,114 @@
+/* Ported 1:1 (values unchanged) from pages/sign-in.css.ts */
+.wrapper {
+  width: 100%;
+  max-width: 350px;
+  padding-left: 16px;
+  padding-right: 16px;
+  min-height: 405px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+}
+
+.title {
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 39px;
+  letter-spacing: -0.32px;
+  color: #000;
+  text-align: center;
+}
+
+.hit {
+  font-size: 15px;
+  line-height: 24px;
+  font-weight: 400;
+  color: var(--affine-v2-text-secondary);
+  text-align: center;
+  margin-top: 16px;
+}
+
+.hitEmail {
+  color: var(--affine-v2-text-primary);
+  font-weight: 500;
+}
+
+.item {
+  height: 40px;
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.input {
+  composes: item;
+  margin-top: 32px;
+}
+
+.submit {
+  composes: item;
+  background-color: #000;
+  color: #fff;
+  cursor: pointer;
+}
+.submit[aria-disabled='true'] {
+  background-color: #333;
+  cursor: default;
+}
+
+.or {
+  display: flex;
+  align-items: center;
+  margin: 12px 0px;
+}
+
+.line {
+  --direction: to right;
+  height: 1px;
+  background: linear-gradient(var(--direction), #f5f5f5 0%, #b0b0b0 100%);
+}
+.line.reverse {
+  --direction: to left;
+}
+
+.orText {
+  line-height: 22px;
+  padding: 0px 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #929292;
+  flex-shrink: 0;
+}
+
+.oauthButton {
+  composes: item;
+  cursor: pointer;
+  border: 1px solid var(--affine-v2-layer-insideBorder-border);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  color: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.oauthButton:hover {
+  background-color: var(--affine-v2-layer-background-hoverOverlay);
+}
+.oauthButton svg {
+  font-size: 24px;
+}
+
+.codeInput input {
+  border-color: var(--affine-v2-layer-insideBorder-border) !important;
+  font-family: inherit !important;
+}
+.codeInput input:focus {
+  border-color: #000 !important;
+  caret-color: #000 !important;
+}

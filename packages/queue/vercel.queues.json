@@ -1,0 +1,20 @@
+{
+  "_comment": "Merge these entries into the app's top-level vercel.json `functions` block once app/api/queues/<topic>/route.ts files exist (Next.js frontend port, Phase 3). One consumer route per QueueTopic in src/index.ts.",
+  "functions": {
+    "app/api/queues/nightly/route.ts": {
+      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "nightly" }]
+    },
+    "app/api/queues/notification/route.ts": {
+      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "notification" }]
+    },
+    "app/api/queues/doc/route.ts": {
+      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "doc" }]
+    },
+    "app/api/queues/copilot/route.ts": {
+      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "copilot" }]
+    },
+    "app/api/queues/indexer/route.ts": {
+      "experimentalTriggers": [{ "type": "queue/v2beta", "topic": "indexer" }]
+    }
+  }
+}
