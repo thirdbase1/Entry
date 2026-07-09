@@ -4,11 +4,10 @@ import { ArrowUpBigIcon, SettingsIcon, AttachmentIcon } from '@blocksuite/icons/
 import { motion } from 'framer-motion';
 import { useCallback, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { ChatConfigMenu } from './chat-config';
+import { ChatConfigMenu, DEFAULT_MODEL_ID } from './chat-config';
 import { ContextSelectorMenu, ContextPreview, type AttachedContext } from './chat-context';
 
 /** Default model id (first fallback entry — Claude Sonnet 4). */
-const DEFAULT_MODEL = 'claude-sonnet-4@20250514';
 
 export function ChatInput({
   onSend,
@@ -29,7 +28,7 @@ export function ChatInput({
   const [input, setInput] = useState('');
   const [attached, setAttached] = useState<AttachedContext[]>(initialAttached ?? []);
   const [disabledTools, setDisabledTools] = useState<string[]>([]);
-  const [model, setModel] = useState<string>(DEFAULT_MODEL);
+  const [model, setModel] = useState<string>(DEFAULT_MODEL_ID);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [textareaHeight, setTextareaHeight] = useState(45);
 
@@ -119,7 +118,7 @@ export function ChatInput({
               title="Tools"
               className={cn(
                 'w-7 h-7 rounded-md flex items-center justify-center transition-colors',
-                disabledTools.length > 0 || model !== DEFAULT_MODEL ? 'text-primary bg-primary/10' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                disabledTools.length > 0 || model !== DEFAULT_MODEL_ID ? 'text-primary bg-primary/10' : 'text-muted-foreground hover:bg-accent hover:text-foreground'
               )}
             >
               <SettingsIcon className="w-4 h-4" />

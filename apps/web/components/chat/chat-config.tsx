@@ -1,31 +1,24 @@
 'use client';
 
 /**
- * Ported 1:1 from packages/frontend/app/src/components/chat-config.tsx.
+ * Simplified model selector — was a much bigger surface (dynamic fetch of
+ * the ENTIRE Vercel AI Gateway catalog, dozens of models rendered in the
+ * dropdown) but only 3 of those ever actually worked, because model
+ * switching happens via delegation to exactly 3 declared eve subagents
+ * (claude/gpt/gemini) — every other catalog entry a user could pick did
+ * nothing. Rather than keep dressing up a catalog browser that mostly lied
+ * about what was functional, this now just lists the 3 real, working
+ * options. Honest and simpler; matches what apps/agent/agent/subagents
+ * actually supports.
  *
- * Key difference from the original: the model list is now fetched
- * dynamically from the Vercel AI Gateway catalog
- * (GET /api/server/models → gateway.getAvailableModels()) instead of
- * the hardcoded `tempModels` array. Provider icons are still used 1:1
- * (ClaudeIcon, ChatGPTIcon, GeminiIcon — ported verbatim from the
- * original's icons/ directory).
- *
- * Model switching works via eve subagent delegation, same as before —
- * the selected model id is sent in `clientContext` and the root agent's
- * instructions.md routes to the matching subagent. See the comment in
- * the previous version of this file for the full rationale.
+ * The underlying model id per provider is still resolved live from the AI
+ * Gateway catalog server-side (see apps/agent/agent/lib/model-catalog.ts) —
+ * nothing here hardcodes a dated model id. These 3 values are stable
+ * subagent NAMES, not model ids.
  */
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { cn } from '@/lib/utils';
 import { getProviderIcon } from '@/components/icons/provider-icons';
-
-interface GatewayModel {
-  id: string;
-  name: string;
-  provider: string;
-  contextWindow: number | null;
-  description: string | null;
-}
 
 export interface ModelOption {
   label: string;
@@ -46,63 +39,15 @@ export const configurableTools = [
 
 export const defaultDisabledTools: string[] = [];
 
-/** Default model id used when the Gateway is unreachable or hasn't loaded yet. */
-const DEFAULT_MODEL_ID = 'claude-sonnet-4@20250514';
+/** Root agent handles the turn itself when this (or '') is selected — no delegation. */
+export const DEFAULT_MODEL_ID = 'default';
 
-/** Fallback models matching the original's tempModels array. */
-const FALLBACK_MODELS: ModelOption[] = [
-  { label: 'Claude Sonnet 4', value: 'claude-sonnet-4@20250514', provider: 'anthropic', Icon: getProviderIcon('anthropic') },
-  { label: 'Gemini 2.5 Pro', value: 'gemini-2.5-pro', provider: 'google', Icon: getProviderIcon('google') },
-  { label: 'GPT-5', value: 'gpt-5', provider: 'openai', Icon: getProviderIcon('openai') },
-  { label: 'Gemini 2.5 Flash', value: 'gemini-2.5-flash', provider: 'google', Icon: getProviderIcon('google') },
-  { label: 'o4 Mini', value: 'o4-mini', provider: 'openai', Icon: getProviderIcon('openai') },
+/** The 3 real, working options — must match apps/agent/agent/subagents/<id> exactly. */
+export const MODEL_OPTIONS: ModelOption[] = [
+  { label: 'Claude', value: 'claude', provider: 'anthropic', Icon: getProviderIcon('anthropic') },
+  { label: 'GPT', value: 'gpt', provider: 'openai', Icon: getProviderIcon('openai') },
+  { label: 'Gemini', value: 'gemini', provider: 'google', Icon: getProviderIcon('google') },
 ];
-
-export function useGatewayModels(): {
-  models: ModelOption[];
-  loading: boolean;
-  error: string | null;
-} {
-  const [models, setModels] = useState<ModelOption[]>(FALLBACK_MODELS);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/server/models');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const gatewayModels: GatewayModel[] = data.models || [];
-        if (gatewayModels.length === 0) {
-          if (!cancelled) setModels(FALLBACK_MODELS);
-          return;
-        }
-        const options: ModelOption[] = gatewayModels.map(m => ({
-          label: m.name,
-          value: m.id,
-          provider: m.provider,
-          Icon: getProviderIcon(m.provider),
-        }));
-        if (!cancelled) {
-          setModels(options);
-          setError(null);
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setModels(FALLBACK_MODELS);
-          setError(e instanceof Error ? e.message : 'Failed to load models');
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  return { models, loading, error };
-}
 
 export function ChatConfigMenu({
   model,
@@ -119,7 +64,6 @@ export function ChatConfigMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [showModelSub, setShowModelSub] = useState(false);
-  const { models, loading } = useGatewayModels();
 
   const toggle = (value: string) => {
     setDisabledTools(
@@ -144,12 +88,12 @@ export function ChatConfigMenu({
                 className="flex items-center gap-2 px-3 py-2 w-full text-sm text-foreground hover:bg-accent text-left border-b"
               >
                 {(() => {
-                  const current = models.find(m => m.value === model);
+                  const current = MODEL_OPTIONS.find(m => m.value === model);
                   if (current) {
                     const Icon = current.Icon;
                     return <><Icon className="w-4 h-4 shrink-0" /><span className="flex-1 truncate">{current.label}</span></>;
                   }
-                  return <span className="flex-1 truncate">{loading ? 'Loading…' : 'Select model'}</span>;
+                  return <span className="flex-1 truncate">Default</span>;
                 })()}
                 <span className="text-xs text-muted-foreground">›</span>
               </button>
@@ -161,10 +105,17 @@ export function ChatConfigMenu({
                 >
                   <span>‹</span> Back
                 </button>
-                {loading && (
-                  <div className="px-2 py-1.5 text-xs text-muted-foreground">Loading models…</div>
-                )}
-                {models.map(m => {
+                <button
+                  onClick={() => { setModel(DEFAULT_MODEL_ID); setShowModelSub(false); }}
+                  className={cn(
+                    'flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-left hover:bg-accent w-full',
+                    model === DEFAULT_MODEL_ID || !model ? 'text-primary font-medium' : 'text-foreground'
+                  )}
+                >
+                  <span className="flex-1 truncate">Default</span>
+                  {(model === DEFAULT_MODEL_ID || !model) && <span className="text-xs">✓</span>}
+                </button>
+                {MODEL_OPTIONS.map(m => {
                   const Icon = m.Icon;
                   return (
                     <button
@@ -219,13 +170,18 @@ export function ChatConfigMenu({
   );
 }
 
-/** Builds the plain-language model/tool-restriction hint for eve's `clientContext`. */
+/**
+ * Builds the structured routing signal for eve's `clientContext`, matching
+ * apps/agent/agent/instructions.ts's <model_routing> hard rule. A clean,
+ * minimal JSON object instead of the old prose sentence buried in other
+ * text — nothing for the model to misparse.
+ */
 export function buildConfigContext(model: string, disabledTools: string[]): string | undefined {
   const parts: string[] = [];
   if (model && model !== DEFAULT_MODEL_ID) {
-    parts.push(`Preferred model for this turn: ${model}. Delegate to the matching subagent per your model_routing instructions.`);
+    parts.push(JSON.stringify({ requestedModel: model }));
   }
   const toolLabels = configurableTools.filter(t => disabledTools.includes(t.value)).map(t => t.label);
-  if (toolLabels.length) parts.push(`For this turn, avoid using: ${toolLabels.join(', ')}.`);
+  if (toolLabels.length) parts.push(`Avoid using these tools for this turn: ${toolLabels.join(', ')}.`);
   return parts.length ? parts.join('\n') : undefined;
 }
