@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma, decryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
+import { withApiErrorHandling } from '@/lib/api-error';
 
 /**
  * POST /api/user/byok/providers/:providerId/fetch-models
@@ -58,7 +59,7 @@ async function discoverModels(
   }
 }
 
-export async function POST(req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) {
+export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -97,4 +98,4 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pro
     await prisma.userModelProvider.update({ where: { id: providerId }, data: { lastError: message } });
     return NextResponse.json({ error: message }, { status: 502 });
   }
-}
+});

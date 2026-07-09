@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma, encryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
+import { withApiErrorHandling } from '@/lib/api-error';
 import { z } from 'zod';
 
 /**
  * DELETE /api/user/byok/providers/:providerId
  * Removes a provider connection and all its models (cascade).
  */
-export async function DELETE(req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) {
+export const DELETE = withApiErrorHandling(async (req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -18,7 +19,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ p
   if (result.count === 0) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
   return NextResponse.json({ success: true });
-}
+});
 
 const UpdateProviderSchema = z.object({
   label: z.string().min(1).max(100).optional(),
@@ -30,7 +31,7 @@ const UpdateProviderSchema = z.object({
  * PATCH /api/user/byok/providers/:providerId
  * Update label / base URL / rotate the API key.
  */
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) {
+export const PATCH = withApiErrorHandling(async (req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -58,4 +59,4 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ pr
     baseUrl: updated.baseUrl,
     hasApiKey: !!updated.encryptedApiKey,
   });
-}
+});

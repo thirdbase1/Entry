@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { z } from 'zod';
+import { withApiErrorHandling } from '@/lib/api-error';
 
 const AddModelSchema = z.object({
   modelId: z.string().min(1),
@@ -14,7 +15,7 @@ const AddModelSchema = z.object({
  * doesn't support (or the user doesn't want to use) the fetch-models
  * discovery call.
  */
-export async function POST(req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) {
+export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -32,4 +33,4 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ pro
   });
 
   return NextResponse.json({ id: model.id, modelId: model.modelId, label: model.label, isEnabled: model.isEnabled });
-}
+});

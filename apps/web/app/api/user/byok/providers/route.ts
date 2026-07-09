@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma, encryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
+import { withApiErrorHandling } from '@/lib/api-error';
 import { z } from 'zod';
 
 /**
@@ -8,7 +9,7 @@ import { z } from 'zod';
  * List the current user's BYOK provider connections, each with its models.
  * API keys are never returned — only whether one is set.
  */
-export async function GET(req: NextRequest) {
+export const GET = withApiErrorHandling(async (req: NextRequest) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -30,7 +31,7 @@ export async function GET(req: NextRequest) {
       models: p.models.map(m => ({ id: m.id, modelId: m.modelId, label: m.label, isEnabled: m.isEnabled })),
     })),
   });
-}
+});
 
 const CreateProviderSchema = z.object({
   label: z.string().min(1).max(100),
@@ -44,7 +45,7 @@ const CreateProviderSchema = z.object({
  * Create a new BYOK provider connection. Does not fetch models —
  * call POST .../fetch-models afterwards (or add models manually).
  */
-export async function POST(req: NextRequest) {
+export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
@@ -73,4 +74,4 @@ export async function POST(req: NextRequest) {
     hasApiKey: !!provider.encryptedApiKey,
     models: [],
   });
-}
+});

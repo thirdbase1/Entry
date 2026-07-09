@@ -14,6 +14,19 @@ import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';
 import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
 
+/** Parses a fetch Response as JSON, tolerating empty/non-JSON bodies (e.g. a
+ * crashed serverless function with no body) instead of throwing a raw
+ * "Unexpected end of JSON input" at the user. */
+async function safeJson(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) return { error: `Server returned an empty response (status ${res.status}).` };
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: `Server returned an unexpected response (status ${res.status}).` };
+  }
+}
+
 type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE';
 
 interface ProviderModel {
@@ -82,7 +95,7 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ label, compatibility, baseUrl, apiKey: apiKey || undefined }),
       });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error?.message ?? json.error ?? 'Failed to add provider');
       onCreated({ ...json, models: [] });
       setOpen(false);
@@ -192,7 +205,7 @@ function ManualModelAdd({ providerId, onAdded }: { providerId: string; onAdded: 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ modelId: modelId.trim() }),
       });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (res.ok) {
         onAdded(json);
         setModelId('');
@@ -240,7 +253,7 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
     setFetchError(null);
     try {
       const res = await fetch(`/api/user/byok/providers/${provider.id}/fetch-models`, { method: 'POST' });
-      const json = await res.json();
+      const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error ?? 'Fetch failed');
       onUpdate({ ...provider, models: json.models, lastError: null });
     } catch (e: any) {
@@ -334,11 +347,19 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
 
 export default function SettingsPage() {
   const [providers, setProviders] = useState<Provider[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/user/byok/providers')
-      .then(res => res.json())
-      .then(json => setProviders(json.providers ?? []));
+      .then(async res => {
+        const json = await safeJson(res);
+        if (!res.ok) throw new Error(json.error?.message ?? json.error ?? `Failed to load providers (status ${res.status}).`);
+        setProviders(json.providers ?? []);
+      })
+      .catch(e => {
+        setLoadError(e.message ?? 'Failed to load providers.');
+        setProviders([]); // stop the spinner even on failure
+      });
   }, []);
 
   const updateProvider = useCallback((updated: Provider) => {
@@ -368,6 +389,12 @@ export default function SettingsPage() {
             tools (web search, browser, python, docs) as the built-in models — nothing is gated.
           </div>
         </div>
+
+        {loadError && (
+          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
+            {loadError}
+          </div>
+        )}
 
         {providers === null ? (
           <div className="text-sm text-muted-foreground">Loading…</div>

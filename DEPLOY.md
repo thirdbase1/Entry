@@ -56,6 +56,7 @@ you want to change one of those):
 | `GOOGLE_CLIENT_ID/SECRET` | ⬜ | Google OAuth sign-in |
 | `GITHUB_CLIENT_ID/SECRET` | ⬜ | GitHub OAuth sign-in |
 | `BLOB_READ_WRITE_TOKEN` | ⬜ [auto] | Auto-provisioned when you attach a Blob store on Vercel |
+| `BYOK_ENCRYPTION_KEY` | ⬜ | Required only if users will add BYOK providers with an API key; generate with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
 
 **Not env vars, by design** — `BETTER_AUTH_URL` (derived from Vercel's
 auto-injected `VERCEL_PROJECT_PRODUCTION_URL`), `AUTH_ALLOW_SIGNUP` /
