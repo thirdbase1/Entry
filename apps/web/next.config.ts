@@ -147,6 +147,9 @@ const nextConfig: NextConfig = {
   // `resolve.extensionAlias` is the documented workaround, so this app
   // builds with `next build --webpack` until Turbopack gains parity.
   webpack(config) {
+    console.log('[DEBUG next.config webpack()] running, config.resolve.alias type:', typeof config.resolve.alias, Array.isArray(config.resolve.alias) ? 'array' : 'not-array');
+    console.log('[DEBUG next.config webpack()] __dirname:', __dirname);
+
     config.resolve.extensionAlias = {
       '.js': ['.ts', '.tsx', '.js'],
     };
@@ -158,6 +161,9 @@ const nextConfig: NextConfig = {
     // See: https://nextjs.org/docs/messages/invalid-resolve-alias
     if (config.resolve.alias && typeof config.resolve.alias === 'object' && !Array.isArray(config.resolve.alias)) {
       config.resolve.alias['@/'] = resolve(__dirname, './');
+      console.log('[DEBUG next.config webpack()] set alias @/ ->', resolve(__dirname, './'));
+    } else {
+      console.log('[DEBUG next.config webpack()] SKIPPED alias set, alias was:', config.resolve.alias);
     }
 
 
