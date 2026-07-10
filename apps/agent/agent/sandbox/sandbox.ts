@@ -39,7 +39,15 @@ export default defineSandbox({
     // numpy/pandas/matplotlib preinstalled for the python_coding /
     // task_analysis workflows (matches the original e2b tool's warm-start
     // package set).
-    await sandbox.run({ command: 'pip3 install --quiet numpy pandas matplotlib' });
+    // Vercel Sandbox's base image ships Debian's PEP 668
+    // "externally-managed-environment" guard on system pip, which refuses a
+    // bare `pip3 install` (confirmed the hard way: bootstrap failed in
+    // production with `error: externally-managed-environment`). Passing
+    // `--break-system-packages` is the documented escape hatch for exactly
+    // this case (a disposable, single-purpose sandbox container, not a
+    // shared system Python) — see PEP 668 and Debian's own bug tracker for
+    // this flag's intended use.
+    await sandbox.run({ command: 'pip3 install --quiet --break-system-packages numpy pandas matplotlib' });
 
     // agent-browser (github.com/vercel-labs/agent-browser) + Chrome for
     // Testing, used by tools/browser_use.ts.
