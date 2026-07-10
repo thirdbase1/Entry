@@ -100,6 +100,11 @@ export const auth = betterAuth({
 
   // Email verification
   emailVerification: {
+    sendOnSignUp: true, // BUG FIX: without this, better-auth never actually
+    // sends the verification email on sign-up, yet requireEmailVerification
+    // above still blocks sign-in for unverified users — a total lockout for
+    // every new email/password account with no way to self-recover.
+    autoSignInAfterVerification: true,
     sendVerificationEmail: async ({ user, url }) => {
       await sendMail({ name: 'VerifyEmail', to: user.email, props: { url } });
     },
