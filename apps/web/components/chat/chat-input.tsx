@@ -32,7 +32,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { ChatConfigMenu, ModelPickerMenu, DEFAULT_MODEL_ID, useModelOptions, type ReasoningEffort } from './chat-config';
+import { ChatConfigMenu, ModelPickerMenu, ReasoningEffortMenu, DEFAULT_MODEL_ID, DEFAULT_REASONING_EFFORT, useModelOptions, type ReasoningEffort } from './chat-config';
 import { ContextSelectorMenu, ContextPreview, type AttachedContext } from './chat-context';
 
 const TRANSITION = { type: 'spring' as const, stiffness: 380, damping: 34 };
@@ -301,6 +301,24 @@ export function ChatInput({
                 <span className="text-sm font-medium text-foreground/50">{currentModel?.label ?? 'Default'}</span>
               </button>
             </ModelPickerMenu>
+
+            {reasoningEffort && onReasoningEffortChange && (
+              <ReasoningEffortMenu model={model} reasoningEffort={reasoningEffort} setReasoningEffort={onReasoningEffortChange}>
+                <button
+                  type="button"
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-full py-1 transition-colors',
+                    reasoningEffort !== DEFAULT_REASONING_EFFORT
+                      ? 'text-emerald-500 hover:text-emerald-600'
+                      : 'text-foreground/50 hover:text-foreground'
+                  )}
+                  aria-label="Reasoning effort for this turn"
+                >
+                  <BarsIcon />
+                  <span className="text-sm font-medium">Thinking</span>
+                </button>
+              </ReasoningEffortMenu>
+            )}
 
             <ChatConfigMenu model={model} setModel={setModel} disabledTools={disabledTools} setDisabledTools={setDisabledTools}>
               <button

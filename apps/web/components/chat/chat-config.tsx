@@ -37,9 +37,24 @@ export interface ModelOption {
  *  every reasoning-capable provider (OpenAI, Anthropic, Google, xAI, Groq,
  *  DeepSeek, Fireworks, Bedrock); a provider that doesn't support it just
  *  ignores it with a warning, so it's always safe to send. */
-export const REASONING_EFFORT_LEVELS = ['none', 'low', 'medium', 'high'] as const;
+// Full portable set per ai-sdk.dev/docs/ai-sdk-core/reasoning (AI SDK 7) —
+// this previously only listed 4 of the 7 real levels (missing 'minimal'
+// and 'xhigh'), silently coercing either pick down to 'provider-default'
+// server-side. 'provider-default' itself is included too, as an explicit
+// "Auto" choice (see AUTO_LABEL below) rather than only being reachable
+// by omission.
+export const REASONING_EFFORT_LEVELS = ['provider-default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORT_LEVELS)[number];
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'medium';
+export const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  'provider-default': 'Auto',
+  none: 'None',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Max',
+};
 const REASONING_EFFORT_STORAGE_KEY = 'entry:lastReasoningEffort';
 
 export function useReasoningEffort() {
@@ -72,6 +87,7 @@ export const configurableTools = [
   { label: 'Doc Compose', value: 'doc_compose' },
   { label: 'Web Search', value: 'web_search' },
   { label: 'Python', value: 'python_coding' },
+  { label: 'Bash', value: 'bash' },
   { label: 'Browser Use', value: 'browser_use' },
   { label: 'Task Analysis', value: 'task_analysis' },
 ] as const;
@@ -222,29 +238,6 @@ export function ModelPickerMenu({
                 className="flex-1 h-7 px-2 rounded-md border bg-background text-xs outline-none focus:border-primary"
               />
             </div>
-            {reasoningEffort && setReasoningEffort && selectedOption?.supportsReasoning && (
-              <div className="px-2 pt-2 pb-1.5 border-b">
-                <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-0.5 pb-1">
-                  Reasoning effort
-                </div>
-                <div className="flex gap-1">
-                  {REASONING_EFFORT_LEVELS.map(level => (
-                    <button
-                      key={level}
-                      onClick={() => setReasoningEffort(level)}
-                      className={cn(
-                        'flex-1 capitalize px-1.5 py-1 rounded-md text-xs border text-center',
-                        reasoningEffort === level
-                          ? 'bg-primary text-primary-foreground border-primary'
-                          : 'bg-background text-foreground border-border hover:bg-accent'
-                      )}
-                    >
-                      {level}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
             <div className="flex flex-col gap-0.5 p-2 max-h-72 overflow-y-auto">
               <button
                 onClick={() => { setModel(DEFAULT_MODEL_ID); setOpen(false); }}
@@ -297,6 +290,63 @@ export function ModelPickerMenu({
                 <div className="text-xs text-muted-foreground px-2 py-3 text-center">No models match "{query}"</div>
               )}
             </div>
+        </div>
+      </FloatingPanel>
+    </div>
+  );
+}
+
+/**
+ * Standalone reasoning-effort toolbar control — split out of
+ * ModelPickerMenu (2026-07-11) so it lives next to the Tools toggle in
+ * chat-input.tsx's own toolbar instead of being buried inside the model
+ * dropdown, where it was easy to miss and disconnected from the
+ * "supports reasoning" gating a user actually cares about in the moment.
+ * Self-hides (renders null) when the current model doesn't support
+ * reasoning at all — same `supportsReasoning` flag ModelPickerMenu uses,
+ * sourced from the real Gateway catalog's reasoning tags for Gateway
+ * models, and the best-effort fingerprint heuristic (lib/reasoning-
+ * detection.ts) for BYOK models, since there's no capability-discovery
+ * API for an arbitrary BYOK base URL to check against.
+ */
+export function ReasoningEffortMenu({
+  model,
+  reasoningEffort,
+  setReasoningEffort,
+  children,
+}: {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  setReasoningEffort: (level: ReasoningEffort) => void;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const options = useModelOptions();
+  const selectedOption = useMemo(() => options.find(o => o.value === model), [options, model]);
+  const anchorRef = useRef<HTMLDivElement>(null);
+
+  if (!selectedOption?.supportsReasoning) return null;
+
+  return (
+    <div ref={anchorRef} className="relative inline-block">
+      <div onClick={() => setOpen(o => !o)}>{children}</div>
+      <FloatingPanel open={open} onClose={() => setOpen(false)} anchorRef={anchorRef} align="left">
+        <div className="w-40 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden p-1">
+          {REASONING_EFFORT_LEVELS.map(level => (
+            <button
+              key={level}
+              onClick={() => {
+                setReasoningEffort(level);
+                setOpen(false);
+              }}
+              className={cn(
+                'flex items-center justify-between w-full px-2 py-1.5 rounded-md text-sm text-left hover:bg-accent',
+                reasoningEffort === level ? 'text-primary font-medium' : 'text-foreground'
+              )}
+            >
+              {REASONING_EFFORT_LABELS[level]}
+            </button>
+          ))}
         </div>
       </FloatingPanel>
     </div>

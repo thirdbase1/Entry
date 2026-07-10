@@ -39,10 +39,15 @@
  * and persist the full UIMessage[] (including tool + reasoning parts) via
  * toUIMessageStreamResponse's onFinish.
  *
- * Tool parity: 8 of the 9 tools eve's root agent has (browser_use is the
- * one exception — it needs ctx.getSandbox(), which only exists inside an
- * authored eve runtime execution; out of scope here, fast-follow if
- * needed). Every tool execute is wrapped with safeExecute at the source
+ * Tool parity: full parity with eve's root agent's 10 tools, including
+ * bash and browser_use (2026-07-11) — both need a real sandbox, which
+ * used to only exist inside an authored eve runtime execution. Fixed by
+ * lib/direct-chat/sandbox.ts, a standalone `@vercel/sandbox` wrapper
+ * (same underlying SDK eve's own `vercel()` backend uses) keyed by
+ * chatId instead of an eve session id — see that file's comment for why
+ * this was a real, confirmed gap (BYOK/Gateway-direct users truthfully
+ * being told "no live browser" for a feature the default chat path has
+ * always had). Every tool execute is wrapped with safeExecute at the source
  * (lib/tool-impls/*.ts) so a thrown error (bad key, upstream outage, etc.)
  * always resolves to a normal `{ error }` tool result the model can see
  * and explain, instead of an uncaught rejection that can tear down the
@@ -68,6 +73,7 @@ import { prisma } from '@entry/db';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
+import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
 import type { ToolExecCtx } from '@entry/agent/tool-impls/types';
 
@@ -79,6 +85,9 @@ import { codeArtifact } from '@entry/agent/tool-impls/code_artifact';
 import { makeItReal } from '@entry/agent/tool-impls/make_it_real';
 import { docCompose } from '@entry/agent/tool-impls/doc_compose';
 import { pythonCoding } from '@entry/agent/tool-impls/python_coding';
+import { browserUse } from '@entry/agent/tool-impls/browser_use';
+import { bash } from '@entry/agent/tool-impls/bash';
+import { z } from 'zod';
 
 const SYSTEM_PROMPT = buildPersonaInstructions();
 
@@ -98,8 +107,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // Only ever trust one of the 5 known levels from the client; anything
   // else (missing, stale localStorage value, tampering) falls back to
   // 'provider-default' rather than erroring the whole turn.
-  const REASONING_LEVELS = new Set(['none', 'low', 'medium', 'high', 'provider-default']);
-  const resolvedReasoningEffort: 'none' | 'low' | 'medium' | 'high' | 'provider-default' = REASONING_LEVELS.has(
+  // Full portable set per ai-sdk.dev/docs/ai-sdk-core/reasoning (AI SDK 7):
+  // 'provider-default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'.
+  // Previously only 4 of these 7 were recognized (missing 'minimal' and
+  // 'xhigh'), silently downgrading either to 'provider-default'.
+  const REASONING_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'provider-default']);
+  const resolvedReasoningEffort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'provider-default' = REASONING_LEVELS.has(
     reasoningEffort
   )
     ? reasoningEffort
@@ -118,52 +131,70 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
-  // Persist the user's turn to the row BEFORE streaming, not only in
-  // onFinish — so if the model call itself fails outright (network,
+  // Persist the user's turn to the row BEFORE the turn finishes, not only
+  // in onFinish — so if the model call itself fails outright (network,
   // bad key, upstream outage) the user's own message is never silently
   // lost. onFinish below still overwrites `events` with the complete
   // exchange (including the assistant's reply) once the turn succeeds.
-  const existing = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId } });
-  if (!existing) {
-    const firstUserTextPart = uiMessages.find(m => m.role === 'user')?.parts?.find((p: any) => p.type === 'text') as { text?: string } | undefined;
-    const firstUserText = firstUserTextPart?.text ?? '';
-    await prisma.eveChatSession.create({
-      data: {
-        id: chatId,
-        userId,
-        byokModelId: byokModelId ?? null,
-        requestedModel: byokModelId ? null : requestedModel,
-        title: firstUserText.slice(0, 80) || null,
-        events: uiMessages as any,
-      },
-    });
-  } else {
-    await prisma.eveChatSession
-      .update({ where: { id: chatId, userId }, data: { events: uiMessages as any } })
-      .catch(err => console.error('[direct chat] pre-stream save failed', chatId, err));
-  }
+  //
+  // This DB round-trip (1-2 Neon queries) used to run sequentially BEFORE
+  // streamText() was even called, adding its full latency to time-to-
+  // first-token on every single turn for no reason — the model call
+  // doesn't depend on this write succeeding first, and the write doesn't
+  // depend on the model call either. Kicking it off concurrently with
+  // preparing the model call (below) removes it from the critical path:
+  // it now overlaps with the provider's own connection setup instead of
+  // stacking in front of it. Still fully awaited (see `await preSave`
+  // right before the response is returned) so the durability guarantee
+  // above is unchanged — only the ORDERING relative to streamText's own
+  // network call changed, not whether either one is awaited.
+  const preSave = (async () => {
+    const existing = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId } });
+    if (!existing) {
+      const firstUserTextPart = uiMessages.find(m => m.role === 'user')?.parts?.find((p: any) => p.type === 'text') as { text?: string } | undefined;
+      const firstUserText = firstUserTextPart?.text ?? '';
+      await prisma.eveChatSession.create({
+        data: {
+          id: chatId,
+          userId,
+          byokModelId: byokModelId ?? null,
+          requestedModel: byokModelId ? null : requestedModel,
+          title: firstUserText.slice(0, 80) || null,
+          events: uiMessages as any,
+        },
+      });
+    } else {
+      await prisma.eveChatSession.update({ where: { id: chatId, userId }, data: { events: uiMessages as any } });
+    }
+  })().catch(err => console.error('[direct chat] pre-stream save failed', chatId, err));
 
-  // Minimal structural ctx — enough for the 8 reused tool-impls. See
+  // Minimal structural ctx — enough for the 10 reused tool-impls. See
   // ToolExecCtx: only `session.id` / `session.auth.current.principalId`
-  // are read by the tools reused here (make_it_real/doc_compose for
-  // saving docs under the right user+chat; the sub-generation tools read
+  // are read by most tools here (make_it_real/doc_compose for saving
+  // docs under the right user+chat; the sub-generation tools read
   // `byokModel` so THEY also honor the resolved model instead of quietly
-  // falling back to Gateway).
+  // falling back to Gateway). `getSandbox` now lazily creates/resumes a
+  // real Vercel Sandbox keyed by chatId (see lib/direct-chat/sandbox.ts)
+  // instead of throwing — bash and browser_use below both call it.
+  let sandboxPromise: ReturnType<typeof getSandboxForChat> | undefined;
   const execCtx: ToolExecCtx = {
     session: { id: chatId, auth: { current: { principalId: userId } } },
     byokModel: model,
-    // browser_use is intentionally not offered in this path, so getSandbox
-    // is never actually called — still provided to satisfy the type.
     async getSandbox() {
-      throw new Error('Sandbox tools are not available in direct-model chats yet.');
+      if (!sandboxPromise) sandboxPromise = getSandboxForChat(chatId);
+      return sandboxPromise;
     },
   };
+
+  // Runs concurrently with `preSave` above (both kicked off, neither
+  // awaited yet) rather than after it — see preSave's comment.
+  const modelMessages = convertToModelMessages(uiMessages);
 
   const result = streamText({
     model,
     system: SYSTEM_PROMPT,
     stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
-    messages: await convertToModelMessages(uiMessages),
+    messages: await modelMessages,
     // Anthropic-family models need extended thinking explicitly turned on
     // to produce reasoning tokens at all (unlike e.g. DeepSeek-R1/o-series,
     // which stream reasoning by default) — best-effort, ignored by any
@@ -207,8 +238,25 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         inputSchema: docCompose.inputSchema,
         execute: (input: { title: string; userPrompt: string }) => docCompose.execute(input, execCtx),
       }),
+      bash: tool({
+        description: bash.description,
+        inputSchema: bash.inputSchema,
+        execute: (input: { command: string }) => bash.execute(input, execCtx),
+      }),
+      browser_use: tool({
+        description: browserUse.description,
+        inputSchema: browserUse.inputSchema,
+        execute: (input: { task: string }) => browserUse.execute(input, execCtx),
+      }),
     },
   });
+
+  // Make sure the durability write has actually landed before the
+  // response goes out — this await runs concurrently with (not after)
+  // streamText's own already-in-flight provider request above, so it's
+  // essentially free: total added latency is whichever of the two is
+  // slower, not their sum.
+  await preSave;
 
   return result.toUIMessageStreamResponse({
     originalMessages: uiMessages,
