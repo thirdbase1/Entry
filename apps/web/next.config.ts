@@ -23,6 +23,16 @@ const eveRootAbsolute = resolve(__dirname, '../agent');
 // `transpilePackages` to run these through its compiler. Listed here are
 // the packages actually imported by our doc-composer code.
 const nextConfig: NextConfig = {
+  // Standalone output: see the long comment block near the bottom of this
+  // file (search "MANUAL BUILD OUTPUT API DEPLOYMENT") for why this is
+  // required — Vercel's own build orchestration (both `vercel build` and a
+  // real `vercel --prod` remote build) reproducibly kills `next build`
+  // with zero error output, while a plain `next build`/`npm run build` run
+  // outside that orchestration layer always succeeds. Standalone output
+  // lets us build normally and hand-assemble the Vercel deployment
+  // ourselves via the Build Output API, bypassing the broken orchestration
+  // entirely.
+  output: 'standalone',
   // Vercel's build containers report "2 cores, 8 GB" in their UI, but
   // Node's os.cpus().length (which Next.js's `experimental.cpus` default
   // derives from) often reads the underlying HOST's full core count on
@@ -41,7 +51,21 @@ const nextConfig: NextConfig = {
   // slower, but bounded, predictable memory use that fits the box.
   experimental: {
     cpus: 1,
-    workerThreads: false,
+    // Switched from child_process forking (workerThreads: false) to
+    // worker_threads (true): a real `vercel build`/`vercel --prod` run
+    // (both locally in the dev sandbox and on Vercel's own remote
+    // builder) reproducibly died with zero error output right between
+    // "Skipping validation of types" and "Collecting page data using N
+    // workers" — i.e. during the page-data worker's own startup, before
+    // it ever got a chance to run or log anything. A plain `next build`
+    // run outside any Vercel orchestration layer never hit this, even
+    // with the exact same node_modules/env. worker_threads spins up a
+    // new V8 isolate inside the *same* OS process (no fork()/clone()
+    // needed), sidestepping whatever is blocking that nested child-
+    // process creation specifically when Next.js's build is itself
+    // invoked as a child of Vercel's own build orchestration (CLI or
+    // remote container).
+    workerThreads: true,
   },
   // Every @blocksuite/* package ships raw TS source (see the exports-field
   // comment above) and BlockSuite's dependency graph transitively pulls in
