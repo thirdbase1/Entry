@@ -105,6 +105,116 @@ function parseModelValue(value: string): { requestedModel?: string; byokModelId?
   return {};
 }
 
+/**
+ * Standalone model picker — the model button in chat-input.tsx (the one
+ * that shows the current model's icon + name, e.g. "Fable 5") now opens
+ * THIS instead of the full ChatConfigMenu. Same underlying model list/
+ * search/selection logic as ChatConfigMenu's old nested "Foundation Model"
+ * sub-panel, just promoted to be its own lightweight popover with nothing
+ * else in it — no Tools section, no Back button, since it's not nested
+ * inside anything anymore. The gear/tools icon keeps opening the full
+ * ChatConfigMenu below, completely unchanged.
+ */
+export function ModelPickerMenu({
+  model,
+  setModel,
+  children,
+}: {
+  model: string;
+  setModel: (model: string) => void;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const options = useModelOptions();
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return options;
+    const q = query.toLowerCase();
+    return options.filter(o => o.label.toLowerCase().includes(q) || o.provider.toLowerCase().includes(q));
+  }, [options, query]);
+
+  const grouped = useMemo(() => {
+    const byok = filtered.filter(o => o.group === 'Your providers');
+    const gateway = filtered.filter(o => o.group === 'Gateway');
+    return { byok, gateway };
+  }, [filtered]);
+
+  return (
+    <div className="relative inline-block">
+      <div onClick={() => setOpen(o => !o)}>{children}</div>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute bottom-full left-0 mb-2 w-72 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden z-20">
+            <div className="flex items-center gap-2 px-2 pt-2 pb-1.5 border-b">
+              <input
+                autoFocus
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="Search models…"
+                className="flex-1 h-7 px-2 rounded-md border bg-background text-xs outline-none focus:border-primary"
+              />
+            </div>
+            <div className="flex flex-col gap-0.5 p-2 max-h-72 overflow-y-auto">
+              <button
+                onClick={() => { setModel(DEFAULT_MODEL_ID); setOpen(false); }}
+                className={cn(
+                  'flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-left hover:bg-accent w-full',
+                  model === DEFAULT_MODEL_ID || !model ? 'text-primary font-medium' : 'text-foreground'
+                )}
+              >
+                <span className="flex-1 truncate">Default</span>
+                {(model === DEFAULT_MODEL_ID || !model) && <span className="text-xs">✓</span>}
+              </button>
+
+              {grouped.byok.length > 0 && (
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-2 pt-2 pb-0.5">Your providers</div>
+              )}
+              {grouped.byok.map(m => (
+                <button
+                  key={m.value}
+                  onClick={() => { setModel(m.value); setOpen(false); }}
+                  className={cn(
+                    'flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-left hover:bg-accent w-full',
+                    model === m.value ? 'text-primary font-medium' : 'text-foreground'
+                  )}
+                >
+                  <m.Icon className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 truncate">{m.label}</span>
+                  {model === m.value && <span className="text-xs">✓</span>}
+                </button>
+              ))}
+
+              {grouped.gateway.length > 0 && (
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-2 pt-2 pb-0.5">Gateway</div>
+              )}
+              {grouped.gateway.map(m => (
+                <button
+                  key={m.value}
+                  onClick={() => { setModel(m.value); setOpen(false); }}
+                  className={cn(
+                    'flex items-center gap-2 px-2 py-1.5 rounded-md text-sm text-left hover:bg-accent w-full',
+                    model === m.value ? 'text-primary font-medium' : 'text-foreground'
+                  )}
+                >
+                  <m.Icon className="w-4 h-4 shrink-0" />
+                  <span className="flex-1 truncate">{m.label}</span>
+                  {model === m.value && <span className="text-xs">✓</span>}
+                </button>
+              ))}
+
+              {filtered.length === 0 && (
+                <div className="text-xs text-muted-foreground px-2 py-3 text-center">No models match "{query}"</div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ChatConfigMenu({
   model,
   setModel,

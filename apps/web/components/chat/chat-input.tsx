@@ -20,11 +20,19 @@
  * 3. Reference had no concept of "streaming" (a turn already in flight) —
  *    added a third icon state (stop square) alongside arrow/mic, shown
  *    whenever `streaming` is true, wired to `onAbort`.
+ * 4. The mic icon now does real voice input: tapping it (when the box is
+ *    empty and no turn is streaming) starts a MediaRecorder capture, a
+ *    second tap stops it and posts the clip to /api/chats/transcribe
+ *    (Vercel AI Gateway Whisper, same credential the rest of chat already
+ *    uses — see that route for why it's a separate synchronous endpoint
+ *    from the existing async /api/copilot/transcription job pipeline).
+ *    The returned text lands directly in the textarea, expanded and
+ *    focused, ready to edit or send.
  */
 import { AnimatePresence, motion } from 'framer-motion';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { ChatConfigMenu, DEFAULT_MODEL_ID, useModelOptions } from './chat-config';
+import { ChatConfigMenu, ModelPickerMenu, DEFAULT_MODEL_ID, useModelOptions } from './chat-config';
 import { ContextSelectorMenu, ContextPreview, type AttachedContext } from './chat-context';
 
 const TRANSITION = { type: 'spring' as const, stiffness: 380, damping: 34 };
@@ -43,6 +51,32 @@ function MicIcon() {
       <rect x="5" y="1" width="4" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" />
       <path d="M2.75 6.5V7a4.25 4.25 0 0 0 8.5 0v-.5M7 11.25V13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
+  );
+}
+
+function RecordingIcon() {
+  return (
+    <motion.div
+      animate={{ scale: [1, 1.15, 1] }}
+      transition={{ duration: 1.1, repeat: Infinity, ease: 'easeInOut' }}
+      className="w-2.5 h-2.5 rounded-full bg-red-500"
+    />
+  );
+}
+
+function SpinnerIcon() {
+  return (
+    <motion.svg
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      animate={{ rotate: 360 }}
+      transition={{ duration: 0.7, repeat: Infinity, ease: 'linear' }}
+      aria-hidden="true"
+    >
+      <path d="M7 1.5a5.5 5.5 0 1 0 5.5 5.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </motion.svg>
   );
 }
 
@@ -101,9 +135,85 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const [micError, setMicError] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+
   const expand = useCallback(() => {
     setExpanded(true);
     requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!micError) return;
+    const t = setTimeout(() => setMicError(null), 4000);
+    return () => clearTimeout(t);
+  }, [micError]);
+
+  useEffect(() => {
+    // release the mic if the component unmounts mid-recording
+    return () => {
+      streamRef.current?.getTracks().forEach(t => t.stop());
+    };
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicError('Voice input is not supported in this browser');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      audioChunksRef.current = [];
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : undefined;
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recorder.ondataavailable = e => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        audioChunksRef.current = [];
+        if (blob.size === 0) {
+          setVoiceState('idle');
+          return;
+        }
+        setVoiceState('transcribing');
+        try {
+          const form = new FormData();
+          form.append('audio', blob, `voice.${blob.type.includes('webm') ? 'webm' : 'wav'}`);
+          const res = await fetch('/api/chats/transcribe', { method: 'POST', body: form });
+          if (!res.ok) throw new Error((await res.json().catch(() => null))?.error || 'Transcription failed');
+          const data = await res.json();
+          const text = (data.text || '').trim();
+          if (text) {
+            setInput(prev => (prev.trim() ? `${prev.trim()} ${text}` : text));
+            setExpanded(true);
+            requestAnimationFrame(() => textareaRef.current?.focus());
+          } else {
+            setMicError("Didn't catch that — try again");
+          }
+        } catch (err) {
+          setMicError(err instanceof Error ? err.message : 'Transcription failed');
+        } finally {
+          setVoiceState('idle');
+        }
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setVoiceState('recording');
+    } catch {
+      setMicError('Microphone access was denied');
+    }
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    mediaRecorderRef.current?.stop();
+    mediaRecorderRef.current = null;
   }, []);
 
   const handleBlur = useCallback(
@@ -177,7 +287,7 @@ export function ChatInput({
             className="flex translate-y-px items-center gap-5 px-5 pt-2 pb-3"
             onClick={e => e.stopPropagation()}
           >
-            <ChatConfigMenu model={model} setModel={setModel} disabledTools={disabledTools} setDisabledTools={setDisabledTools}>
+            <ModelPickerMenu model={model} setModel={setModel}>
               <button
                 type="button"
                 className="flex items-center gap-2 rounded-full py-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -186,7 +296,7 @@ export function ChatInput({
                 {currentModel ? <currentModel.Icon className="w-[15px] h-[15px]" /> : <BarsIcon />}
                 <span className="text-sm font-medium text-foreground/50">{currentModel?.label ?? 'Default'}</span>
               </button>
-            </ChatConfigMenu>
+            </ModelPickerMenu>
 
             <ChatConfigMenu model={model} setModel={setModel} disabledTools={disabledTools} setDisabledTools={setDisabledTools}>
               <button
@@ -217,19 +327,40 @@ export function ChatInput({
 
       <motion.button
         type="button"
-        onClick={streaming ? onAbort : expanded ? handleSend : expand}
-        disabled={!streaming && expanded && hasValue && sending}
-        aria-label={streaming ? 'Stop' : hasValue ? 'Send prompt' : 'Use voice input'}
+        onClick={() => {
+          if (streaming) return onAbort?.();
+          if (voiceState === 'recording') return stopRecording();
+          if (voiceState === 'transcribing') return;
+          if (expanded && hasValue) return handleSend();
+          if (!hasValue) return startRecording();
+          return expand();
+        }}
+        disabled={(!streaming && expanded && hasValue && sending) || voiceState === 'transcribing'}
+        aria-label={
+          streaming ? 'Stop' : voiceState === 'recording' ? 'Stop recording' : voiceState === 'transcribing' ? 'Transcribing…' : hasValue ? 'Send prompt' : 'Use voice input'
+        }
         style={{ borderRadius: 9999 }}
         className={cn(
           'absolute right-2 bottom-2 flex size-8 items-center justify-center transition-opacity',
-          streaming ? 'bg-foreground' : hasValue && !sending ? 'bg-accent text-accent-foreground hover:opacity-90' : 'bg-muted text-muted-foreground opacity-70'
+          streaming || voiceState === 'recording'
+            ? 'bg-foreground'
+            : hasValue && !sending
+              ? 'bg-accent text-accent-foreground hover:opacity-90'
+              : 'bg-muted text-muted-foreground opacity-70'
         )}
       >
         <AnimatePresence mode="popLayout" initial={false}>
           {streaming ? (
             <motion.span key="stop" initial={{ opacity: 0, scale: 0.5 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.5 }} transition={{ duration: 0.15 }} className="flex items-center justify-center">
               <StopIcon />
+            </motion.span>
+          ) : voiceState === 'recording' ? (
+            <motion.span key="recording" initial={{ opacity: 0, scale: 0.5 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.5 }} transition={{ duration: 0.15 }} className="flex items-center justify-center">
+              <RecordingIcon />
+            </motion.span>
+          ) : voiceState === 'transcribing' ? (
+            <motion.span key="transcribing" initial={{ opacity: 0, scale: 0.5 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.5 }} transition={{ duration: 0.15 }} className="flex items-center justify-center">
+              <SpinnerIcon />
             </motion.span>
           ) : hasValue ? (
             <motion.span key="arrow" initial={{ opacity: 0, scale: 0.5, filter: 'blur(2px)' }} animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }} exit={{ opacity: 0, scale: 0.5, filter: 'blur(2px)' }} transition={{ duration: 0.15, ease: 'easeOut' }} className="flex items-center justify-center">
@@ -242,6 +373,18 @@ export function ChatInput({
           )}
         </AnimatePresence>
       </motion.button>
+
+      {(voiceState === 'recording' || voiceState === 'transcribing' || micError) && (
+        <div className="pointer-events-none absolute bottom-2.5 right-12 text-xs font-medium">
+          {micError ? (
+            <span className="text-destructive">{micError}</span>
+          ) : voiceState === 'recording' ? (
+            <span className="text-muted-foreground">Listening…</span>
+          ) : (
+            <span className="text-muted-foreground">Transcribing…</span>
+          )}
+        </div>
+      )}
     </motion.div>
   );
 }

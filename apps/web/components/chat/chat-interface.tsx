@@ -330,7 +330,7 @@ function ChatInterfaceInner({
           </div>
         </div>
       )}
-      <div className="max-w-[832px] px-4 mx-auto w-full py-4">
+      <div className="sticky bottom-0 z-10 w-full bg-background max-w-[832px] px-4 mx-auto py-4">
         <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} />
       </div>
     </div>

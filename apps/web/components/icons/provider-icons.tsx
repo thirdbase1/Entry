@@ -1,127 +1,106 @@
 /**
- * Provider brand icons — ported 1:1 from the original's
- * packages/frontend/app/src/icons/{claude,chatgpt,gemini}.tsx
+ * Model brand icons — now backed by @lobehub/icons (github.com/lobehub/
+ * lobe-icons), a maintained 1500+ AI/LLM brand SVG set, instead of the 3
+ * hand-drawn icons + letter-monogram fallbacks this used to ship.
+ *
+ * Deliberately deep-importing each icon from its own module path
+ * (`@lobehub/icons/es/<Name>`) instead of the package's top-level export —
+ * the top-level barrel also re-exports the `ModelIcon`/`ProviderIcon`/
+ * `ProviderCombine` helper components, which pull in `@lobehub/ui` +
+ * `antd-style` (a whole separate design-system dependency this app doesn't
+ * otherwise use). Deep-importing just the plain brand-icon modules (which
+ * genuinely have zero extra dependencies, confirmed: `grep -rl
+ * "@lobehub/ui" es/OpenAI es/Claude` etc. — no matches) keeps this
+ * one-line-per-family lookup exactly as lightweight as the icons it
+ * replaces, which matters given this build is already fighting Vercel's
+ * container memory ceiling (see next.config.ts's cpus:1 comment).
+ *
+ * Which icon a model gets is still resolved purely from the MODEL's own
+ * name/id (via lib/model-provider.ts's inferModelFamily), never from the
+ * BYOK connection's transport/compatibility mode — a Llama model served
+ * over an OpenAI-compatible endpoint still shows the Meta logo, not a
+ * generic "OpenAI-compatible" mark.
  */
+// Deep-imported all the way down to each icon's own `components/Mono` file
+// (the plain, prop-driven currentColor SVG — no variant wrapper) rather
+// than the icon's own `index.js`. That folder-level index.js eagerly
+// imports ALL of that icon's variants (Mono/Color/Text/Combine/Avatar) at
+// module scope, and the `.Avatar` variant specifically needs
+// `@lobehub/icons/es/features/IconAvatar`, which pulls in `@lobehub/ui` ->
+// `antd-style` -> a peer-dependency on `antd` this app doesn't have
+// (confirmed the hard way: importing `@lobehub/icons/es/Grok` alone broke
+// the build with "Module not found: Can't resolve 'antd'"). Going one
+// level deeper to `components/Mono` sidesteps the variants entirely — that
+// file only imports its own brand-color constants, nothing else.
+import OpenAIIcon from '@lobehub/icons/es/OpenAI/components/Mono';
+import AnthropicIcon from '@lobehub/icons/es/Anthropic/components/Mono';
+import GeminiIcon from '@lobehub/icons/es/Gemini/components/Mono';
+import MetaIcon from '@lobehub/icons/es/Meta/components/Mono';
+import MistralIcon from '@lobehub/icons/es/Mistral/components/Mono';
+import DeepSeekIcon from '@lobehub/icons/es/DeepSeek/components/Mono';
+import GrokIcon from '@lobehub/icons/es/Grok/components/Mono';
+import CohereIcon from '@lobehub/icons/es/Cohere/components/Mono';
+import QwenIcon from '@lobehub/icons/es/Qwen/components/Mono';
+import PerplexityIcon from '@lobehub/icons/es/Perplexity/components/Mono';
+import NovaIcon from '@lobehub/icons/es/Nova/components/Mono';
+import ByteDanceIcon from '@lobehub/icons/es/ByteDance/components/Mono';
+import MinimaxIcon from '@lobehub/icons/es/Minimax/components/Mono';
+import MoonshotIcon from '@lobehub/icons/es/Moonshot/components/Mono';
+import NvidiaIcon from '@lobehub/icons/es/Nvidia/components/Mono';
+import StepfunIcon from '@lobehub/icons/es/Stepfun/components/Mono';
+import ZaiIcon from '@lobehub/icons/es/ZAI/components/Mono';
+import ArceeIcon from '@lobehub/icons/es/Arcee/components/Mono';
+import InceptionIcon from '@lobehub/icons/es/Inception/components/Mono';
+import MorphIcon from '@lobehub/icons/es/Morph/components/Mono';
 
-export const ClaudeIcon = (props: React.SVGProps<SVGSVGElement>) => (
-  <svg
-    width="1em"
-    height="1em"
-    viewBox="0 0 20 20"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    {...props}
-  >
-    <path
-      d="M4.93703 12.7761L8.21552 10.9364L8.27037 10.7761L8.21552 10.6875H8.05518L7.50665 10.6537L5.63324 10.6031L4.00876 10.5356L2.43492 10.4512L2.0383 10.3668L1.66699 9.87737L1.70497 9.63265L2.0383 9.40902L2.51509 9.45121L3.56995 9.52294L5.15222 9.63265L6.2999 9.70016L8.00033 9.87737H8.27037L8.30834 9.76767L8.21552 9.70016L8.14379 9.63265L6.50665 8.52294L4.7345 7.34995L3.80623 6.67484L3.30412 6.33307L3.05096 6.01239L2.94125 5.31197L3.39695 4.80986L4.00876 4.85206L4.16488 4.89425L4.78514 5.37104L6.11003 6.39636L7.83999 7.67062L8.09315 7.88159L8.19442 7.80986L8.20708 7.75923L8.09315 7.56936L7.15222 5.86894L6.14801 4.13898L5.70075 3.42168L5.5826 2.9913C5.54041 2.81408 5.51087 2.6664 5.51087 2.48497L6.02986 1.78033L6.31678 1.6875L7.00876 1.78033L7.2999 2.03349L7.73028 3.01661L8.42649 4.56514L9.50666 6.67062L9.82311 7.2951L9.99189 7.87315L10.0552 8.05037H10.1649V7.9491L10.2535 6.76345L10.418 5.30775L10.5784 3.43434L10.6332 2.90691L10.8948 2.274L11.4138 1.93223L11.8189 2.12632L12.1522 2.60311L12.1058 2.91113L11.9075 4.19805L11.5193 6.21493L11.2661 7.56514H11.4138L11.5826 7.39636L12.2661 6.48919L13.4138 5.05459L13.9202 4.48497L14.5109 3.85628L14.8906 3.5567H15.6079L16.1353 4.34151L15.8991 5.15164L15.1607 6.08834L14.5488 6.88159L13.6712 8.06303L13.1227 9.00818L13.1733 9.08413L13.3041 9.07147L15.2872 8.64953L16.359 8.45543L17.6375 8.23602L18.2155 8.50607L18.2788 8.78033L18.051 9.34151L16.6839 9.67906L15.0805 9.99974L12.6923 10.5651L12.6628 10.5862L12.6965 10.6284L13.7725 10.7297L14.2324 10.755H15.359L17.456 10.9111L18.0045 11.274L18.3337 11.717L18.2788 12.0546L17.4349 12.485L16.2957 12.2149L13.6375 11.582L12.7261 11.3542H12.5995V11.4301L13.359 12.1727L14.7514 13.4301L16.494 15.0504L16.5826 15.4512L16.359 15.7677L16.1227 15.7339L14.591 14.582L14.0003 14.063L12.6628 12.9364H12.5742V13.0546L12.8822 13.5061L14.5109 15.9533L14.5953 16.7044L14.4771 16.9491L14.0552 17.0968L13.591 17.0124L12.6375 15.6748L11.6543 14.1685L10.8611 12.8183L10.764 12.8732L10.2957 17.9153L10.0763 18.1727L9.56995 18.3668L9.14801 18.0462L8.92438 17.5272L9.14801 16.5018L9.41805 15.1643L9.63746 14.101L9.83577 12.7803L9.95391 12.3415L9.94547 12.312L9.84843 12.3246L8.85265 13.6917L7.33788 15.7381L6.13957 17.0208L5.85265 17.1348L5.35476 16.8774L5.40117 16.4175L5.67965 16.0082L7.33788 13.8985L8.33788 12.5905L8.98345 11.8352L8.97923 11.7255H8.94125L4.53619 14.5862L3.75138 14.6875L3.41383 14.371L3.45602 13.8521L3.61636 13.6833L4.94125 12.7719L4.93703 12.7761Z"
-      fill="#D97757"
-    />
+import type { ModelFamily } from '@/lib/model-provider';
+
+// Re-exported under their old names too, in case anything else in the app
+// still imports these directly by name.
+export {
+  OpenAIIcon as ChatGPTIcon,
+  AnthropicIcon as ClaudeIcon,
+  GeminiIcon,
+  MetaIcon,
+  MistralIcon,
+  DeepSeekIcon,
+  GrokIcon as XAIIcon,
+  CohereIcon,
+  QwenIcon,
+  PerplexityIcon,
+};
+
+/** Last-resort fallback for families lobehub has no distinct brand icon for. */
+export const GenericModelIcon = (props: React.SVGProps<SVGSVGElement>) => (
+  <svg width="1em" height="1em" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" {...props}>
+    <circle cx="10" cy="10" r="8.5" stroke="currentColor" strokeWidth="1.5" opacity="0.5" />
+    <path d="M10 13.5v.01M10 6.5a2 2 0 0 1 2 2c0 1.333-2 1.667-2 3.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" opacity="0.5" />
   </svg>
 );
 
-export const ChatGPTIcon = (props: React.SVGProps<SVGSVGElement>) => (
-  <svg
-    width="1em"
-    height="1em"
-    viewBox="0 0 20 20"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    {...props}
-  >
-    <path
-      d="M17.2348 8.48712C17.4243 7.92605 17.4899 7.33159 17.4275 6.74346C17.3652 6.15534 17.1762 5.58716 16.8733 5.07693C16.4242 4.3052 15.7382 3.69418 14.9144 3.33206C14.0905 2.96994 13.1714 2.87543 12.2895 3.06217C11.8917 2.61989 11.4029 2.26654 10.8555 2.02577C10.3082 1.78501 9.71497 1.66239 9.11575 1.6661C8.21417 1.66395 7.33518 1.94436 6.60551 2.46691C5.87585 2.98945 5.33321 3.72712 5.05585 4.57358C4.46851 4.6922 3.91363 4.93327 3.42835 5.28061C2.94308 5.62796 2.53861 6.0736 2.24202 6.58767C1.78936 7.35729 1.59614 8.24883 1.69023 9.13389C1.7843 10.0188 2.16082 10.8513 2.76549 11.5115C2.57617 12.0727 2.51049 12.6671 2.57286 13.2552C2.63522 13.8433 2.82419 14.4115 3.12712 14.9218C3.57624 15.6934 4.26221 16.3044 5.08605 16.6665C5.90988 17.0286 6.82903 17.1232 7.71084 16.9365C8.1086 17.3788 8.59752 17.7321 9.14486 17.9729C9.69219 18.2136 10.2854 18.3363 10.8846 18.3325C11.7866 18.3349 12.6661 18.0543 13.3961 17.5315C14.1261 17.0086 14.6687 16.2704 14.9458 15.4234C15.5332 15.3049 16.0881 15.0638 16.5734 14.7164C17.0586 14.3691 17.4631 13.9234 17.7597 13.4093C18.2118 12.6398 18.4046 11.7484 18.3103 10.8639C18.2159 9.97922 17.8394 9.147 17.2348 8.48712ZM10.886 17.243C10.1455 17.2441 9.4283 16.9882 8.85968 16.5202C8.8853 16.5064 8.93028 16.4821 8.95959 16.4643L12.3229 14.5475C12.4073 14.5001 12.4774 14.4314 12.526 14.3484C12.5745 14.2654 12.5998 14.1712 12.5992 14.0753V9.39689L14.0208 10.2069C14.0283 10.2105 14.0346 10.2159 14.0395 10.2227C14.0443 10.2293 14.0474 10.2371 14.0484 10.2452V14.1196C14.0474 14.9472 13.714 15.7406 13.1212 16.326C12.5284 16.9115 11.7246 17.2412 10.886 17.243ZM4.08483 14.377C3.71393 13.7447 3.58026 13.0038 3.70721 12.284C3.73219 12.2988 3.77581 12.3251 3.80711 12.3429L7.17037 14.2596C7.25419 14.308 7.34954 14.3335 7.44662 14.3335C7.54366 14.3335 7.63902 14.308 7.72284 14.2596L11.8291 11.9203V13.5401C11.8295 13.5483 11.8279 13.5567 11.8243 13.5642C11.8207 13.5717 11.8154 13.5782 11.8087 13.5832L8.40881 15.52C7.68159 15.9333 6.81788 16.045 6.00726 15.8308C5.19662 15.6164 4.50525 15.0936 4.08483 14.377ZM3.20005 7.13243C3.56934 6.49926 4.15262 6.01451 4.84773 5.76296C4.84773 5.79155 4.84606 5.84217 4.84606 5.8773V9.711C4.84547 9.80677 4.87074 9.90088 4.91925 9.98388C4.96777 10.0668 5.03778 10.1354 5.12212 10.1829L9.2283 12.5219L7.80675 13.3318C7.79974 13.3363 7.79167 13.3391 7.78331 13.3399C7.77495 13.3407 7.76651 13.3393 7.75877 13.3361L4.35855 11.3975C3.6326 10.9827 3.10297 10.3008 2.8858 9.50122C2.66862 8.70175 2.78164 7.84988 3.20005 7.13243ZM14.8796 9.81422L10.7734 7.47479L12.195 6.66522C12.202 6.66067 12.2101 6.65788 12.2184 6.65713C12.2267 6.65638 12.2352 6.65772 12.243 6.66096L15.6432 8.59783C16.1641 8.89475 16.5885 9.33189 16.8667 9.85822C17.1449 10.3845 17.2654 10.9781 17.2141 11.5695C17.1628 12.1609 16.9417 12.7257 16.5769 13.1977C16.2121 13.6695 15.7185 14.0292 15.154 14.2343C15.154 14.2054 15.154 14.1549 15.154 14.1196V10.286C15.1547 10.1904 15.1298 10.0963 15.0815 10.0134C15.0333 9.93055 14.9636 9.86177 14.8796 9.81422ZM16.2945 7.713C16.2695 7.69788 16.2259 7.67192 16.1946 7.65421L12.8313 5.73734C12.7475 5.6891 12.6522 5.66363 12.5551 5.66363C12.4581 5.66363 12.3627 5.6891 12.2789 5.73734L8.1727 8.07676V6.45693C8.17224 6.44863 8.17384 6.44038 8.17738 6.43288C8.18094 6.42538 8.1863 6.41884 8.19302 6.41388L11.593 4.47861C12.1137 4.18228 12.7094 4.03841 13.3101 4.06386C13.9108 4.0893 14.4917 4.283 14.985 4.6223C15.4782 4.96159 15.8632 5.43244 16.0952 5.9798C16.3271 6.52713 16.3962 7.12829 16.2945 7.713ZM7.39983 10.6001L5.97791 9.79022C5.97048 9.78655 5.96401 9.78111 5.9592 9.77444C5.95439 9.76766 5.9513 9.75988 5.95029 9.75177V5.8773C5.95067 5.28391 6.12238 4.70288 6.44526 4.20225C6.76818 3.70161 7.22893 3.30209 7.7736 3.05045C8.31826 2.7988 8.92428 2.70545 9.52075 2.78131C10.1173 2.85717 10.6795 3.0991 11.1417 3.47879C11.1161 3.49259 11.0714 3.51691 11.0419 3.53465L7.67854 5.4515C7.59413 5.49883 7.52406 5.5675 7.47546 5.65043C7.4269 5.73334 7.40161 5.82755 7.40215 5.9233L7.39983 10.6001ZM8.17203 8.95729L10.0009 7.91509L11.8296 8.95662V11.0403L10.0009 12.082L8.17203 11.0403V8.95729Z"
-      fill="currentColor"
-    />
-  </svg>
-);
+const FAMILY_ICON: Record<Exclude<ModelFamily, 'unknown'>, React.FC<React.SVGProps<SVGSVGElement>>> = {
+  anthropic: AnthropicIcon,
+  openai: OpenAIIcon,
+  google: GeminiIcon,
+  meta: MetaIcon,
+  mistral: MistralIcon,
+  deepseek: DeepSeekIcon,
+  xai: GrokIcon,
+  cohere: CohereIcon,
+  qwen: QwenIcon,
+  perplexity: PerplexityIcon,
+  amazon: NovaIcon,
+  bytedance: ByteDanceIcon,
+  minimax: MinimaxIcon,
+  moonshot: MoonshotIcon,
+  nvidia: NvidiaIcon,
+  stepfun: StepfunIcon,
+  zhipu: ZaiIcon,
+  arcee: ArceeIcon,
+  inception: InceptionIcon,
+  morph: MorphIcon,
+};
 
-export const GeminiIcon = (props: React.SVGProps<SVGSVGElement>) => (
-  <svg
-    width="1em"
-    height="1em"
-    viewBox="0 0 20 20"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    {...props}
-  >
-    <g clipPath="url(#clip0_540_19316)">
-      <path
-        d="M19.1663 10.018C16.7878 10.164 14.5448 11.1747 12.8597 12.8597C11.1747 14.5448 10.164 16.7878 10.018 19.1663H9.98134C9.83562 16.7877 8.82499 14.5445 7.13991 12.8594C5.45482 11.1744 3.21162 10.1637 0.833008 10.018L0.833008 9.98134C3.21162 9.83562 5.45482 8.82499 7.13991 7.13991C8.82499 5.45482 9.83562 3.21162 9.98134 0.833008L10.018 0.833008C10.164 3.21154 11.1747 5.4546 12.8597 7.13963C14.5448 8.82467 16.7878 9.83537 19.1663 9.98134V10.018Z"
-        fill="url(#paint0_radial_540_19316)"
-      />
-    </g>
-    <defs>
-      <radialGradient
-        id="paint0_radial_540_19316"
-        cx="0"
-        cy="0"
-        r="1"
-        gradientUnits="userSpaceOnUse"
-        gradientTransform="translate(2.65259 8.28436) rotate(18.6832) scale(19.5135 156.316)"
-      >
-        <stop offset="0.067" stopColor="#9168C0" />
-        <stop offset="0.343" stopColor="#5684D1" />
-        <stop offset="0.672" stopColor="#1BA1E3" />
-      </radialGradient>
-      <clipPath id="clip0_540_19316">
-        <rect width="20" height="20" fill="white" />
-      </clipPath>
-    </defs>
-  </svg>
-);
-
-
-/**
- * Simple monogram-style marks for brand families without an official
- * hand-ported SVG yet (Claude/ChatGPT/Gemini above are 1:1 ported; these
- * are lightweight but visually distinct placeholders so at least the
- * *family* is never wrong — e.g. a BYOK Llama model no longer shows the
- * ChatGPT logo).
- */
-function Monogram({ letter, bg, fg = '#fff', ...props }: React.SVGProps<SVGSVGElement> & { letter: string; bg: string; fg?: string }) {
-  return (
-    <svg width="1em" height="1em" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg" {...props}>
-      <circle cx="10" cy="10" r="10" fill={bg} />
-      <text x="10" y="14" textAnchor="middle" fontSize="11" fontWeight="700" fontFamily="sans-serif" fill={fg}>
-        {letter}
-      </text>
-    </svg>
-  );
-}
-
-export const MetaIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="M" bg="#0668E1" {...props} />;
-export const MistralIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="Mi" bg="#FA5B18" {...props} />;
-export const DeepSeekIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="D" bg="#4D6BFE" {...props} />;
-export const XAIIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="X" bg="#000000" {...props} />;
-export const CohereIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="C" bg="#39594D" {...props} />;
-export const QwenIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="Q" bg="#615CED" {...props} />;
-export const PerplexityIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="P" bg="#20808D" {...props} />;
-export const GenericModelIcon = (props: React.SVGProps<SVGSVGElement>) => <Monogram letter="?" bg="#6B7280" {...props} />;
-
-/** Resolve the appropriate icon component for a given provider string. */
 export function getProviderIcon(provider: string): React.FC<React.SVGProps<SVGSVGElement>> {
-  switch (provider) {
-    case 'anthropic':
-      return ClaudeIcon;
-    case 'openai':
-      return ChatGPTIcon;
-    case 'google':
-      return GeminiIcon;
-    case 'meta':
-      return MetaIcon;
-    case 'mistral':
-      return MistralIcon;
-    case 'deepseek':
-      return DeepSeekIcon;
-    case 'xai':
-      return XAIIcon;
-    case 'cohere':
-      return CohereIcon;
-    case 'qwen':
-      return QwenIcon;
-    case 'perplexity':
-      return PerplexityIcon;
-    default:
-      return GenericModelIcon; // true "unknown" fallback — no longer defaults to ChatGPT
-  }
+  return FAMILY_ICON[provider as Exclude<ModelFamily, 'unknown'>] ?? GenericModelIcon;
 }

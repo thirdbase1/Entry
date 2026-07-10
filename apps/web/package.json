@@ -9,6 +9,7 @@
     "migrate:deploy": "cd ../../packages/db && node ../../node_modules/prisma/build/index.js migrate deploy"
   },
   "dependencies": {
+    "@ai-sdk/react": "^4.0.21",
     "@babel/core": "^8.0.1",
     "@babel/plugin-proposal-decorators": "^8.0.2",
     "@babel/preset-typescript": "^8.0.1",
@@ -16,6 +17,7 @@
     "@blocksuite/affine-shared": "^0.22.4",
     "@blocksuite/global": "^0.22.4",
     "@blocksuite/icons": "^2.2.17",
+    "@entry/agent": "*",
     "@entry/auth": "*",
     "@entry/cache": "*",
     "@entry/copilot": "*",
@@ -24,6 +26,7 @@
     "@entry/oauth": "*",
     "@entry/queue": "*",
     "@lit/react": "^1.0.8",
+    "@lobehub/icons": "^5.10.1",
     "@tailwindcss/postcss": "^4.3.2",
     "@tailwindcss/typography": "^0.5.20",
     "@toeverything/theme": "^1.1.23",
@@ -48,9 +51,7 @@
     "unist-util-visit": "^5.1.0",
     "y-protocols": "^1.0.7",
     "yjs": "^13.6.31",
-    "zustand": "^5.0.14",
-    "@entry/agent": "*",
-    "@ai-sdk/react": "^4.0.21"
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@types/hast": "^3.0.4",
