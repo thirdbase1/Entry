@@ -20,6 +20,7 @@ import { FloatingPanel } from './floating-panel';
 import { cn } from '@/lib/utils';
 import { getProviderIcon } from '@/components/icons/provider-icons';
 import { inferModelFamily } from '@/lib/model-provider';
+import { looksLikeReasoningModel } from '@/lib/reasoning-detection';
 
 export interface ModelOption {
   label: string;
@@ -103,6 +104,15 @@ export function useModelOptions() {
             }))
           : [];
 
+      // Fingerprint source for BYOK reasoning detection below — every
+      // Gateway model id already confirmed reasoning-capable via the
+      // catalog's real tags (see /api/server/models). Zero extra request:
+      // this is the same response already fetched for gatewayModels above.
+      const gatewayReasoningIds: string[] =
+        gatewayRes.status === 'fulfilled' && Array.isArray(gatewayRes.value?.models)
+          ? gatewayRes.value.models.filter((m: any) => m.reasoning).map((m: any) => m.id as string)
+          : [];
+
       const byokModels: ModelOption[] =
         byokRes.status === 'fulfilled' && Array.isArray(byokRes.value?.providers)
           ? byokRes.value.providers.flatMap((p: any) =>
@@ -114,21 +124,24 @@ export function useModelOptions() {
                   // transport/compatibility mode — a Llama model served over an
                   // OpenAI-compatible endpoint should still show the Meta logo.
                   const family = inferModelFamily(m.label || m.modelId);
-                  // BYOK models don't come with Gateway catalog tags, and users
-                  // connect all sorts of custom-named endpoints/models we can't
-                  // reliably pattern-match. Always show the effort selector for
-                  // BYOK too — it's a harmless no-op AI SDK param on models/
-                  // providers that don't support reasoning (ignored with a
-                  // warning, never an error), so defaulting to "available" beats
-                  // silently hiding it for a real reasoning model with an
-                  // unrecognized name.
+                  // BYOK models don't come with Gateway catalog tags — the
+                  // user can point a BYOK connection at literally any base
+                  // URL, so there's no catalog to look their model up in.
+                  // Best-effort instead: fingerprint-match the model's OWN
+                  // id/label against every Gateway model id already confirmed
+                  // reasoning-capable (fast, no extra request — reuses
+                  // gatewayReasoningIds above), with a static well-known
+                  // naming-pattern fallback (o1/o3/r1/thinking/etc.) for
+                  // models the Gateway catalog doesn't carry at all. See
+                  // lib/reasoning-detection.ts for the full matching logic.
+                  const supportsReasoning = looksLikeReasoningModel(m.modelId || m.label || '', gatewayReasoningIds);
                   return {
                     label: `${p.label} · ${m.label || m.modelId}`,
                     value: `byok:${m.id}`,
                     provider: family,
                     Icon: getProviderIcon(family),
                     group: 'Your providers' as const,
-                    supportsReasoning: true,
+                    supportsReasoning,
                   };
                 })
             )

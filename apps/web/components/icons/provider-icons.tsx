@@ -19,15 +19,25 @@
  * (flat single-tone) — every icon was rendering solid black because Mono
  * was picked initially. `Color` is confirmed exactly as dependency-light
  * as `Mono` (no antd/@lobehub/ui import in any Color.js, checked all 20).
- * A handful of brands only ship a Mono file at all (OpenAI, Anthropic,
- * Grok, Moonshot, Z.ai, Inception) — their real logo IS single-tone
- * black, so Mono is correct and kept for those.
+ * A handful of brands only ship a Mono file at all (OpenAI, Grok,
+ * Moonshot, Z.ai, Inception) — their real logo IS single-tone black, so
+ * Mono is correct and kept for those. Claude ships a real Color variant
+ * (its orange product mark), used instead below.
  *
  * Which icon a model gets is still resolved purely from the MODEL's own
  * name/id (via lib/model-provider.ts's inferModelFamily), never from the
  * BYOK connection's transport/compatibility mode — a Llama model served
  * over an OpenAI-compatible endpoint still shows the Meta logo, not a
  * generic "OpenAI-compatible" mark.
+ *
+ * 'anthropic' family uses lobehub's `Claude` icon (the actual orange
+ * product mark users recognize from anthropic.com/claude), not lobehub's
+ * separate `Anthropic` icon (the company's black wordmark/asterisk —
+ * technically correct brand owner, but not what anyone means by "the
+ * Claude logo", and was the actual user-reported bug this replaced).
+ * `Claude`'s `Color` variant confirmed dependency-light same as the rest
+ * (no antd/@lobehub/ui import in Claude/components/Color.js or
+ * Claude/style.js).
  */
 // Deep-imported all the way down to each icon's own `components/Mono` file
 // (the plain, prop-driven currentColor SVG — no variant wrapper) rather
@@ -41,7 +51,7 @@
 // level deeper to `components/Mono` sidesteps the variants entirely — that
 // file only imports its own brand-color constants, nothing else.
 import OpenAIIcon from '@lobehub/icons/es/OpenAI/components/Mono';
-import AnthropicIcon from '@lobehub/icons/es/Anthropic/components/Mono';
+import ClaudeIcon from '@lobehub/icons/es/Claude/components/Color';
 import GeminiIcon from '@lobehub/icons/es/Gemini/components/Color';
 import MetaIcon from '@lobehub/icons/es/Meta/components/Color';
 import MistralIcon from '@lobehub/icons/es/Mistral/components/Color';
@@ -67,7 +77,7 @@ import type { ModelFamily } from '@/lib/model-provider';
 // still imports these directly by name.
 export {
   OpenAIIcon as ChatGPTIcon,
-  AnthropicIcon as ClaudeIcon,
+  ClaudeIcon,
   GeminiIcon,
   MetaIcon,
   MistralIcon,
@@ -87,7 +97,7 @@ export const GenericModelIcon = (props: React.SVGProps<SVGSVGElement>) => (
 );
 
 const FAMILY_ICON: Record<Exclude<ModelFamily, 'unknown'>, React.FC<React.SVGProps<SVGSVGElement>>> = {
-  anthropic: AnthropicIcon,
+  anthropic: ClaudeIcon,
   openai: OpenAIIcon,
   google: GeminiIcon,
   meta: MetaIcon,
