@@ -93,60 +93,81 @@ openssl rand -hex 32
 
 ## Step 4 — Deploy to Vercel
 
-**⚠️ IMPORTANT — use the prebuilt deploy workflow below, not a plain `vercel --prod`.**
+**⚠️ IMPORTANT — use the prebuilt hand-assembled deploy below, not a plain
+`vercel --prod` and not even `vercel build --prod`.**
 
-As of this Next.js version (16.2.10) + Vercel CLI 54.21.1, Vercel's own
-**remote build container has a platform-side bug**: it dies silently with
-`Command "npm run build" exited with 1` (zero error text, zero stack trace)
-immediately after `Skipping validation of types`, every single time,
-regardless of Node memory limits (`NODE_OPTIONS=--max-old-space-size`) or
-worker-count settings (`experimental.cpus`). This matches a known,
-currently-open Vercel platform bug affecting Next.js 16.2.x builds around
-their internal "Applying modifyConfig from Vercel" step (see
-https://github.com/vercel/vercel/issues/16409 and
+As of this Next.js version + Vercel CLI, Vercel's own **build
+orchestration is broken for this project — both paths**:
+
+1. A real `vercel --prod` remote build dies silently with
+   `Command "npm run build" exited with 1` (zero error text, zero stack
+   trace), right after `Skipping validation of types`.
+2. `vercel build --prod` run locally (Vercel CLI driving its own build
+   orchestration, just not on their remote machine) hits the **same**
+   silent crash — so "build locally with the Vercel CLI, then
+   `--prebuilt` deploy" (the previously-documented workaround) no longer
+   works either.
+
+This matches a known, currently-open Vercel platform bug affecting this
+Next.js version around their internal "Applying modifyConfig from Vercel"
+step (see https://github.com/vercel/vercel/issues/16409 and
 https://community.vercel.com/t/next-js-16-2-6-remote-build-fails/42402 —
-same failure class, different Next.js patch version). It is **not** caused
-by our code: a real `vercel build` run outside Vercel's remote container
-(i.e. anywhere else — this repo's CI runner, a local machine, this
-project's dev sandbox) completes cleanly end-to-end every time.
+same failure class). It is **not** caused by our code: a plain `next build`
+/ `npm run build`, run completely outside any Vercel orchestration layer,
+always completes cleanly.
 
-**The fix/workaround: build outside Vercel's remote container, then deploy
-the prebuilt output.** This entirely bypasses the buggy remote build step:
+**The actual fix: skip Vercel's build orchestration entirely.** Build with
+plain `npm run build` (works reliably — `next.config.ts` already sets
+`output: 'standalone'` for this), then hand-assemble the Vercel Build
+Output API v3 structure ourselves (`.vercel/output/...`) and deploy that
+directly. This is exactly what `@vercel/next`'s own builder would have
+produced — we're just doing it by hand once instead of letting their
+crashing orchestrator do it.
 
 ```bash
+# One-time, if you haven't already:
 npm i -g vercel
-cd open-agent-next
 vercel link
-vercel pull --yes --environment production   # pulls project settings + env
+vercel pull --yes --environment production   # pulls project settings (env vars stay live on Vercel's side)
 
-# Build LOCALLY (or in CI) — not on Vercel's remote builder
-vercel build --prod
+# Build + hand-assemble .vercel/output (installs deps, runs `npm run build`,
+# copies the standalone bundle + static assets + public/, writes
+# .vc-config.json and config.json with the images block). See
+# scripts/build-vercel-output.sh for exactly what this does, and
+# apps/web/scripts/vercel-launcher.js for the Lambda entrypoint it wires up.
+./scripts/build-vercel-output.sh
 
-# Ship the artifacts Vercel's remote builder would have produced, skipping
-# their broken build step entirely
-vercel deploy --prebuilt --prod
+# Ship the hand-built artifacts straight to Vercel, skipping their broken
+# build step entirely
+npx vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN"
 ```
 
-Note: `vercel pull` cannot retrieve the plaintext of env vars marked
-**Sensitive** in the dashboard (by design — Vercel never exposes those
-values again after creation). That's fine for `DATABASE_URL` /
-`BETTER_AUTH_SECRET` / etc: the **build** only needs *a* syntactically valid
-value in each (e.g. point `DATABASE_URL` at a local/throwaway Postgres and
-run `prisma migrate deploy` against that — it's idempotent and only
-generates the Prisma client + does static analysis, it doesn't touch
-production data). The **runtime** (the deployed serverless functions)
-always reads the real Sensitive values Vercel injects live from your actual
-project settings — a prebuilt deploy does not change or freeze those.
-
-If a future Vercel CLI/Next.js release fixes the remote-build regression, a
-plain `vercel --prod` (full remote build) should work again — try that
-first on the next release and fall back to the prebuilt workflow above if
-the same silent failure reappears.
-
-Or import the GitHub repo via Vercel's dashboard — the `vercel.json` and
-`package.json` build settings are already configured (note: dashboard
-Git-push deploys use Vercel's remote builder too, so they're subject to the
-same bug until Vercel patches it).
+Notes:
+- `vercel deploy --prebuilt` requires `.vercel/output` to already exist and
+  be valid Build Output API v3 (that's what the script produces) — it does
+  **not** run any build itself, so this sidesteps Vercel's broken
+  orchestration completely, unlike `vercel build --prod` which routes
+  through the same crashing code path.
+- Runtime env vars (DATABASE_URL, secrets, etc.) are unaffected — Vercel
+  still injects the real project env vars into the deployed function at
+  request time, exactly like a normal deploy. This only changes *how the
+  build artifacts are produced*, not runtime configuration.
+- `supportsResponseStreaming: true` in `.vc-config.json` is required for
+  eve's SSE chat streaming to work — don't drop it if you ever hand-edit
+  that file.
+- After bypassing `@vercel/next`'s builder, Vercel's automatic
+  `/_next/image` optimization wiring is also bypassed — the script adds an
+  equivalent `images` block to `.vercel/output/config.json` itself
+  (mirrored from `next.config.ts`'s own `images` settings) so
+  `next/image` keeps working. If you add new remote image domains, update
+  `next.config.ts`'s `images` config and rerun the script — it re-derives
+  this block automatically, nothing to hand-edit.
+- **If a future Vercel CLI/Next.js release fixes the remote-build
+  regression**, try a plain `vercel --prod` first on the next release —
+  fall back to `./scripts/build-vercel-output.sh` +
+  `vercel deploy --prebuilt --prod` if the same silent failure reappears.
+- Importing the GitHub repo via Vercel's dashboard is **not** currently
+  viable — dashboard Git-push deploys use the same broken remote builder.
 
 ## Step 5 — Post-Deploy Verification
 
