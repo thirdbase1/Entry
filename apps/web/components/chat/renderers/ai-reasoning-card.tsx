@@ -3,9 +3,12 @@
 /**
  * Ported 1:1 from pages/chats/renderers/ai-reasoning-card.tsx. Uses the
  * real shared GenericToolResult shell (rounded-2xl, h-14 header, expand
- * icon toggle, box-shadow, AnimatePresence height animation — collapsed by
- * default like every other tool card in the original) instead of a
- * hand-rolled simplified collapsible. Icon is a spinner only while
+ * icon toggle, box-shadow, AnimatePresence height animation) instead of a
+ * hand-rolled simplified collapsible. Passes `autoExpand={loading}` so the
+ * card auto-opens live the moment reasoning starts streaming and
+ * auto-collapses back down to a one-line "Thought for Ns" the moment it
+ * finishes — a manual click at any point opts it out of that auto
+ * behavior in favor of whatever the user chose. Icon is a spinner only while
  * `loading`, none once finished (matches original: `icon={loading ?
  * <Loading /> : null}`). Title is "Thinking… Ns" while loading, "Thought
  * for Ns" once done, "Thoughts" if there was never a duration — exact
@@ -62,7 +65,7 @@ export function AIReasoningCard({ text, loading = false }: { text: string; loadi
   );
 
   return (
-    <GenericToolResult icon={loading ? <Spinner /> : null} title={statusText}>
+    <GenericToolResult icon={loading ? <Spinner /> : null} title={statusText} autoExpand={loading}>
       <div className="px-4 max-h-150 overflow-y-auto">
         <div ref={contentRef} className="max-w-none my-2">
           <MarkdownText text={text} loading={loading} className="prose prose-sm text-[13px] text-muted-foreground" />

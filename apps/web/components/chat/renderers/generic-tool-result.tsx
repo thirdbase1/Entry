@@ -12,7 +12,7 @@
  * marginBottom 16px (tool.css.ts's `toolResult`) so cards stack like the
  * original.
  */
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { ExpandCloseIcon, ExpandFullIcon } from '@blocksuite/icons/rc';
 import { cn } from '@/lib/utils';
@@ -26,6 +26,7 @@ export function GenericToolResult({
   onCollapseChange,
   className,
   onClick,
+  autoExpand,
 }: {
   icon?: ReactNode;
   title: ReactNode;
@@ -35,10 +36,32 @@ export function GenericToolResult({
   children?: ReactNode;
   className?: string;
   onClick?: () => void;
+  /** When set (e.g. AIReasoningCard passing `loading`), the card auto-opens
+   *  the moment this flips true and auto-collapses back the moment it
+   *  flips false — so a "Thinking…" card is visible live while it's
+   *  actually happening instead of sitting collapsed the whole time, then
+   *  tidies itself back into a one-line "Thought for Ns" once done. A
+   *  manual expand/collapse click at any point opts the card out of this
+   *  auto-behavior for the rest of its life — the user's explicit choice
+   *  always wins over the auto behavior afterward. Omit entirely for
+   *  every other (non-reasoning) use of this shared shell — unaffected,
+   *  same manual-only collapsed-by-default behavior as before. */
+  autoExpand?: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(autoExpand === undefined ? true : !autoExpand);
+  const userToggledRef = useRef(false);
+  const prevAutoExpandRef = useRef(autoExpand);
+
+  useEffect(() => {
+    if (autoExpand === undefined) return;
+    if (prevAutoExpandRef.current === autoExpand) return;
+    prevAutoExpandRef.current = autoExpand;
+    if (userToggledRef.current) return; // user's manual choice always wins
+    setCollapsed(!autoExpand);
+  }, [autoExpand]);
 
   const toggleCollapsed = () => {
+    userToggledRef.current = true;
     setCollapsed(!collapsed);
     onCollapseChange?.(!collapsed);
   };
