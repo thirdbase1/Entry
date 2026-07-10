@@ -9,7 +9,7 @@
  * chat model selector. Everything routes through apps/agent's run_model
  * tool at chat time with full tool parity, nothing gated.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';
 import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
@@ -25,6 +25,97 @@ async function safeJson(res: Response): Promise<any> {
   } catch {
     return { error: `Server returned an unexpected response (status ${res.status}).` };
   }
+}
+
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
+/** Tiny inline-edit input that autosaves itself on blur AND ~800ms after the
+ * user stops typing — no separate "Save" button, no state that only lives
+ * in memory. `onSave` is expected to PATCH the backend and throw on
+ * failure; a failed save reverts to the last-known-good value so the UI
+ * never silently claims something persisted when it didn't. */
+function AutoSaveField({
+  value,
+  onSave,
+  placeholder,
+  type = 'text',
+  mono = true,
+  mask = false,
+}: {
+  value: string;
+  onSave: (next: string) => Promise<void>;
+  placeholder?: string;
+  type?: string;
+  mono?: boolean;
+  mask?: boolean;
+}) {
+  const [draft, setDraft] = useState(value);
+  const [state, setState] = useState<SaveState>('idle');
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedRef = useRef(value);
+
+  useEffect(() => {
+    // Reflect external updates (e.g. a fresh GET on mount) without
+    // clobbering in-flight edits.
+    if (state === 'idle') {
+      setDraft(value);
+      lastSavedRef.current = value;
+    }
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const commit = useCallback(
+    async (next: string) => {
+      if (next === lastSavedRef.current) return;
+      setState('saving');
+      try {
+        await onSave(next);
+        lastSavedRef.current = next;
+        setState('saved');
+        setTimeout(() => setState(s => (s === 'saved' ? 'idle' : s)), 1500);
+      } catch {
+        setDraft(lastSavedRef.current); // revert — don't pretend it saved
+        setState('error');
+        setTimeout(() => setState(s => (s === 'error' ? 'idle' : s)), 2500);
+      }
+    },
+    [onSave]
+  );
+
+  const handleChange = (next: string) => {
+    setDraft(next);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => commit(next), 800);
+  };
+
+  const handleBlur = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    commit(draft);
+  };
+
+  return (
+    <div className="relative flex-1">
+      <input
+        type={type}
+        value={draft}
+        onChange={e => handleChange(e.target.value)}
+        onBlur={handleBlur}
+        placeholder={placeholder}
+        className={cn(
+          'h-9 px-3 pr-14 rounded-md border bg-background text-foreground text-sm outline-none focus:border-primary w-full',
+          mono && 'font-mono'
+        )}
+      />
+      <span
+        className={cn(
+          'absolute right-2 top-1/2 -translate-y-1/2 text-[11px] pointer-events-none transition-opacity',
+          state === 'idle' ? 'opacity-0' : 'opacity-100',
+          state === 'error' ? 'text-destructive' : 'text-muted-foreground'
+        )}
+      >
+        {state === 'saving' ? 'Saving…' : state === 'saved' ? 'Saved ✓' : state === 'error' ? 'Failed' : ''}
+      </span>
+    </div>
+  );
 }
 
 type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE';
@@ -247,6 +338,24 @@ function ManualModelAdd({ providerId, onAdded }: { providerId: string; onAdded: 
 function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; onUpdate: (p: Provider) => void; onDelete: () => void }) {
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(provider.lastError ?? null);
+  const [editingKey, setEditingKey] = useState(false);
+
+  /** PATCHes the provider connection itself (label / base URL / API key) —
+   * used by the AutoSaveField instances below. Throws on a non-OK response
+   * so AutoSaveField reverts the input instead of showing a false "Saved". */
+  const patchProvider = useCallback(
+    async (patch: { label?: string; baseUrl?: string; apiKey?: string }) => {
+      const res = await fetch(`/api/user/byok/providers/${provider.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json.error?.message ?? json.error ?? 'Failed to save');
+      onUpdate({ ...provider, ...json });
+    },
+    [provider, onUpdate]
+  );
 
   const fetchModels = useCallback(async () => {
     setFetching(true);
@@ -288,14 +397,50 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
   return (
     <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
       <div className="flex items-start justify-between gap-2">
-        <div>
-          <div className="text-sm font-medium text-foreground">{provider.label}</div>
-          <div className="text-xs text-muted-foreground font-mono mt-0.5">{provider.baseUrl}</div>
-          <div className="text-xs text-muted-foreground mt-1">
-            {compatLabel} · {provider.hasApiKey ? 'API key set' : 'No API key'}
-          </div>
+        <div className="flex-1 flex flex-col gap-2">
+          <AutoSaveField
+            value={provider.label}
+            onSave={next => patchProvider({ label: next })}
+            mono={false}
+            placeholder="Label"
+          />
+          <AutoSaveField
+            value={provider.baseUrl}
+            onSave={next => patchProvider({ baseUrl: next })}
+            placeholder="https://api.example.com/v1"
+          />
+          <div className="text-xs text-muted-foreground">{compatLabel}</div>
+
+          {!editingKey ? (
+            <button
+              onClick={() => setEditingKey(true)}
+              className="self-start text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+            >
+              {provider.hasApiKey ? 'Change API key' : 'Add API key'}
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <AutoSaveField
+                value=""
+                onSave={async next => {
+                  await patchProvider({ apiKey: next });
+                  // Brief pause so the "Saved ✓" indicator is actually
+                  // visible before the field collapses back down.
+                  setTimeout(() => setEditingKey(false), 1200);
+                }}
+                type="password"
+                placeholder={provider.hasApiKey ? '•••••••• (enter a new key to rotate it)' : 'sk-...'}
+              />
+              <button
+                onClick={() => setEditingKey(false)}
+                className="h-9 px-2 text-xs text-muted-foreground hover:bg-accent rounded-md shrink-0"
+              >
+                Done
+              </button>
+            </div>
+          )}
         </div>
-        <button onClick={onDelete} title="Remove provider" className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive">
+        <button onClick={onDelete} title="Remove provider" className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive shrink-0">
           <DeleteIcon className="w-4 h-4" />
         </button>
       </div>

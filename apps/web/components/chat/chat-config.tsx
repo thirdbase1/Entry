@@ -15,7 +15,8 @@
  * parity — this menu is just a picker over "which model slug/BYOK id to
  * send".
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { FloatingPanel } from './floating-panel';
 import { cn } from '@/lib/utils';
 import { getProviderIcon } from '@/components/icons/provider-icons';
 import { inferModelFamily } from '@/lib/model-provider';
@@ -140,13 +141,13 @@ export function ModelPickerMenu({
     return { byok, gateway };
   }, [filtered]);
 
+  const anchorRef = useRef<HTMLDivElement>(null);
+
   return (
-    <div className="relative inline-block">
+    <div ref={anchorRef} className="relative inline-block">
       <div onClick={() => setOpen(o => !o)}>{children}</div>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full left-0 mb-2 w-72 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden z-20">
+      <FloatingPanel open={open} onClose={() => setOpen(false)} anchorRef={anchorRef} align="left">
+        <div className="w-72 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden">
             <div className="flex items-center gap-2 px-2 pt-2 pb-1.5 border-b">
               <input
                 autoFocus
@@ -208,9 +209,8 @@ export function ModelPickerMenu({
                 <div className="text-xs text-muted-foreground px-2 py-3 text-center">No models match "{query}"</div>
               )}
             </div>
-          </div>
-        </>
-      )}
+        </div>
+      </FloatingPanel>
     </div>
   );
 }
@@ -254,14 +254,18 @@ export function ChatConfigMenu({
   };
 
   const current = options.find(m => m.value === model);
+  const anchorRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div className="relative inline-block">
+    <div ref={anchorRef} className="relative inline-block">
       <div onClick={() => setOpen(o => !o)}>{children}</div>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => { setOpen(false); setShowModelSub(false); }} />
-          <div className="absolute bottom-full right-0 mb-2 w-72 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden z-20">
+      <FloatingPanel
+        open={open}
+        onClose={() => { setOpen(false); setShowModelSub(false); }}
+        anchorRef={anchorRef}
+        align="right"
+      >
+        <div className="w-72 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden">
             {/* Model selector — sub-menu that expands inline */}
             <div className="px-3 py-2 text-xs text-muted-foreground border-b">Foundation Model</div>
             {!showModelSub ? (
@@ -375,9 +379,8 @@ export function ChatConfigMenu({
                 );
               })}
             </div>
-          </div>
-        </>
-      )}
+        </div>
+      </FloatingPanel>
     </div>
   );
 }

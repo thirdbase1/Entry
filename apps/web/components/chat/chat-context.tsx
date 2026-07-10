@@ -32,6 +32,7 @@
  * per-turn scratch context, not a saved list.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { FloatingPanel } from './floating-panel';
 import { useLibraryStore, type AllItem } from '@/store/library';
 import { ChatIcon } from '@/components/icons/chat-icon';
 import { cn } from '@/lib/utils';
@@ -124,14 +125,6 @@ export function ContextSelectorMenu({
     if (open && !initialized) refresh();
   }, [open, initialized, refresh]);
 
-  useEffect(() => {
-    const onClickOutside = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    if (open) document.addEventListener('mousedown', onClickOutside);
-    return () => document.removeEventListener('mousedown', onClickOutside);
-  }, [open]);
-
   const allItems: AllItem[] = useMemo(() => [...chats, ...docs, ...files], [chats, docs, files]);
 
   const findItem = (type: 'doc' | 'file', id: string) =>
@@ -165,8 +158,8 @@ export function ContextSelectorMenu({
   return (
     <div ref={ref} className="relative inline-block">
       <div onClick={() => setOpen(o => !o)}>{children}</div>
-      {open && (
-        <div className="absolute bottom-full left-0 mb-2 w-80 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden z-20">
+      <FloatingPanel open={open} onClose={() => setOpen(false)} anchorRef={ref} align="left">
+        <div className="w-80 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden">
           <div className="border-b px-3 py-2">
             <input
               autoFocus
@@ -231,7 +224,7 @@ export function ContextSelectorMenu({
             })}
           </div>
         </div>
-      )}
+      </FloatingPanel>
     </div>
   );
 }

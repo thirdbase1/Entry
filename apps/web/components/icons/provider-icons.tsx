@@ -1,5 +1,5 @@
 /**
- * Model brand icons — now backed by @lobehub/icons (github.com/lobehub/
+ * Model brand icons — backed by @lobehub/icons (github.com/lobehub/
  * lobe-icons), a maintained 1500+ AI/LLM brand SVG set, instead of the 3
  * hand-drawn icons + letter-monogram fallbacks this used to ship.
  *
@@ -14,6 +14,14 @@
  * one-line-per-family lookup exactly as lightweight as the icons it
  * replaces, which matters given this build is already fighting Vercel's
  * container memory ceiling (see next.config.ts's cpus:1 comment).
+ *
+ * Using each brand's `Color` variant (full brand colors), not `Mono`
+ * (flat single-tone) — every icon was rendering solid black because Mono
+ * was picked initially. `Color` is confirmed exactly as dependency-light
+ * as `Mono` (no antd/@lobehub/ui import in any Color.js, checked all 20).
+ * A handful of brands only ship a Mono file at all (OpenAI, Anthropic,
+ * Grok, Moonshot, Z.ai, Inception) — their real logo IS single-tone
+ * black, so Mono is correct and kept for those.
  *
  * Which icon a model gets is still resolved purely from the MODEL's own
  * name/id (via lib/model-provider.ts's inferModelFamily), never from the
@@ -34,24 +42,24 @@
 // file only imports its own brand-color constants, nothing else.
 import OpenAIIcon from '@lobehub/icons/es/OpenAI/components/Mono';
 import AnthropicIcon from '@lobehub/icons/es/Anthropic/components/Mono';
-import GeminiIcon from '@lobehub/icons/es/Gemini/components/Mono';
-import MetaIcon from '@lobehub/icons/es/Meta/components/Mono';
-import MistralIcon from '@lobehub/icons/es/Mistral/components/Mono';
-import DeepSeekIcon from '@lobehub/icons/es/DeepSeek/components/Mono';
+import GeminiIcon from '@lobehub/icons/es/Gemini/components/Color';
+import MetaIcon from '@lobehub/icons/es/Meta/components/Color';
+import MistralIcon from '@lobehub/icons/es/Mistral/components/Color';
+import DeepSeekIcon from '@lobehub/icons/es/DeepSeek/components/Color';
 import GrokIcon from '@lobehub/icons/es/Grok/components/Mono';
-import CohereIcon from '@lobehub/icons/es/Cohere/components/Mono';
-import QwenIcon from '@lobehub/icons/es/Qwen/components/Mono';
-import PerplexityIcon from '@lobehub/icons/es/Perplexity/components/Mono';
-import NovaIcon from '@lobehub/icons/es/Nova/components/Mono';
-import ByteDanceIcon from '@lobehub/icons/es/ByteDance/components/Mono';
-import MinimaxIcon from '@lobehub/icons/es/Minimax/components/Mono';
+import CohereIcon from '@lobehub/icons/es/Cohere/components/Color';
+import QwenIcon from '@lobehub/icons/es/Qwen/components/Color';
+import PerplexityIcon from '@lobehub/icons/es/Perplexity/components/Color';
+import NovaIcon from '@lobehub/icons/es/Nova/components/Color';
+import ByteDanceIcon from '@lobehub/icons/es/ByteDance/components/Color';
+import MinimaxIcon from '@lobehub/icons/es/Minimax/components/Color';
 import MoonshotIcon from '@lobehub/icons/es/Moonshot/components/Mono';
-import NvidiaIcon from '@lobehub/icons/es/Nvidia/components/Mono';
-import StepfunIcon from '@lobehub/icons/es/Stepfun/components/Mono';
+import NvidiaIcon from '@lobehub/icons/es/Nvidia/components/Color';
+import StepfunIcon from '@lobehub/icons/es/Stepfun/components/Color';
 import ZaiIcon from '@lobehub/icons/es/ZAI/components/Mono';
-import ArceeIcon from '@lobehub/icons/es/Arcee/components/Mono';
+import ArceeIcon from '@lobehub/icons/es/Arcee/components/Color';
 import InceptionIcon from '@lobehub/icons/es/Inception/components/Mono';
-import MorphIcon from '@lobehub/icons/es/Morph/components/Mono';
+import MorphIcon from '@lobehub/icons/es/Morph/components/Color';
 
 import type { ModelFamily } from '@/lib/model-provider';
 

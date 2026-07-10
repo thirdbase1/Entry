@@ -25,6 +25,11 @@ interface ChatInterfaceProps {
   initialAttachedContext?: import('./chat-context').AttachedContext[];
 }
 
+/** localStorage key for the user's last-selected model, so a BYOK choice
+ *  (or any model choice) persists across brand-new chats instead of
+ *  resetting to the default every time. */
+const LAST_MODEL_STORAGE_KEY = 'entry:lastSelectedModel';
+
 async function fetchSnapshot(sessionId: string) {
   const res = await fetch(`/api/chats/${sessionId}`);
   if (!res.ok) return null;
@@ -65,9 +70,32 @@ export function ChatInterface({
   // Model selection lives here (not in ChatInput) so we can decide, before
   // ever mounting an eve session or a BYOK chat, which of the two mutually
   // exclusive runtimes this chat should use — see the isByok branch below.
-  // Defaults to DEFAULT_MODEL_ID for a brand-new chat; set from the
-  // resumed chat's stored byokModelId once the snapshot loads.
-  const [model, setModel] = useState<string>(DEFAULT_MODEL_ID);
+  // For a brand-new chat, initializes from the user's last-used model
+  // (persisted in localStorage) instead of always falling back to
+  // DEFAULT_MODEL_ID — otherwise a BYOK selection "didn't stick": every
+  // new chat silently reverted to the default gateway model even though
+  // the BYOK provider/key itself was still saved server-side. A resumed
+  // chat still gets overridden from its stored byokModelId below, same
+  // as before.
+  const [model, setModelState] = useState<string>(() => {
+    if (sessionId) return DEFAULT_MODEL_ID;
+    if (typeof window === 'undefined') return DEFAULT_MODEL_ID;
+    try {
+      return window.localStorage.getItem(LAST_MODEL_STORAGE_KEY) || DEFAULT_MODEL_ID;
+    } catch {
+      return DEFAULT_MODEL_ID;
+    }
+  });
+  const setModel = useCallback((next: string) => {
+    setModelState(next);
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(LAST_MODEL_STORAGE_KEY, next);
+    } catch {
+      // localStorage can throw in private-browsing/quota-exceeded cases —
+      // persistence is a nice-to-have, never worth crashing the chat over.
+    }
+  }, []);
   const modelInitializedRef = useRef(false);
 
   useEffect(() => {
