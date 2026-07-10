@@ -68,13 +68,27 @@ export const auth = betterAuth({
   // once the user lands back on the custom domain (different eTLD, cookies
   // never share) -- the app then sees "no session" and bounces to the
   // landing page instead of the dashboard, even though login succeeded.
-  // Leaving baseURL undefined lets Better Auth infer it from the live
-  // request's Host header on every request (works in both the Next.js
-  // route handler and server actions via the nextCookies plugin), so it
-  // always matches whatever domain the user is actually on -- custom
-  // domain, vercel.app default, or a preview deployment -- with zero env
-  // var configuration needed, in both prod and local dev.
-  baseURL: undefined,
+  //
+  // Better Auth's own request-Host inference (the old `baseURL: undefined`)
+  // still works fine, but it also unconditionally logs a startup WARN
+  // ("Base URL is not set...") on every cold start — noisy, and easy to
+  // mistake for a real error in production logs. Better Auth has a
+  // purpose-built fix for exactly this multi-host case: the "dynamic
+  // baseURL" object form (allowedHosts) below. It resolves the same way
+  // (per-request Host header) but against an explicit allowlist instead of
+  // trusting any Host header blindly, AND suppresses that warning entirely
+  // since it's a deliberate, validated config rather than "unset". Zero
+  // env var dependency either way, in both prod and local dev.
+  baseURL: {
+    allowedHosts: [
+      'entry.oneshotsx.cv',
+      'entry-nine-pi.vercel.app',
+      'entry-thirdbase1s-projects.vercel.app',
+      'entry-oneshotsx-thirdbase1s-projects.vercel.app',
+      '*.vercel.app', // preview deployments (one per PR/branch)
+      'localhost:*', // local dev
+    ],
+  },
 
   // Explicitly trust every domain this app is actually reachable from, so
   // OAuth state-cookie / origin checks never reject a legitimate request

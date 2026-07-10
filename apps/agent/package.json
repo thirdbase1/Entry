@@ -38,6 +38,7 @@
     "node": "24.x"
   },
   "exports": {
-    "./tool-impls/*": "./agent/lib/tool-impls/*.ts"
+    "./tool-impls/*": "./agent/lib/tool-impls/*.ts",
+    "./lib/persona": "./agent/lib/persona.ts"
   }
 }

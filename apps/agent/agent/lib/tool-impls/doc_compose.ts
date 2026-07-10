@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { model } from '../gateway.js';
 import { addDoc } from '@entry/copilot';
 import type { ToolExecCtx } from './types.js';
+import { safeExecute } from './safe-execute.js';
 
 export const docCompose = {
   description:
@@ -37,3 +38,5 @@ export const docCompose = {
     };
   },
 };
+
+docCompose.execute = safeExecute('doc_compose', docCompose.execute) as typeof docCompose.execute;

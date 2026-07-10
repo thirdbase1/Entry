@@ -27,6 +27,42 @@ export interface ModelOption {
   provider: string;
   Icon: React.FC<React.SVGProps<SVGSVGElement>>;
   group: 'Gateway' | 'Your providers';
+  /** Whether this model supports the AI SDK's portable `reasoning` effort control. */
+  supportsReasoning: boolean;
+}
+
+/** Levels accepted by AI SDK's top-level `reasoning` streamText/generateText
+ *  parameter — see ai-sdk.dev/docs/ai-sdk-core/reasoning. Portable across
+ *  every reasoning-capable provider (OpenAI, Anthropic, Google, xAI, Groq,
+ *  DeepSeek, Fireworks, Bedrock); a provider that doesn't support it just
+ *  ignores it with a warning, so it's always safe to send. */
+export const REASONING_EFFORT_LEVELS = ['none', 'low', 'medium', 'high'] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORT_LEVELS)[number];
+export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'medium';
+const REASONING_EFFORT_STORAGE_KEY = 'entry:lastReasoningEffort';
+
+export function useReasoningEffort() {
+  const [reasoningEffort, setReasoningEffortState] = useState<ReasoningEffort>(() => {
+    if (typeof window === 'undefined') return DEFAULT_REASONING_EFFORT;
+    try {
+      const stored = window.localStorage.getItem(REASONING_EFFORT_STORAGE_KEY);
+      return (REASONING_EFFORT_LEVELS as readonly string[]).includes(stored || '')
+        ? (stored as ReasoningEffort)
+        : DEFAULT_REASONING_EFFORT;
+    } catch {
+      return DEFAULT_REASONING_EFFORT;
+    }
+  });
+  const setReasoningEffort = (level: ReasoningEffort) => {
+    setReasoningEffortState(level);
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(REASONING_EFFORT_STORAGE_KEY, level);
+    } catch {
+      // best-effort persistence only
+    }
+  };
+  return [reasoningEffort, setReasoningEffort] as const;
 }
 
 export const configurableTools = [
@@ -63,6 +99,7 @@ export function useModelOptions() {
               provider: m.provider,
               Icon: getProviderIcon(m.provider),
               group: 'Gateway' as const,
+              supportsReasoning: !!m.reasoning,
             }))
           : [];
 
@@ -77,12 +114,21 @@ export function useModelOptions() {
                   // transport/compatibility mode — a Llama model served over an
                   // OpenAI-compatible endpoint should still show the Meta logo.
                   const family = inferModelFamily(m.label || m.modelId);
+                  // BYOK models don't come with Gateway catalog tags — heuristically
+                  // detect well-known reasoning-model naming patterns so the
+                  // effort selector still shows up for e.g. a user's own o1/
+                  // o3/r1/thinking-variant BYOK connection. Best-effort only;
+                  // an unrecognized name just won't show the selector (the
+                  // model still works fine, it just always uses its default).
+                  const nameForReasoningCheck = (m.label || m.modelId || '').toLowerCase();
+                  const looksLikeReasoningModel = /reasoning|thinking|^o[134]\b|-o[134]-|\br1\b/.test(nameForReasoningCheck);
                   return {
                     label: `${p.label} · ${m.label || m.modelId}`,
                     value: `byok:${m.id}`,
                     provider: family,
                     Icon: getProviderIcon(family),
                     group: 'Your providers' as const,
+                    supportsReasoning: looksLikeReasoningModel,
                   };
                 })
             )
@@ -119,15 +165,21 @@ function parseModelValue(value: string): { requestedModel?: string; byokModelId?
 export function ModelPickerMenu({
   model,
   setModel,
+  reasoningEffort,
+  setReasoningEffort,
   children,
 }: {
   model: string;
   setModel: (model: string) => void;
+  /** Omit both if this surface doesn't support reasoning effort selection. */
+  reasoningEffort?: ReasoningEffort;
+  setReasoningEffort?: (level: ReasoningEffort) => void;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const options = useModelOptions();
+  const selectedOption = useMemo(() => options.find(o => o.value === model), [options, model]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return options;
@@ -157,6 +209,29 @@ export function ModelPickerMenu({
                 className="flex-1 h-7 px-2 rounded-md border bg-background text-xs outline-none focus:border-primary"
               />
             </div>
+            {reasoningEffort && setReasoningEffort && selectedOption?.supportsReasoning && (
+              <div className="px-2 pt-2 pb-1.5 border-b">
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-0.5 pb-1">
+                  Reasoning effort
+                </div>
+                <div className="flex gap-1">
+                  {REASONING_EFFORT_LEVELS.map(level => (
+                    <button
+                      key={level}
+                      onClick={() => setReasoningEffort(level)}
+                      className={cn(
+                        'flex-1 capitalize px-1.5 py-1 rounded-md text-xs border text-center',
+                        reasoningEffort === level
+                          ? 'bg-primary text-primary-foreground border-primary'
+                          : 'bg-background text-foreground border-border hover:bg-accent'
+                      )}
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="flex flex-col gap-0.5 p-2 max-h-72 overflow-y-auto">
               <button
                 onClick={() => { setModel(DEFAULT_MODEL_ID); setOpen(false); }}

@@ -32,7 +32,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { ChatConfigMenu, ModelPickerMenu, DEFAULT_MODEL_ID, useModelOptions } from './chat-config';
+import { ChatConfigMenu, ModelPickerMenu, DEFAULT_MODEL_ID, useModelOptions, type ReasoningEffort } from './chat-config';
 import { ContextSelectorMenu, ContextPreview, type AttachedContext } from './chat-context';
 
 const TRANSITION = { type: 'spring' as const, stiffness: 380, damping: 34 };
@@ -111,6 +111,8 @@ export function ChatInput({
   initialAttached,
   model: controlledModel,
   onModelChange,
+  reasoningEffort,
+  onReasoningEffortChange,
 }: {
   onSend: (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string }) => void;
   onAbort?: () => void;
@@ -120,6 +122,8 @@ export function ChatInput({
   initialAttached?: AttachedContext[];
   model?: string;
   onModelChange?: (model: string) => void;
+  reasoningEffort?: ReasoningEffort;
+  onReasoningEffortChange?: (level: ReasoningEffort) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState('');
@@ -287,7 +291,7 @@ export function ChatInput({
             className="flex translate-y-px items-center gap-5 px-5 pt-2 pb-3"
             onClick={e => e.stopPropagation()}
           >
-            <ModelPickerMenu model={model} setModel={setModel}>
+            <ModelPickerMenu model={model} setModel={setModel} reasoningEffort={reasoningEffort} setReasoningEffort={onReasoningEffortChange}>
               <button
                 type="button"
                 className="flex items-center gap-2 rounded-full py-1 text-sm text-muted-foreground transition-colors hover:text-foreground"

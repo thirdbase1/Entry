@@ -2,6 +2,7 @@ import { generateText } from 'ai';
 import { z } from 'zod';
 import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
+import { safeExecute } from './safe-execute.js';
 
 function stripCodeFence(raw: string): string {
   let stripped = raw.trim();
@@ -40,3 +41,5 @@ export const codeArtifact = {
     return { title, html, size: html.length };
   },
 };
+
+codeArtifact.execute = safeExecute('code_artifact', codeArtifact.execute) as typeof codeArtifact.execute;

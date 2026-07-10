@@ -26,11 +26,28 @@ import { PrismaClient } from './generated/client';
 
 let globalPrisma: PrismaClient | undefined;
 
+/**
+ * node-postgres (via pg-connection-string) currently logs a deprecation
+ * warning on every cold start for `sslmode=prefer|require|verify-ca`:
+ * those three are TODAY treated as aliases for `verify-full` already (no
+ * behavior change), but a future pg-connection-string v3/pg v9 major will
+ * make them mean their weaker libpq-standard semantics instead. Rewrite to
+ * the explicit, already-in-effect mode now so the warning disappears and
+ * behavior is pinned/future-proofed — purely a string rewrite, never logs
+ * or touches the actual credentials.
+ */
+function normalizeSslMode(connectionString: string): string {
+  return /([?&]sslmode=)(prefer|require|verify-ca)(?=[&]|$)/.test(connectionString)
+    ? connectionString.replace(/([?&]sslmode=)(prefer|require|verify-ca)(?=[&]|$)/, '$1verify-full')
+    : connectionString;
+}
+
 function createClient(): PrismaClient {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
+  const rawConnectionString = process.env.DATABASE_URL;
+  if (!rawConnectionString) {
     throw new Error('DATABASE_URL is not set');
   }
+  const connectionString = normalizeSslMode(rawConnectionString);
 
   const adapter = new PrismaPg({
     connectionString,

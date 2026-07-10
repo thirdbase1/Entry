@@ -6,8 +6,9 @@
  * available models with one click (hits our own /fetch-models "fetch
  * agent" route, which calls the provider's own discovery endpoint), then
  * toggles individual models on/off — only enabled ones show up in the
- * chat model selector. Everything routes through apps/agent's run_model
- * tool at chat time with full tool parity, nothing gated.
+ * chat model selector. A selected BYOK model routes straight to
+ * /api/direct/chat at chat time (no eve/root-agent relay), with full
+ * tool parity, nothing gated.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';

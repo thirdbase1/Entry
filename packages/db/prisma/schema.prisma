@@ -505,7 +505,14 @@ model EveChatSession {
   // `{role, content}[]` message array (NOT eve's HandleMessageStreamEvent[] shape)
   // for replay into that chat's simple useChat-based UI; `cursor` stays null.
   byokModelId String? @map("byok_model_id") @db.VarChar
-  events     Json?    @db.JsonB // persisted HandleMessageStreamEvent[] snapshot (or plain messages[] for BYOK-direct rows)
+  // Non-null marks this row as a direct Gateway-model chat (an explicit
+  // model-picker choice like "gateway:deepseek/deepseek-v4-pro") — same
+  // deal as byokModelId above (bypasses eve entirely, see
+  // apps/web/app/api/direct/chat), just resolved straight from the
+  // Vercel AI Gateway instead of a user's own BYOK provider row. A row
+  // has at most one of byokModelId / requestedModel set, never both.
+  requestedModel String? @map("requested_model") @db.VarChar
+  events     Json?    @db.JsonB // persisted HandleMessageStreamEvent[] snapshot (or plain messages[] for direct-chat rows)
   cursor     Json?    @db.JsonB // persisted { sessionId, continuationToken, streamIndex } (eve rows only)
   // Public-sharing schema decision (flagged in an earlier session as a real
   // gap, resolved here): the original's `/playback` route was genuinely

@@ -16,8 +16,10 @@ export interface ChatSessionSummary {
   title: string | null;
   collected: boolean;
   docId: string | null;
-  /** Non-null => this chat is BYOK-direct (see EveChatSession model comment); powers ChatInterface's eve-vs-BYOK branch on resume. */
+  /** Non-null => this chat is BYOK-direct (see EveChatSession model comment); powers ChatInterface's eve-vs-direct branch on resume. */
   byokModelId: string | null;
+  /** Non-null => this chat is a direct Gateway-model chat (explicit picker choice, bypasses eve). Mutually exclusive with byokModelId. */
+  requestedModel: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -42,7 +44,7 @@ export async function createChatSession(
       docId: opts.docId ?? null,
     },
     update: {},
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, createdAt: true, updatedAt: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true },
   });
 }
 
@@ -79,6 +81,7 @@ export async function getChatSession(userId: string, sessionId: string): Promise
     collected: row.collected,
     docId: row.docId,
     byokModelId: row.byokModelId,
+    requestedModel: row.requestedModel,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     events: row.events,
@@ -90,7 +93,7 @@ export async function listChatSessions(userId: string): Promise<ChatSessionSumma
   const rows = await prisma.eveChatSession.findMany({
     where: { userId },
     orderBy: { updatedAt: 'desc' },
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, createdAt: true, updatedAt: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true },
   });
   return rows;
 }
@@ -101,7 +104,7 @@ export async function toggleChatCollected(userId: string, sessionId: string): Pr
   return prisma.eveChatSession.update({
     where: { id: sessionId, userId },
     data: { collected: !existing.collected },
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, createdAt: true, updatedAt: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true },
   });
 }
 

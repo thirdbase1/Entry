@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
+import { safeExecute } from './safe-execute.js';
 
 export const browserUse = {
   description:
@@ -20,3 +21,5 @@ export const browserUse = {
     return { result: result.stdout };
   },
 };
+
+browserUse.execute = safeExecute('browser_use', browserUse.execute) as typeof browserUse.execute;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { safeExecute } from './safe-execute.js';
 
 export const choose = {
   description:
@@ -16,3 +17,5 @@ export const choose = {
     return { question, options, multiSelect };
   },
 };
+
+choose.execute = safeExecute('choose', choose.execute) as typeof choose.execute;

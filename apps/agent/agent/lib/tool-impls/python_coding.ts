@@ -2,6 +2,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
+import { safeExecute } from './safe-execute.js';
 
 const PythonCodingResultSchema = z.object({
   code: z.string().describe('The generated Python code'),
@@ -26,3 +27,5 @@ export const pythonCoding = {
     return object;
   },
 };
+
+pythonCoding.execute = safeExecute('python_coding', pythonCoding.execute) as typeof pythonCoding.execute;

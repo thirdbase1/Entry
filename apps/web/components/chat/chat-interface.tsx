@@ -7,10 +7,10 @@ import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
 import { ChatInput } from './chat-input';
 import { resolveContextForSend, type AttachedContext } from './chat-context';
-import { buildConfigContext, DEFAULT_MODEL_ID } from './chat-config';
+import { buildConfigContext, DEFAULT_MODEL_ID, useReasoningEffort } from './chat-config';
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
-import { ByokChatInterface } from './byok-chat-interface';
+import { DirectChatInterface } from './direct-chat-interface';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -33,7 +33,7 @@ const LAST_MODEL_STORAGE_KEY = 'entry:lastSelectedModel';
 async function fetchSnapshot(sessionId: string) {
   const res = await fetch(`/api/chats/${sessionId}`);
   if (!res.ok) return null;
-  return res.json() as Promise<{ events?: unknown; cursor?: unknown; byokModelId?: string | null }>;
+  return res.json() as Promise<{ events?: unknown; cursor?: unknown; byokModelId?: string | null; requestedModel?: string | null }>;
 }
 
 async function persistSnapshot(sessionId: string, snapshot: UseEveAgentSnapshot<{ messages: readonly EveMessage[] }>, title?: string) {
@@ -62,14 +62,15 @@ export function ChatInterface({
 }: ChatInterfaceProps) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [initial, setInitial] = useState<{ events?: unknown; cursor?: unknown; byokModelId?: string | null } | null>(
+  const [initial, setInitial] = useState<{ events?: unknown; cursor?: unknown; byokModelId?: string | null; requestedModel?: string | null } | null>(
     sessionId ? null : {}
   );
   const createdRef = useRef(false);
 
   // Model selection lives here (not in ChatInput) so we can decide, before
-  // ever mounting an eve session or a BYOK chat, which of the two mutually
-  // exclusive runtimes this chat should use — see the isByok branch below.
+  // ever mounting an eve session or a direct-model chat, which of the two
+  // mutually exclusive runtimes this chat should use — see the isDirect
+  // branch below.
   // For a brand-new chat, initializes from the user's last-used model
   // (persisted in localStorage) instead of always falling back to
   // DEFAULT_MODEL_ID — otherwise a BYOK selection "didn't stick": every
@@ -96,6 +97,7 @@ export function ChatInterface({
       // persistence is a nice-to-have, never worth crashing the chat over.
     }
   }, []);
+  const [reasoningEffort, setReasoningEffort] = useReasoningEffort();
   const modelInitializedRef = useRef(false);
 
   useEffect(() => {
@@ -114,6 +116,7 @@ export function ChatInterface({
     if (!initial) return;
     modelInitializedRef.current = true;
     if (initial.byokModelId) setModel(`byok:${initial.byokModelId}`);
+    else if (initial.requestedModel) setModel(`gateway:${initial.requestedModel}`);
   }, [initial]);
 
   if (!initial) {
@@ -127,22 +130,36 @@ export function ChatInterface({
   // A chat's runtime is decided ONCE and never hot-swapped mid-thread:
   // for a brand-new chat (no sessionId yet), whatever model is currently
   // selected when the first message is sent decides it. For a chat being
-  // resumed, the runtime it was ALREADY created under (byokModelId stored
-  // on the EveChatSession row) decides it, regardless of what the picker
-  // shows right now — switching the picker mid-existing-eve-thread falls
-  // back to the original clientContext-hint behavior (buildConfigContext)
-  // rather than trying to migrate an eve event log into BYOK's plain
-  // UIMessage[] shape (or vice versa), which are structurally different.
-  const isByok = sessionId ? !!initial.byokModelId : model.startsWith('byok:');
+  // resumed, the runtime it was ALREADY created under (byokModelId or
+  // requestedModel stored on the EveChatSession row) decides it,
+  // regardless of what the picker shows right now.
+  //
+  // ANY explicit model pick — BYOK or a Gateway slug — now bypasses eve
+  // entirely via DirectChatInterface (see apps/web/app/api/direct/chat's
+  // file comment for why: eve's root agent used to be a mandatory,
+  // non-streaming, identity-leaking relay in front of every picked model).
+  // Only "Default" (no pick) still goes to eve's own ChatInterfaceInner.
+  const isDirect = sessionId
+    ? !!(initial.byokModelId || initial.requestedModel)
+    : model.startsWith('byok:') || model.startsWith('gateway:');
 
-  if (isByok) {
+  if (isDirect) {
+    const byokModelId = sessionId ? initial.byokModelId ?? undefined : model.startsWith('byok:') ? model.slice('byok:'.length) : undefined;
+    const requestedModel = sessionId
+      ? initial.requestedModel ?? undefined
+      : model.startsWith('gateway:')
+        ? model.slice('gateway:'.length)
+        : undefined;
     return (
-      <ByokChatInterface
-        key={`byok-${sessionId ?? 'new'}`}
+      <DirectChatInterface
+        key={`direct-${sessionId ?? 'new'}`}
         sessionId={sessionId}
-        byokModelId={model.slice('byok:'.length)}
+        byokModelId={byokModelId}
+        requestedModel={requestedModel}
         model={model}
         setModel={setModel}
+        reasoningEffort={reasoningEffort}
+        setReasoningEffort={setReasoningEffort}
         placeholder={placeholder}
         placeholderTitle={placeholderTitle}
         className={className}

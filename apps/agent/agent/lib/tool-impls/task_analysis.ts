@@ -2,6 +2,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
+import { safeExecute } from './safe-execute.js';
 
 const TaskAnalysisResultSchema = z.object({
   needsPhases: z.boolean(),
@@ -61,3 +62,5 @@ export const taskAnalysis = {
     return object;
   },
 };
+
+taskAnalysis.execute = safeExecute('task_analysis', taskAnalysis.execute) as typeof taskAnalysis.execute;

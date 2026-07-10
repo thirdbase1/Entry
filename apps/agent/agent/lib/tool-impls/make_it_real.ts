@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { model } from '../gateway.js';
 import { addDoc } from '@entry/copilot';
 import type { ToolExecCtx } from './types.js';
+import { safeExecute } from './safe-execute.js';
 
 const MakeItRealResultSchema = z.object({
   content: z.string().describe('The improved markdown content with a more beautiful layout/slideshow structure'),
@@ -44,3 +45,5 @@ export const makeItReal = {
     return { content: object.content, docId: doc.docId };
   },
 };
+
+makeItReal.execute = safeExecute('make_it_real', makeItReal.execute) as typeof makeItReal.execute;

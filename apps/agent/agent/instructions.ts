@@ -2,41 +2,34 @@ import { defineInstructions } from 'eve/instructions';
 import { buildPersonaInstructions } from './lib/persona.js';
 
 /**
- * Root = shared persona + this agent's own routing block.
+ * Root = shared persona only.
  *
- * Routing now goes through the `run_model` TOOL, not declared subagents.
- * Why: eve pins a subagent's model at build time, which can't represent
- * "any model the user picks" or BYOK (arbitrary provider/key added at
- * runtime, unknown at build time). run_model resolves the model at
- * request time instead, and gives it the exact same 9 tools this agent
- * has — no capability loss when a different model handles the turn.
+ * There used to be a `<model_routing>` block here plus a `run_model` tool:
+ * whenever the user picked a specific model in chat-config.tsx's selector,
+ * the request still went to THIS agent (eve's fixed `model:`, i.e. Claude)
+ * first, which was instructed to detect a `requestedModel`/`byokModelId`
+ * hint in its context and immediately delegate the whole turn to
+ * `run_model` instead of answering itself.
  *
- * Routing signal: chat-config.tsx sends a small dedicated JSON object as
- * clientContext, e.g. {"requestedModel":"anthropic/claude-opus-4.8"} or
- * {"byokModelId":"<uuid>"}. The rule below is a hard imperative
- * stated first, not mixed into prose.
+ * Removed (2026-07-10) because that indirection was the actual root cause
+ * of three separate real bugs: (1) `run_model` used a single blocking
+ * `generateText` call, so the delegated model's answer never streamed —
+ * root just relayed the whole finished text at once; (2) no reasoning/
+ * thinking content was ever requested or forwarded through that relay;
+ * (3) for anything conversational (e.g. "what model are you"), root would
+ * sometimes just answer as itself instead of reliably delegating, so a
+ * user who picked DeepSeek would get told "I'm Claude" — an instruction a
+ * system prompt can ask an LLM to follow but can never fully guarantee.
+ *
+ * Fix: any explicit model selection (Gateway slug or BYOK) now routes to
+ * apps/web/app/api/direct/chat instead, which resolves that model directly
+ * and IS the whole turn's model — no relay, no possibility of a different
+ * model answering identity questions on its behalf. See chat-interface.tsx
+ * for the routing decision. This eve agent (root Claude, resolved via
+ * model-catalog.ts) now only ever handles a turn when nothing was
+ * explicitly picked (the "Default" option) — a real default, not a
+ * required first hop for every turn.
  */
 export default defineInstructions({
-  markdown: `${buildPersonaInstructions()}
-
-<model_routing>
-HARD RULE, check this before anything else: if the turn's context contains a
-JSON object with a \`requestedModel\` field (an AI Gateway model slug, e.g.
-\`{"requestedModel":"anthropic/claude-opus-4.8"}\`) or a \`byokModelId\`
-field (e.g. \`{"byokModelId":"5b1e..."}\`), you MUST immediately call the
-\`run_model\` tool — pass \`modelSlug\` (or \`byokModelId\`) exactly as given,
-plus the user's full message as \`task\`, plus any \`parameters\` if given. Do
-not answer yourself first, do not add commentary, do not re-answer after it
-responds.
-
-\`run_model\` NEVER throws — it always returns either a real \`answer\` or an
-\`error\` string (e.g. bad BYOK connection, model produced no output). If
-\`answer\` is non-empty, return it essentially verbatim (light reformatting
-only). If \`answer\` is empty and \`error\` is set, you MUST tell the user
-plainly what went wrong using that \`error\` text — never respond with
-silence or a generic apology when a specific error is available.
-
-If neither field is present, handle the turn yourself as normal — do not call
-\`run_model\`.
-</model_routing>`,
+  markdown: buildPersonaInstructions(),
 });

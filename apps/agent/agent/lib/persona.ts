@@ -2,12 +2,12 @@
  * Single shared source for the agent's persona/rules prompt. Root and every
  * declared subagent (claude/gpt/gemini) call this instead of each keeping
  * their own copy — previously all 4 instructions.md files were byte-for-byte
- * identical (minus root's model_routing block), a real maintenance hazard:
- * any prompt tweak had to be manually repeated 4x or it silently drifted.
+ * identical, a real maintenance hazard: any prompt tweak had to be
+ * manually repeated 4x or it silently drifted.
  *
- * Root appends its own model_routing block on top (see agent/instructions.ts).
- * Subagents use this verbatim with no routing block — they are the leaf
- * that actually answers, not a router themselves.
+ * Also reused directly by apps/web/app/api/direct/chat's `system` prompt,
+ * so a direct-model chat (BYOK or an explicit Gateway pick) keeps the
+ * same Entry identity/persona as eve's own root agent.
  */
 export function buildPersonaInstructions(): string {
   return `# Your Role
