@@ -11,8 +11,25 @@ import { FeatureConfigs, FeaturesShapes, FeatureType, type FeatureConfig, type F
 
 export async function getFeatureUnchecked(name: FeatureNameKey) {
   const feature = await prisma.feature.findFirst({ where: { name } });
-  if (!feature) throw new Error(`Feature ${name} not found`);
-  return feature as typeof feature & { configs: Record<string, any> };
+  if (feature) return feature as typeof feature & { configs: Record<string, any> };
+
+  // Self-healing seed-on-read: `refreshFeatures()` is meant to run once at
+  // deploy/migration time to seed every FeatureConfigs entry into the DB,
+  // but nothing actually calls it anywhere (confirmed: zero call sites in
+  // the whole repo) — so every fresh production DB has an empty `Feature`
+  // table, and the very first `addUserFeature(userId, 'free_plan_v1', ...)`
+  // on signup throws here, 500ing /api/user/quota for every real user.
+  // Seed lazily on first read instead of depending on a deploy step that's
+  // easy to forget again.
+  const config = FeatureConfigs[name];
+  if (!config) throw new Error(`Feature ${name} not found and has no default FeatureConfigs entry to seed.`);
+
+  const created = await prisma.feature.upsert({
+    where: { name },
+    create: { name, configs: config.configs as any },
+    update: {},
+  });
+  return created as typeof created & { configs: Record<string, any> };
 }
 
 export function checkFeatureConfig<T extends FeatureNameKey>(name: T, config: unknown): FeatureConfig<T> {

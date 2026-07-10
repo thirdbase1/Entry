@@ -7,9 +7,10 @@ import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
 import { ChatInput } from './chat-input';
 import { resolveContextForSend, type AttachedContext } from './chat-context';
-import { buildConfigContext } from './chat-config';
+import { buildConfigContext, DEFAULT_MODEL_ID } from './chat-config';
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
+import { ByokChatInterface } from './byok-chat-interface';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -27,7 +28,7 @@ interface ChatInterfaceProps {
 async function fetchSnapshot(sessionId: string) {
   const res = await fetch(`/api/chats/${sessionId}`);
   if (!res.ok) return null;
-  return res.json() as Promise<{ events?: unknown; cursor?: unknown }>;
+  return res.json() as Promise<{ events?: unknown; cursor?: unknown; byokModelId?: string | null }>;
 }
 
 async function persistSnapshot(sessionId: string, snapshot: UseEveAgentSnapshot<{ messages: readonly EveMessage[] }>, title?: string) {
@@ -56,10 +57,18 @@ export function ChatInterface({
 }: ChatInterfaceProps) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [initial, setInitial] = useState<{ events?: unknown; cursor?: unknown } | null>(
+  const [initial, setInitial] = useState<{ events?: unknown; cursor?: unknown; byokModelId?: string | null } | null>(
     sessionId ? null : {}
   );
   const createdRef = useRef(false);
+
+  // Model selection lives here (not in ChatInput) so we can decide, before
+  // ever mounting an eve session or a BYOK chat, which of the two mutually
+  // exclusive runtimes this chat should use — see the isByok branch below.
+  // Defaults to DEFAULT_MODEL_ID for a brand-new chat; set from the
+  // resumed chat's stored byokModelId once the snapshot loads.
+  const [model, setModel] = useState<string>(DEFAULT_MODEL_ID);
+  const modelInitializedRef = useRef(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -72,6 +81,13 @@ export function ChatInterface({
     };
   }, [sessionId]);
 
+  useEffect(() => {
+    if (modelInitializedRef.current) return;
+    if (!initial) return;
+    modelInitializedRef.current = true;
+    if (initial.byokModelId) setModel(`byok:${initial.byokModelId}`);
+  }, [initial]);
+
   if (!initial) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
@@ -80,9 +96,37 @@ export function ChatInterface({
     );
   }
 
+  // A chat's runtime is decided ONCE and never hot-swapped mid-thread:
+  // for a brand-new chat (no sessionId yet), whatever model is currently
+  // selected when the first message is sent decides it. For a chat being
+  // resumed, the runtime it was ALREADY created under (byokModelId stored
+  // on the EveChatSession row) decides it, regardless of what the picker
+  // shows right now — switching the picker mid-existing-eve-thread falls
+  // back to the original clientContext-hint behavior (buildConfigContext)
+  // rather than trying to migrate an eve event log into BYOK's plain
+  // UIMessage[] shape (or vice versa), which are structurally different.
+  const isByok = sessionId ? !!initial.byokModelId : model.startsWith('byok:');
+
+  if (isByok) {
+    return (
+      <ByokChatInterface
+        key={`byok-${sessionId ?? 'new'}`}
+        sessionId={sessionId}
+        byokModelId={model.slice('byok:'.length)}
+        model={model}
+        setModel={setModel}
+        placeholder={placeholder}
+        placeholderTitle={placeholderTitle}
+        className={className}
+        headerContent={headerContent}
+        initialMessage={initialMessage}
+      />
+    );
+  }
+
   return (
     <ChatInterfaceInner
-      key={sessionId ?? 'new'}
+      key={`eve-${sessionId ?? 'new'}`}
       sessionId={sessionId}
       initialEvents={initial.events as any}
       initialSession={initial.cursor as any}
@@ -95,6 +139,8 @@ export function ChatInterface({
       scrollRef={scrollRef}
       createdRef={createdRef}
       router={router}
+      model={model}
+      setModel={setModel}
     />
   );
 }
@@ -112,12 +158,16 @@ function ChatInterfaceInner({
   scrollRef,
   createdRef,
   router,
+  model,
+  setModel,
 }: ChatInterfaceProps & {
   initialEvents?: any;
   initialSession?: any;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   createdRef: React.RefObject<boolean>;
   router: ReturnType<typeof useRouter>;
+  model: string;
+  setModel: (model: string) => void;
 }) {
   // Turn-level failure banner. Without this, a turn that ends in
   // status "error" (e.g. run_model throwing because a BYOK provider
@@ -132,6 +182,21 @@ function ChatInterfaceInner({
     onError(error) {
       console.error('[eve turn error]', error);
       setTurnError(error.message || 'Something went wrong generating a response. Please try again.');
+    },
+    // onError above wraps eve's own `Error(event.data.message)` — but for
+    // some failure shapes (e.g. Gateway errors) the actually-useful text
+    // lives one level deeper at `event.data.details.message`, which that
+    // top-level `.message` never captures (constructing `Error(undefined)`
+    // -> an empty string, silently falling back to the generic banner
+    // text below and hiding the real, actionable error — e.g. Vercel AI
+    // Gateway's "Add credits at https://vercel.com/..." message never
+    // reached the user). Read the raw stream event ourselves so the real
+    // message always wins when it's present.
+    onEvent(event) {
+      if (event.type !== 'session.failed' && event.type !== 'turn.failed') return;
+      const data = event.data as { message?: string; details?: { message?: string } };
+      const real = data.details?.message ?? data.message;
+      if (real) setTurnError(real);
     },
     async onFinish(snapshot) {
       setTurnError(null);
@@ -224,7 +289,7 @@ function ChatInterfaceInner({
     return (
       <div className="flex flex-col justify-center h-full p-4 gap-4 max-w-[800px] mx-auto">
         <div className="text-[26px] font-medium text-center mb-9 text-foreground">{placeholderTitle}</div>
-        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} initialAttached={initialAttachedContext} />
+        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} />
         {turnError && (
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 text-center">
             {turnError}
@@ -266,7 +331,7 @@ function ChatInterfaceInner({
         </div>
       )}
       <div className="max-w-[832px] px-4 mx-auto w-full py-4">
-        <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} />
+        <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} />
       </div>
     </div>
   );

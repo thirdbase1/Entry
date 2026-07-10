@@ -1,6 +1,7 @@
 import { generateObject } from 'ai';
 import { z } from 'zod';
 import { model } from '../gateway.js';
+import type { ToolExecCtx } from './types.js';
 
 const TaskAnalysisResultSchema = z.object({
   needsPhases: z.boolean(),
@@ -34,9 +35,9 @@ export const taskAnalysis = {
     availableTools: z.array(z.string()).optional(),
   }),
   outputSchema: TaskAnalysisResultSchema,
-  async execute({ task, context, availableTools }: { task: string; context?: string; availableTools?: string[] }) {
+  async execute({ task, context, availableTools }: { task: string; context?: string; availableTools?: string[] }, ctx?: ToolExecCtx) {
     const { object } = await generateObject({
-      model: await model(),
+      model: await model(undefined, ctx?.byokModel),
       schema: TaskAnalysisResultSchema,
       messages: [
         {

@@ -36,5 +36,8 @@
   },
   "engines": {
     "node": "24.x"
+  },
+  "exports": {
+    "./tool-impls/*": "./agent/lib/tool-impls/*.ts"
   }
 }

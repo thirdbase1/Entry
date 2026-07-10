@@ -14,7 +14,7 @@ export const docCompose = {
   }),
   async execute({ title, userPrompt }: { title: string; userPrompt: string }, ctx: ToolExecCtx) {
     const { text } = await generateText({
-      model: await model(),
+      model: await model(undefined, ctx.byokModel),
       messages: [
         {
           role: 'system',

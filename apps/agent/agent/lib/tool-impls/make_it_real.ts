@@ -17,7 +17,7 @@ export const makeItReal = {
   outputSchema: MakeItRealResultSchema,
   async execute({ instructions, markdown }: { instructions?: string; markdown: string }, ctx: ToolExecCtx) {
     const { object } = await generateObject({
-      model: await model(),
+      model: await model(undefined, ctx.byokModel),
       schema: MakeItRealResultSchema,
       messages: [
         {

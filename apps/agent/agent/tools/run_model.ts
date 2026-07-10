@@ -113,6 +113,18 @@ export default defineTool({
     let model: LanguageModel;
     try {
       model = await resolveModel(input, execCtx);
+      // Stamp the resolved model onto ctx so tool-impls that do their own
+      // internal sub-generation (task_analysis, code_artifact,
+      // python_coding, make_it_real, doc_compose — see gateway.ts's
+      // `model()` override param) use THIS model instead of quietly
+      // falling back to the Gateway catalog. Only set for an actual BYOK
+      // resolution: when input.modelSlug was used instead, `model` here
+      // IS a gateway(...)-wrapped model already, so leaving byokModel
+      // unset just lets those tools resolve their own Gateway default,
+      // which is the same Gateway-routed behavior as today either way.
+      if (input.byokModelId) {
+        execCtx.byokModel = model;
+      }
     } catch (err) {
       return {
         answer: '',
@@ -137,8 +149,16 @@ export default defineTool({
             inputSchema: browserUse.inputSchema,
             execute: (toolInput: { task: string }) => browserUse.execute(toolInput, execCtx),
           }),
-          task_analysis: tool({ description: taskAnalysis.description, inputSchema: taskAnalysis.inputSchema, execute: taskAnalysis.execute }),
-          code_artifact: tool({ description: codeArtifact.description, inputSchema: codeArtifact.inputSchema, execute: codeArtifact.execute }),
+          task_analysis: tool({
+            description: taskAnalysis.description,
+            inputSchema: taskAnalysis.inputSchema,
+            execute: (toolInput: { task: string; context?: string; availableTools?: string[] }) => taskAnalysis.execute(toolInput, execCtx),
+          }),
+          code_artifact: tool({
+            description: codeArtifact.description,
+            inputSchema: codeArtifact.inputSchema,
+            execute: (toolInput: { title: string; userPrompt: string }) => codeArtifact.execute(toolInput, execCtx),
+          }),
           make_it_real: tool({
             description: makeItReal.description,
             inputSchema: makeItReal.inputSchema,
@@ -149,7 +169,11 @@ export default defineTool({
             inputSchema: docCompose.inputSchema,
             execute: (toolInput: { title: string; userPrompt: string }) => docCompose.execute(toolInput, execCtx),
           }),
-          python_coding: tool({ description: pythonCoding.description, inputSchema: pythonCoding.inputSchema, execute: pythonCoding.execute }),
+          python_coding: tool({
+            description: pythonCoding.description,
+            inputSchema: pythonCoding.inputSchema,
+            execute: (toolInput: { requirements: string }) => pythonCoding.execute(toolInput, execCtx),
+          }),
         },
       });
 

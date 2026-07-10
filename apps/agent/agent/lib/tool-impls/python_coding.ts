@@ -1,6 +1,7 @@
 import { generateObject } from 'ai';
 import { z } from 'zod';
 import { model } from '../gateway.js';
+import type { ToolExecCtx } from './types.js';
 
 const PythonCodingResultSchema = z.object({
   code: z.string().describe('The generated Python code'),
@@ -13,9 +14,9 @@ export const pythonCoding = {
     requirements: z.string().describe('The requirements to generate python code for'),
   }),
   outputSchema: PythonCodingResultSchema,
-  async execute({ requirements }: { requirements: string }) {
+  async execute({ requirements }: { requirements: string }, ctx?: ToolExecCtx) {
     const { object } = await generateObject({
-      model: await model(),
+      model: await model(undefined, ctx?.byokModel),
       schema: PythonCodingResultSchema,
       messages: [
         { role: 'system', content: 'Write complete, runnable Python code that satisfies the given requirements.' },

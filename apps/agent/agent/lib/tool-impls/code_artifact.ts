@@ -1,6 +1,7 @@
 import { generateText } from 'ai';
 import { z } from 'zod';
 import { model } from '../gateway.js';
+import type { ToolExecCtx } from './types.js';
 
 function stripCodeFence(raw: string): string {
   let stripped = raw.trim();
@@ -21,9 +22,9 @@ export const codeArtifact = {
     title: z.string().describe('The title of the HTML page'),
     userPrompt: z.string().describe('The user description of the code artifact, will be used to generate the code artifact'),
   }),
-  async execute({ title, userPrompt }: { title: string; userPrompt: string }) {
+  async execute({ title, userPrompt }: { title: string; userPrompt: string }, ctx?: ToolExecCtx) {
     const { text } = await generateText({
-      model: await model(),
+      model: await model(undefined, ctx?.byokModel),
       messages: [
         {
           role: 'system',

@@ -494,13 +494,19 @@ model UserSettings {
 /// snapshot (event log + session cursor) so a reload can pick the
 /// conversation back up via useEveAgent's initialEvents/initialSession.
 model EveChatSession {
-  id         String   @id @db.VarChar // the eve sessionId itself
+  id         String   @id @db.VarChar // the eve sessionId itself, OR (see byokModelId) a self-generated uuid for a BYOK-direct chat
   userId     String   @map("user_id") @db.VarChar
   title      String?  @db.VarChar
   collected  Boolean  @default(false)
   docId      String?  @map("doc_id") @db.VarChar
-  events     Json?    @db.JsonB // persisted HandleMessageStreamEvent[] snapshot
-  cursor     Json?    @db.JsonB // persisted { sessionId, continuationToken, streamIndex }
+  // Non-null marks this row as a BYOK-direct chat (see apps/web/app/api/byok/chat) —
+  // one that never touches eve's session runtime or Vercel AI Gateway at all, not
+  // even for the top-level turn. `events` on a BYOK-direct row holds a plain
+  // `{role, content}[]` message array (NOT eve's HandleMessageStreamEvent[] shape)
+  // for replay into that chat's simple useChat-based UI; `cursor` stays null.
+  byokModelId String? @map("byok_model_id") @db.VarChar
+  events     Json?    @db.JsonB // persisted HandleMessageStreamEvent[] snapshot (or plain messages[] for BYOK-direct rows)
+  cursor     Json?    @db.JsonB // persisted { sessionId, continuationToken, streamIndex } (eve rows only)
   // Public-sharing schema decision (flagged in an earlier session as a real
   // gap, resolved here): the original's `/playback` route was genuinely
   // public/unauthenticated but had no persisted "may anyone view this" bit

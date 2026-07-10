@@ -16,6 +16,8 @@ export function ChatInput({
   streaming,
   onAbort,
   initialAttached,
+  model: controlledModel,
+  onModelChange,
 }: {
   onSend: (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string }) => void;
   onAbort?: () => void;
@@ -24,11 +26,22 @@ export function ChatInput({
   streaming?: boolean;
   /** Pre-attached context (e.g. opening a chat scoped to a specific doc). */
   initialAttached?: AttachedContext[];
+  /**
+   * Model selection is controlled from ChatInterface (not owned locally
+   * here) so it can decide, BEFORE the first message of a new chat is
+   * even sent, whether this is a BYOK-direct turn (bypasses eve/Gateway
+   * entirely) or a normal eve turn. Falls back to local state so this
+   * component still works standalone (e.g. in isolated usages/tests).
+   */
+  model?: string;
+  onModelChange?: (model: string) => void;
 }) {
   const [input, setInput] = useState('');
   const [attached, setAttached] = useState<AttachedContext[]>(initialAttached ?? []);
   const [disabledTools, setDisabledTools] = useState<string[]>([]);
-  const [model, setModel] = useState<string>(DEFAULT_MODEL_ID);
+  const [localModel, setLocalModel] = useState<string>(DEFAULT_MODEL_ID);
+  const model = controlledModel ?? localModel;
+  const setModel = onModelChange ?? setLocalModel;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [textareaHeight, setTextareaHeight] = useState(45);
 

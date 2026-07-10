@@ -50,6 +50,7 @@ const nextConfig: NextConfig = {
   // sub-packages one at a time until the full real list — from
   // node_modules/@blocksuite at build time — was included here).
   transpilePackages: [
+    '@entry/agent',
     '@entry/db',
     '@entry/auth',
     '@entry/cache',
