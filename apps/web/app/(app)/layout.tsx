@@ -39,7 +39,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }, [checked, isLoading, user, router]);
 
   if (!checked || isLoading || !user) {
-    return <div className="flex items-center justify-center h-screen text-muted-foreground text-sm">Loading…</div>;
+    return <div className="flex items-center justify-center h-dvh text-muted-foreground text-sm">Loading…</div>;
   }
 
   return (

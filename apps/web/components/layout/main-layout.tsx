@@ -186,7 +186,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   const { open: sidebarOpen, toggleSidebar, width } = useSidebarStore();
 
   return (
-    <div className="relative flex size-full justify-end h-screen">
+    <div className="relative flex size-full justify-end h-dvh">
       {/* sidebar */}
       <AppSidebar id="app-sidebar" className="bg-muted/30">
         <header className="w-full h-15 p-3 flex items-center">

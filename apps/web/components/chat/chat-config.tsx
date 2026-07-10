@@ -43,7 +43,7 @@ export const defaultDisabledTools: string[] = [];
 /** Root agent handles the turn itself when this (or '') is selected — no delegation. */
 export const DEFAULT_MODEL_ID = 'default';
 
-function useModelOptions() {
+export function useModelOptions() {
   const [options, setOptions] = useState<ModelOption[]>([]);
 
   useEffect(() => {

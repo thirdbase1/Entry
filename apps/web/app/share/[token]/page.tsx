@@ -37,11 +37,11 @@ export default function PublicSharePage({ params }: { params: Promise<{ token: s
   }, [token]);
 
   if (snapshot === undefined) {
-    return <div className="flex items-center justify-center h-screen text-muted-foreground text-sm">Loading…</div>;
+    return <div className="flex items-center justify-center h-dvh text-muted-foreground text-sm">Loading…</div>;
   }
   if (!snapshot) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen gap-3 text-center px-4">
+      <div className="flex flex-col items-center justify-center h-dvh gap-3 text-center px-4">
         <div className="text-sm text-muted-foreground">This shared chat link is invalid or no longer shared.</div>
         <Link href="/" className="text-sm text-primary hover:underline">
           Go to Entry
@@ -51,7 +51,7 @@ export default function PublicSharePage({ params }: { params: Promise<{ token: s
   }
 
   return (
-    <div className="h-screen">
+    <div className="h-dvh">
       <ChatPlaybackView initialEvents={snapshot.events} initialSession={snapshot.cursor} title={snapshot.title} publicMode />
     </div>
   );

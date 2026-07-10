@@ -220,7 +220,7 @@ export default function Home() {
   }, [user, isLoading, router]);
 
   if (!isLoading && user) {
-    return <div className="flex items-center justify-center h-screen text-muted-foreground">Loading...</div>;
+    return <div className="flex items-center justify-center h-dvh text-muted-foreground">Loading...</div>;
   }
 
   const handleGetStarted = () => {

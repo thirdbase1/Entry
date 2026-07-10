@@ -216,5 +216,5 @@ export default function OnboardingPage() {
     }
   }, [step, nextStep, prevStep]);
 
-  return <div className="min-h-screen flex flex-col items-center justify-center bg-background px-4">{el}</div>;
+  return <div className="min-h-dvh flex flex-col items-center justify-center bg-background px-4">{el}</div>;
 }
