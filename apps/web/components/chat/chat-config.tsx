@@ -114,21 +114,21 @@ export function useModelOptions() {
                   // transport/compatibility mode — a Llama model served over an
                   // OpenAI-compatible endpoint should still show the Meta logo.
                   const family = inferModelFamily(m.label || m.modelId);
-                  // BYOK models don't come with Gateway catalog tags — heuristically
-                  // detect well-known reasoning-model naming patterns so the
-                  // effort selector still shows up for e.g. a user's own o1/
-                  // o3/r1/thinking-variant BYOK connection. Best-effort only;
-                  // an unrecognized name just won't show the selector (the
-                  // model still works fine, it just always uses its default).
-                  const nameForReasoningCheck = (m.label || m.modelId || '').toLowerCase();
-                  const looksLikeReasoningModel = /reasoning|thinking|^o[134]\b|-o[134]-|\br1\b/.test(nameForReasoningCheck);
+                  // BYOK models don't come with Gateway catalog tags, and users
+                  // connect all sorts of custom-named endpoints/models we can't
+                  // reliably pattern-match. Always show the effort selector for
+                  // BYOK too — it's a harmless no-op AI SDK param on models/
+                  // providers that don't support reasoning (ignored with a
+                  // warning, never an error), so defaulting to "available" beats
+                  // silently hiding it for a real reasoning model with an
+                  // unrecognized name.
                   return {
                     label: `${p.label} · ${m.label || m.modelId}`,
                     value: `byok:${m.id}`,
                     provider: family,
                     Icon: getProviderIcon(family),
                     group: 'Your providers' as const,
-                    supportsReasoning: looksLikeReasoningModel,
+                    supportsReasoning: true,
                   };
                 })
             )
