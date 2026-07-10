@@ -4,7 +4,7 @@
  * Replaces the zustand auth store (store/auth.ts) with Better Auth's
  * reactive client. Provides:
  * - useSession() — reactive session hook (replaces refreshSession)
- * - signIn.email(), signIn.magicLink(), signIn.social() — sign-in methods
+ * - signIn.email(), signIn.emailOtp(), signIn.social() — sign-in methods
  * - signOut() — sign out
  * - changePassword(), changeEmail() — account management
  * - sendVerificationEmail() — email verification
@@ -13,10 +13,10 @@
  * HTTP requests. No manual cookie management needed.
  */
 import { createAuthClient } from 'better-auth/react';
-import { magicLinkClient } from 'better-auth/client/plugins';
+import { emailOTPClient } from 'better-auth/client/plugins';
 
 export const authClient = createAuthClient({
-  plugins: [magicLinkClient()],
+  plugins: [emailOTPClient()],
 });
 
 // Re-export the session hook for convenience

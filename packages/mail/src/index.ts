@@ -38,7 +38,7 @@ export type MailName =
   | 'EmailChanged';
 
 type MailPropsMap = {
-  SignIn: { url: string; otp: string };
+  SignIn: { otp: string };
   SignUp: { url: string; otp: string };
   SetPassword: { url: string };
   ChangePassword: { url: string };

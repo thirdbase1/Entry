@@ -38,7 +38,7 @@
  */
 import { betterAuth } from 'better-auth';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
-import { magicLink } from 'better-auth/plugins';
+import { emailOTP } from 'better-auth/plugins';
 import { nextCookies } from 'better-auth/next-js';
 
 import { prisma } from '@entry/db';
@@ -142,12 +142,26 @@ export const auth = betterAuth({
 
   // Plugins
   plugins: [
-    magicLink({
-      sendMagicLink: async ({ email, url }) => {
-        // Extract the token from the URL for the OTP code display
-        const urlObj = new URL(url);
-        const token = urlObj.searchParams.get('token') ?? '';
-        await sendMail({ name: 'SignIn', to: email, props: { url, otp: token } });
+    // Real one-time-code sign-in (replaces the earlier magicLink plugin,
+    // which issues a long opaque URL token — the frontend's sign-in UI is a
+    // 6-digit CodeInput box, which magicLink's token was never shaped to
+    // fit, so a user could never actually complete sign-in by typing it.
+    // emailOTP generates a real N-digit numeric code purpose-built for
+    // manual entry, and creates the user on first verify (matching
+    // AUTH_ALLOW_SIGNUP) when they don't already have an account.
+    emailOTP({
+      disableSignUp: !AUTH_ALLOW_SIGNUP,
+      sendVerificationOTP: async ({ email, otp, type }) => {
+        if (type !== 'sign-in') return; // this app only uses the sign-in flow today
+        const sent = await sendMail({ name: 'SignIn', to: email, props: { otp } });
+        if (!sent) {
+          // sendMail swallows failures by design (never blocks the auth
+          // request), but silently pretending the code went out when it
+          // didn't is exactly the bug that made sign-in look broken with
+          // zero error surfaced anywhere — at minimum, log loudly so this
+          // shows up in function logs instead of vanishing.
+          console.error(`[auth] sign-in OTP email to ${email} did NOT send — check SENDBYTE_API_KEY/SENDBYTE_FROM_DOMAIN`);
+        }
       },
     }),
     nextCookies(), // Must be last — auto-sets cookies in server actions

@@ -33,8 +33,20 @@ export const useAuthStore = create<AuthState>((set) => ({
   isLoading: false,
   error: null,
 
-  checkUserByEmail: async (_email) => {
-    return { hasPassword: true, canSignIn: true };
+  checkUserByEmail: async (email) => {
+    try {
+      const res = await fetch(`/api/auth/check-email?email=${encodeURIComponent(email)}`);
+      const text = await res.text();
+      const json = text ? JSON.parse(text) : null;
+      if (!res.ok || !json) {
+        // Fail open to the OTP path (the safer default — never silently
+        // blocks a real user) rather than surfacing a raw fetch error here.
+        return { hasPassword: false, canSignIn: true };
+      }
+      return { hasPassword: !!json.hasPassword, canSignIn: json.canSignIn !== false };
+    } catch {
+      return { hasPassword: false, canSignIn: true };
+    }
   },
 
   signInPassword: async (email, password) => {
@@ -50,14 +62,15 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  sendMagicLink: async (email, options) => {
-    await authClient.signIn.magicLink({ email, callbackURL: options?.redirectUrl ?? '/' });
+  sendMagicLink: async (email, _options) => {
+    const { error } = await authClient.emailOtp.sendVerificationOtp({ email, type: 'sign-in' });
+    if (error) throw new Error(error.message || 'Failed to send sign-in code');
   },
 
-  verifyMagicLink: async (_email, token) => {
+  verifyMagicLink: async (email, token) => {
     set({ isLoading: true, error: null });
     try {
-      const { error } = await authClient.magicLink.verify({ query: { token, callbackURL: '/chats' } });
+      const { error } = await authClient.signIn.emailOtp({ email, otp: token });
       if (error) throw new Error(error.message || 'Invalid code');
       const { data: session } = await authClient.getSession();
       set({ user: session?.user as User ?? null, isLoading: false });
