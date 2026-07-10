@@ -9,6 +9,13 @@
  * width/height), same behavior (auto-advance on digit entry, backspace
  * moves to the previous box, paste fills all boxes), same onChange(string)
  * callback shape as the original's `onChange` prop.
+ *
+ * Also handles the case where a single box receives multiple characters
+ * at once (autofill suggestions, password managers, and some mobile
+ * keyboards insert the full code into whichever box is focused instead
+ * of firing a real clipboard "paste" event) — those keystrokes land as a
+ * multi-character native `input` event, not a `paste` event, so the
+ * dedicated onPaste handler alone doesn't catch them.
  */
 'use client';
 import { useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react';
@@ -34,8 +41,27 @@ export function CodeInput({ length = 6, value, onChange, fieldWidth = 43, fieldH
     onChange(next.join('').slice(0, length));
   };
 
+  const fillFrom = (index: number, sequence: string) => {
+    const next = digits.slice();
+    for (let i = 0; i < sequence.length && index + i < length; i++) {
+      next[index + i] = sequence[i];
+    }
+    onChange(next.join('').slice(0, length));
+    const lastFilled = Math.min(index + sequence.length, length) - 1;
+    refs.current[Math.min(lastFilled + 1, length - 1)]?.focus();
+  };
+
   const handleChange = (index: number, raw: string) => {
-    const digit = raw.replace(/\D/g, '').slice(-1);
+    const cleaned = raw.replace(/\D/g, '');
+    if (cleaned.length > 1) {
+      // Multiple digits landed in one box at once (autofill, password
+      // manager, or fast automated typing outrunning the auto-advance
+      // focus change) — distribute them across the remaining boxes
+      // instead of silently dropping all but the last character.
+      fillFrom(index, cleaned.slice(0, length - index));
+      return;
+    }
+    const digit = cleaned.slice(-1);
     setDigit(index, digit);
     if (digit && index < length - 1) {
       refs.current[index + 1]?.focus();
@@ -52,8 +78,7 @@ export function CodeInput({ length = 6, value, onChange, fieldWidth = 43, fieldH
     const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, length);
     if (!pasted) return;
     e.preventDefault();
-    onChange(pasted.padEnd(0, '').slice(0, length));
-    refs.current[Math.min(pasted.length, length - 1)]?.focus();
+    fillFrom(0, pasted);
   };
 
   return (
@@ -71,7 +96,7 @@ export function CodeInput({ length = 6, value, onChange, fieldWidth = 43, fieldH
           onFocus={() => setFocusIndex(i)}
           autoFocus={autoFocus && i === 0}
           inputMode="numeric"
-          maxLength={1}
+          maxLength={length}
           style={{
             width: fieldWidth,
             height: fieldHeight,

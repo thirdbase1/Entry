@@ -3,11 +3,18 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "jsx": "react-jsx"
   },
-  "include": ["agent/**/*.ts", "evals/**/*.ts", ".eve/**/*.d.ts"]
+  "include": [
+    "agent/**/*.ts",
+    "evals/**/*.ts",
+    ".eve/**/*.d.ts"
+  ]
 }

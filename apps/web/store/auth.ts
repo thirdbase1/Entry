@@ -63,8 +63,19 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   sendMagicLink: async (email, _options) => {
-    const { error } = await authClient.emailOtp.sendVerificationOtp({ email, type: 'sign-in' });
-    if (error) throw new Error(error.message || 'Failed to send sign-in code');
+    set({ isLoading: true, error: null });
+    try {
+      const { error } = await authClient.emailOtp.sendVerificationOtp({ email, type: 'sign-in' });
+      if (error) throw new Error(error.message || 'Failed to send sign-in code');
+      set({ isLoading: false });
+    } catch (err) {
+      // Previously this threw without ever setting `error` state, so a
+      // failed send (rate limit, network blip, provider error) left the
+      // UI showing nothing at all — the "Continue with email" button
+      // just silently did nothing with no feedback. Now it surfaces.
+      set({ isLoading: false, error: err instanceof Error ? err.message : 'Failed to send sign-in code' });
+      throw err;
+    }
   },
 
   verifyMagicLink: async (email, token) => {
