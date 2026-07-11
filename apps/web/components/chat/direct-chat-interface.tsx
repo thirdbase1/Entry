@@ -111,6 +111,53 @@ export function DirectChatInterface({
     },
   });
 
+  // Recover from a dropped connection instead of just sitting on a
+  // stalled/errored turn forever. Two real, confirmed cases this covers:
+  // (1) the user switches to another app/tab mid-turn -- mobile browsers
+  // routinely suspend a backgrounded tab's network activity, which tears
+  // down the in-flight fetch's stream; (2) the user's own network drops
+  // outright. Neither should mean the work is lost: the server now keeps
+  // the turn running to completion regardless of the client connection
+  // (see route.ts's after()+consumeStream()) and persists the final
+  // result, so once we're back, refetch the persisted session and adopt
+  // it if it has more/different content than what we're stuck showing
+  // locally -- turns a "stopped, no response" dead end into "oh, it
+  // actually finished while I was away."
+  useEffect(() => {
+    const tryRecover = () => {
+      void (async () => {
+        const activeId = sessionId ?? (createdRef.current ? chat.id : undefined);
+        if (!activeId) return;
+        if (chat.status !== 'streaming' && chat.status !== 'submitted' && chat.status !== 'error') return;
+        try {
+          const res = await fetch(`/api/chats/${activeId}`);
+          if (!res.ok) return;
+          const snap = await res.json();
+          const persisted = Array.isArray(snap?.events) ? snap.events : null;
+          if (!persisted || persisted.length === 0) return;
+          if (persisted.length >= chat.messages.length) {
+            chat.setMessages(persisted);
+            setTurnError(null);
+            chat.clearError();
+          }
+        } catch {
+          // best-effort -- retried on the next online/visibility event
+        }
+      })();
+    };
+    const onOnline = () => tryRecover();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tryRecover();
+    };
+    window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, chat.id, chat.status]);
+
   const isBusy = chat.status === 'submitted' || chat.status === 'streaming';
   const messages = chat.messages;
   const lastMessage = messages[messages.length - 1];

@@ -40,14 +40,23 @@ export const taskAnalysis = {
     const { object } = await generateObject({
       model: await model(undefined, ctx?.byokModel),
       schema: TaskAnalysisResultSchema,
+      // Top-level `system`, NOT a `role: 'system'` entry in `messages` --
+      // the latter is passed straight through to whatever the resolved
+      // model's provider adapter is with no translation, and Responses-
+      // API-style models (some Gateway + most BYOK OpenAI-family/o-series/
+      // gpt-5 picks) reject a system role inside the messages/input array
+      // outright ("System messages are not allowed in the prompt or
+      // messages fields. Use the instructions option instead."). The AI
+      // SDK's own `system` param is what actually gets translated per-
+      // provider (e.g. into Responses API's `instructions` field) --
+      // confirmed root cause of task_analysis/python_coding failing on
+      // BYOK/direct-chat while eve's own root agent (different model
+      // resolution path) never hit it.
+      system:
+        'You analyze a user task and produce a structured breakdown: whether it needs phases, ' +
+        'its complexity, an estimated step count, and a numbered todo list with per-step tool ' +
+        'requirements and dependencies.',
       messages: [
-        {
-          role: 'system',
-          content:
-            'You analyze a user task and produce a structured breakdown: whether it needs phases, ' +
-            'its complexity, an estimated step count, and a numbered todo list with per-step tool ' +
-            'requirements and dependencies.',
-        },
         {
           role: 'user',
           content: JSON.stringify({

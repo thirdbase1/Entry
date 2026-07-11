@@ -56,7 +56,7 @@
  * separately, but the wrapper is what stops ANY tool's upstream failure
  * from doing the same thing again).
  */
-import { NextRequest } from 'next/server';
+import { NextRequest, after } from 'next/server';
 
 // Long autonomous agentic turns (many chained tool calls) need real runway,
 // not the Next.js/Vercel default 300s. 1800s is the current hard ceiling
@@ -257,6 +257,24 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // essentially free: total added latency is whichever of the two is
   // slower, not their sum.
   await preSave;
+
+  // Decouple the actual generation (model call + every tool call, incl.
+  // bash/browser_use side effects) from whether the client's HTTP
+  // connection stays open. Without this, a backgrounded mobile tab (OS
+  // suspends its network activity) or a dropped Wi-Fi/cellular
+  // connection tore down the underlying response stream, which by
+  // default aborts the in-flight streamText call too -- onFinish below
+  // never fires, nothing gets persisted, and the whole turn (including
+  // any bash/browser_use work already done) is silently lost even though
+  // none of it was actually the user's fault. `consumeStream()` reads
+  // the result to completion on its own regardless of who else is
+  // reading it, and `after()` guarantees that keeps running for the full
+  // 1800s maxDuration budget even after this handler returns the
+  // Response below -- so the turn always finishes and gets saved via
+  // onFinish, and a client that reconnects (see direct-chat-interface.tsx's
+  // online/visibilitychange recovery fetch) picks up the completed
+  // result instead of a stalled/lost one.
+  after(() => result.consumeStream().catch(err => console.error('[direct chat] background consumeStream failed', chatId, err)));
 
   return result.toUIMessageStreamResponse({
     originalMessages: uiMessages,

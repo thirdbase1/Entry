@@ -19,10 +19,11 @@ export const pythonCoding = {
     const { object } = await generateObject({
       model: await model(undefined, ctx?.byokModel),
       schema: PythonCodingResultSchema,
-      messages: [
-        { role: 'system', content: 'Write complete, runnable Python code that satisfies the given requirements.' },
-        { role: 'user', content: requirements },
-      ],
+      // See task_analysis.ts's comment -- top-level `system`, not an
+      // embedded `role: 'system'` message, is what actually survives
+      // translation into Responses-API-style providers.
+      system: 'Write complete, runnable Python code that satisfies the given requirements.',
+      messages: [{ role: 'user', content: requirements }],
     });
     return object;
   },

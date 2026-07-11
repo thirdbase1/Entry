@@ -16,14 +16,10 @@ export const docCompose = {
   async execute({ title, userPrompt }: { title: string; userPrompt: string }, ctx: ToolExecCtx) {
     const { text } = await generateText({
       model: await model(undefined, ctx.byokModel),
-      messages: [
-        {
-          role: 'system',
-          content:
-            "Write a complete, well-structured markdown document (title, sections, formatting) based on the user's description.",
-        },
-        { role: 'user', content: userPrompt },
-      ],
+      // See task_analysis.ts's comment.
+      system:
+        "Write a complete, well-structured markdown document (title, sections, formatting) based on the user's description.",
+      messages: [{ role: 'user', content: userPrompt }],
     });
 
     const userId = ctx.session.auth.current?.principalId ?? 'unknown';

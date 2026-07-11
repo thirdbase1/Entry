@@ -20,14 +20,12 @@ export const makeItReal = {
     const { object } = await generateObject({
       model: await model(undefined, ctx.byokModel),
       schema: MakeItRealResultSchema,
+      // See task_analysis.ts's comment.
+      system:
+        'Improve the given markdown document with a more beautiful, presentation-ready layout ' +
+        '(e.g. slide-like sectioning, better headings/formatting) per any special instructions. ' +
+        'Return the full improved markdown.',
       messages: [
-        {
-          role: 'system',
-          content:
-            'Improve the given markdown document with a more beautiful, presentation-ready layout ' +
-            '(e.g. slide-like sectioning, better headings/formatting) per any special instructions. ' +
-            'Return the full improved markdown.',
-        },
         {
           role: 'user',
           content: `Instructions: ${instructions ?? 'No instructions'}\n\nContent:\n${markdown}`,

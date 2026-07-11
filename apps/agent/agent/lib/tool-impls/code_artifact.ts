@@ -26,15 +26,11 @@ export const codeArtifact = {
   async execute({ title, userPrompt }: { title: string; userPrompt: string }, ctx?: ToolExecCtx) {
     const { text } = await generateText({
       model: await model(undefined, ctx?.byokModel),
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Generate a single-file HTML snippet (inline <style> and <script>, no external resources ' +
-            'except data URIs) that fulfills the request. Respond with ONLY the HTML, no explanation.',
-        },
-        { role: 'user', content: userPrompt },
-      ],
+      // See task_analysis.ts's comment.
+      system:
+        'Generate a single-file HTML snippet (inline <style> and <script>, no external resources ' +
+        'except data URIs) that fulfills the request. Respond with ONLY the HTML, no explanation.',
+      messages: [{ role: 'user', content: userPrompt }],
     });
 
     const html = stripCodeFence(text);
