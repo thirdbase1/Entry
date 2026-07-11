@@ -3,6 +3,7 @@ import { prisma, encryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { z } from 'zod';
+import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
 
 /**
  * DELETE /api/user/byok/providers/:providerId
@@ -47,7 +48,7 @@ export const PATCH = withApiErrorHandling(async (req: NextRequest, { params }: {
     where: { id: providerId },
     data: {
       ...(label !== undefined ? { label } : {}),
-      ...(baseUrl !== undefined ? { baseUrl: baseUrl.replace(/\/+$/, '') } : {}),
+      ...(baseUrl !== undefined ? { baseUrl: normalizeBaseUrl(owned.compatibility, baseUrl) } : {}),
       ...(apiKey !== undefined ? { encryptedApiKey: apiKey ? encryptApiKey(apiKey) : null } : {}),
     },
   });

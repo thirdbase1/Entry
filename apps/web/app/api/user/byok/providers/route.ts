@@ -3,6 +3,7 @@ import { prisma, encryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { z } from 'zod';
+import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
 
 /**
  * GET /api/user/byok/providers
@@ -61,7 +62,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       userId: session.user.id,
       label,
       compatibility,
-      baseUrl: baseUrl.replace(/\/+$/, ''), // normalize trailing slash
+      baseUrl: normalizeBaseUrl(compatibility, baseUrl),
       encryptedApiKey: apiKey ? encryptApiKey(apiKey) : null,
     },
   });

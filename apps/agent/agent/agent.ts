@@ -39,6 +39,19 @@ const primaryModelId = await resolveModelIdForProvider('anthropic');
 export default defineAgent({
   model: primaryModelId,
 
+  // Confirmed real bug (2026-07-11): root agent never set this, so Claude
+  // never produced reasoning/thinking tokens at all for the default (no
+  // model explicitly picked) chat path -- the eve session stream never
+  // even emitted `reasoning.appended`/`reasoning.completed`, so there was
+  // nothing for AIReasoningCard to render no matter what the UI did.
+  // apps/web/app/api/direct/chat/route.ts (the explicit-model-picked path)
+  // already set this per-turn via AI SDK's portable `reasoning` option --
+  // this brings the root agent's default path to parity with it, using
+  // the same provider-agnostic level set (agent-config.md's "Reasoning
+  // effort"). "medium" is a sane default; provider/model determine which
+  // levels actually change behavior.
+  reasoning: 'medium',
+
   compaction: {
     // Summarize earlier turns when context window fills past 90%.
     // Uses eve's default (same model for summary generation).
