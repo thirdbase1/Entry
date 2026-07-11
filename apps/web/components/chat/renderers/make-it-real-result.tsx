@@ -17,7 +17,7 @@ import { GeneratingCard } from './generating-card';
 
 export function MakeItRealResult({ part }: { part: EveDynamicToolPart }) {
   const input = part.input as { markdown?: string } | undefined;
-  const output = part.state === 'output-available' ? (part.output as { content?: string; title?: string } | undefined) : undefined;
+  const output = part.state === 'output-available' ? (part.output as { content?: string; title?: string; docId?: string } | undefined) : undefined;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
   const { openDoc } = useOpenDocContext();
 
@@ -37,6 +37,16 @@ export function MakeItRealResult({ part }: { part: EveDynamicToolPart }) {
   const title = output?.title ?? 'Redesigned document';
 
   const handleClick = () => {
+    // FIXED (2026-07-11): the tool already persists this via addDoc() and
+    // returns a REAL docId — using that (when present) instead of always
+    // stashing an ephemeral sessionStorage copy means the generated doc
+    // stays reachable after the tab/session ends, not just "for now".
+    // Only falls back to the temp/expiring behavior while a turn is still
+    // streaming and no docId exists yet.
+    if (output?.docId) {
+      openDoc(output.docId);
+      return;
+    }
     const tempId = 'temp-' + Date.now();
     sessionStorage.setItem(`doc:${tempId}`, JSON.stringify({ content, title }));
     openDoc(tempId);

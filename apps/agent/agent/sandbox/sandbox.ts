@@ -31,7 +31,7 @@ export default defineSandbox({
 
   // Bump this if the bootstrap steps below ever change, so eve knows to
   // rebuild the cached template instead of reusing a stale one.
-  revalidationKey: () => 'entry-browser-bootstrap-v1',
+  revalidationKey: () => 'entry-browser-bootstrap-v2',
 
   async bootstrap({ use }) {
     const sandbox = await use();
@@ -53,5 +53,9 @@ export default defineSandbox({
     // Testing, used by tools/browser_use.ts.
     await sandbox.run({ command: 'npm install -g agent-browser' });
     await sandbox.run({ command: 'agent-browser install' });
+
+    // Preview-panel support (2026-07-11, see get_preview_url.ts) — pre-installed
+    // so the first preview check doesn't pay npx's cold-download cost.
+    await sandbox.run({ command: 'npm install -g localtunnel' });
   },
 });

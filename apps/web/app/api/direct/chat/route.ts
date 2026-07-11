@@ -89,6 +89,14 @@ import { docCompose } from '@entry/agent/tool-impls/doc_compose';
 import { pythonCoding } from '@entry/agent/tool-impls/python_coding';
 import { browserUse } from '@entry/agent/tool-impls/browser_use';
 import { bash } from '@entry/agent/tool-impls/bash';
+import { saveCredentialTool } from '@entry/agent/tool-impls/save_credential';
+import { listCredentialsTool } from '@entry/agent/tool-impls/list_credentials';
+import { injectCredentialTool } from '@entry/agent/tool-impls/inject_credential';
+import { createSkillTool } from '@entry/agent/tool-impls/create_skill';
+import { listSkillsTool } from '@entry/agent/tool-impls/list_skills';
+import { recallSkillTool } from '@entry/agent/tool-impls/recall_skill';
+import { getPreviewUrlTool } from '@entry/agent/tool-impls/get_preview_url';
+import { restartSandboxTool } from '@entry/agent/tool-impls/restart_sandbox';
 import { z } from 'zod';
 
 const SYSTEM_PROMPT = buildPersonaInstructions();
@@ -280,6 +288,50 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       description: browserUse.description,
       inputSchema: browserUse.inputSchema,
       execute: (input: { task: string }) => browserUse.execute(input, execCtx),
+    }),
+    // Credential vault + self-authored skills (2026-07-11) — see
+    // apps/agent/agent/lib/credential-vault.ts and each tool-impl's own
+    // comment. Registered here identically to every other tool above so
+    // BYOK/Gateway-direct users get full parity with eve's default path.
+    save_credential: tool({
+      description: saveCredentialTool.description,
+      inputSchema: saveCredentialTool.inputSchema,
+      execute: (input: { service: string; label?: string; value: string }) => saveCredentialTool.execute(input, execCtx),
+    }),
+    list_credentials: tool({
+      description: listCredentialsTool.description,
+      inputSchema: listCredentialsTool.inputSchema,
+      execute: () => listCredentialsTool.execute({}, execCtx),
+    }),
+    inject_credential: tool({
+      description: injectCredentialTool.description,
+      inputSchema: injectCredentialTool.inputSchema,
+      execute: (input: { service: string; label?: string; envVarName: string }) => injectCredentialTool.execute(input, execCtx),
+    }),
+    create_skill: tool({
+      description: createSkillTool.description,
+      inputSchema: createSkillTool.inputSchema,
+      execute: (input: { name: string; description: string; instructions: string }) => createSkillTool.execute(input, execCtx),
+    }),
+    list_skills: tool({
+      description: listSkillsTool.description,
+      inputSchema: listSkillsTool.inputSchema,
+      execute: () => listSkillsTool.execute({}, execCtx),
+    }),
+    recall_skill: tool({
+      description: recallSkillTool.description,
+      inputSchema: recallSkillTool.inputSchema,
+      execute: (input: { name: string }) => recallSkillTool.execute(input, execCtx),
+    }),
+    get_preview_url: tool({
+      description: getPreviewUrlTool.description,
+      inputSchema: getPreviewUrlTool.inputSchema,
+      execute: () => getPreviewUrlTool.execute({}, execCtx),
+    }),
+    restart_sandbox: tool({
+      description: restartSandboxTool.description,
+      inputSchema: restartSandboxTool.inputSchema,
+      execute: (input: { command?: string }) => restartSandboxTool.execute(input, execCtx),
     }),
   } as const;
   // Confirmed real bug (2026-07-11): this used to be sent as-is regardless

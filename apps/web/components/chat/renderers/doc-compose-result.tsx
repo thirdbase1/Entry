@@ -29,7 +29,7 @@ import { GeneratingCard } from './generating-card';
 
 export function DocComposeResult({ part }: { part: EveDynamicToolPart }) {
   const input = part.input as { title?: string; userPrompt?: string } | undefined;
-  const output = part.state === 'output-available' ? (part.output as { markdown?: string; title?: string } | undefined) : undefined;
+  const output = part.state === 'output-available' ? (part.output as { markdown?: string; title?: string; docId?: string } | undefined) : undefined;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
   const { openDoc } = useOpenDocContext();
 
@@ -52,6 +52,14 @@ export function DocComposeResult({ part }: { part: EveDynamicToolPart }) {
   const title = output?.title ?? input?.title ?? 'Document';
 
   const handleClick = () => {
+    // FIXED (2026-07-11): same real bug as make-it-real-result.tsx — the
+    // tool already persists this via addDoc() and returns a real docId;
+    // use it instead of an ephemeral sessionStorage-only copy so the doc
+    // is still reachable after the tab/session ends.
+    if (output?.docId) {
+      openDoc(output.docId);
+      return;
+    }
     const tempId = 'temp-' + Date.now();
     sessionStorage.setItem(`doc:${tempId}`, JSON.stringify({ content, title }));
     openDoc(tempId);

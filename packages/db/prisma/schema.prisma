@@ -41,6 +41,8 @@ model User {
   AiUserDocs      AiUserDocs[]
   eveChatSessions EveChatSession[]
   modelProviders UserModelProvider[]
+  credentials     UserCredential[]
+  agentSkills     AgentSkill[]
 
   @@index([email])
   @@map("users")
@@ -576,4 +578,85 @@ model ErrorLog {
   @@index([chatId])
   @@index([createdAt])
   @@map("error_logs")
+}
+
+// Encrypted secret vault (2026-07-11) — "a secure place in the sandbox
+// where AI can save credentials and inject auth when it wants to use
+// them." Rows are encrypted at rest with AES-256-GCM (see
+// apps/agent/agent/lib/credential-vault.ts) using a server-only
+// CREDENTIAL_VAULT_KEY — a DB read alone (leak, backup, admin query)
+// never exposes the plaintext value. Scoped per-user; `service` is
+// freeform (not an enum) specifically so the AI can save a credential for
+// any service the user mentions, including ones we've never hard-coded
+// support for — matches the "register more types... should be many"
+// request without needing a schema change per integration.
+model UserCredential {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id") @db.VarChar
+  service        String   @db.VarChar // e.g. "github", "vercel", "stripe", "custom:acme-api"
+  label          String   @default("default") @db.VarChar // distinguishes multiple creds for the same service
+  encryptedValue String   @map("encrypted_value") @db.Text // base64: iv (12B) + authTag (16B) + ciphertext
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, service, label])
+  @@index([userId])
+  @@map("user_credentials")
+}
+
+// Self-authored agent skills (2026-07-11) — "let the model create new
+// skills by itself." Deliberately the SAME shape as the static SKILL.md
+// files under apps/agent/agent/skills/ (a description that tells the
+// agent WHEN to reach for it, plus markdown instructions) rather than
+// arbitrary stored/executed code: a skill can only ever teach the agent
+// new STEPS for tools it already safely has (bash inside its own
+// per-chat sandbox, browser_use, etc.), never grant a new capability —
+// so this has no code-injection surface despite being fully
+// agent-writable. Scoped per-user: one user's saved workflow (e.g. "how
+// I like my API deployed") is never shown to another user.
+model AgentSkill {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id") @db.VarChar
+  name         String   @db.VarChar // slug, e.g. "deploy-my-fastapi-app"
+  description  String   @db.Text // when the agent should reach for this
+  instructions String   @db.Text // the actual how-to, markdown
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("agent_skills")
+}
+
+// Browser-preview support (2026-07-11) — "put a browser preview in the
+// UI, powered by the sandbox of each chat." Written by the SERVER side
+// only, in two different ways depending on which chat path the row is
+// for (see EveChatSession.byokModelId's comment for the same split):
+//   - direct-chat/BYOK path: apps/web/app/api/chats/[sessionId]/preview's
+//     route handler writes it directly, straight from `@vercel/sandbox`'s
+//     own real `.domain(port)` — that path has a genuine external handle
+//     on its sandbox (see lib/direct-chat/sandbox.ts's file comment).
+//   - default eve path: eve's own sandbox has NO external handle outside
+//     a live agent turn (confirmed against eve's own public SandboxSession
+//     type — no name override, no domain()/port API) — so for this path
+//     the get_preview_url TOOL itself (apps/agent/agent/lib/tool-impls/
+//     get_preview_url.ts), running inside the sandbox via ctx.getSandbox(),
+//     starts a localtunnel and writes the resulting URL here. This is why
+//     the row is the single source of truth the UI polls, instead of the
+//     UI ever trying to reach a sandbox directly.
+// One row per chat (id === EveChatSession.id, both paths) — no separate
+// PK/relation needed, this IS keyed 1:1 with the chat itself.
+model ChatPreview {
+  chatId       String   @id @map("chat_id") @db.VarChar
+  url          String?  @db.VarChar
+  port         Int?
+  status       String   @default("stopped") @db.VarChar // starting | live | stopped | error
+  errorMessage String?  @map("error_message") @db.Text
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("chat_previews")
 }

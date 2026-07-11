@@ -4,6 +4,7 @@ import { useCallback, useState } from 'react';
 import Link from 'next/link';
 import { useLibraryStore, useAllItems, type Chat } from '@/store/library';
 import { cn } from '@/lib/utils';
+import { ChatPreviewPanel } from './chat-preview-panel';
 
 export function ChatPageHeader({ sessionId }: { sessionId: string }) {
   const { toggleCollect } = useLibraryStore();
@@ -17,6 +18,7 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
 
   const [copied, setCopied] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   // Real public share link, backed by EveChatSession.isPublic/shareToken —
   // generates (once) and enables the share token, then copies the
@@ -91,7 +93,15 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
         >
           {copied ? 'Link copied' : sharing ? 'Sharing…' : 'Share'}
         </button>
+        <button
+          onClick={() => setPreviewOpen(true)}
+          title="Preview your app, powered by this chat's sandbox"
+          className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-card hover:bg-accent transition-colors h-8 px-3"
+        >
+          Preview
+        </button>
       </div>
+      {previewOpen && <ChatPreviewPanel sessionId={sessionId} onClose={() => setPreviewOpen(false)} />}
     </div>
   );
 }

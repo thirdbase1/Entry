@@ -106,6 +106,17 @@ export const configurableTools = [
   { label: 'Bash', value: 'bash' },
   { label: 'Browser Use', value: 'browser_use' },
   { label: 'Task Analysis', value: 'task_analysis' },
+  // Credential vault + self-authored skills (2026-07-11) — user-toggleable
+  // like every other tool above, in case someone wants to guarantee the
+  // agent never touches saved credentials for a particular chat.
+  { label: 'Save Credential', value: 'save_credential' },
+  { label: 'List Credentials', value: 'list_credentials' },
+  { label: 'Inject Credential', value: 'inject_credential' },
+  { label: 'Create Skill', value: 'create_skill' },
+  { label: 'List Skills', value: 'list_skills' },
+  { label: 'Recall Skill', value: 'recall_skill' },
+  { label: 'Preview URL', value: 'get_preview_url' },
+  { label: 'Restart Sandbox', value: 'restart_sandbox' },
 ] as const;
 
 export const defaultDisabledTools: string[] = [];

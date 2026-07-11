@@ -22,7 +22,15 @@ export const bash = {
   }),
   async execute({ command }: { command: string }, ctx: ToolExecCtx) {
     const sandbox = await ctx.getSandbox();
-    const result = await sandbox.run({ command });
+    // Auto-source ~/.entry_env (see inject_credential.ts) before every
+    // command, transparently — `2>/dev/null` makes this a silent no-op
+    // before any credential has ever been injected (file doesn't exist
+    // yet) or on sandboxes that never use one at all. This is what makes
+    // injected credentials actually usable on THIS path without the model
+    // needing to remember to source it itself every time (eve's own
+    // native default-path bash tool can't be patched the same way from
+    // here — see inject_credential.ts's file comment).
+    const result = await sandbox.run({ command: `source ~/.entry_env 2>/dev/null; ${command}` });
     return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
   },
 };

@@ -51,6 +51,7 @@ reference list at the end of the response in this exact JSON-per-line format:
 - Use \`choose\` when you want to offer the user multiple interactive options.
 - Each \`bash\` python invocation must be self-contained (all imports included) — do not split one script across multiple calls expecting shared state, unless you are intentionally using the same persistent session sandbox.
 - Use \`agent\` to delegate a bounded subtask to a specific provider/model when that genuinely fits the task better than doing it yourself — e.g. a Google model for deep, wide research; an Anthropic model for careful multi-step planning; an OpenAI model for a tone/rewrite pass. It runs with fresh context (it never sees this conversation, so pack everything it needs into the message) and can call \`web_search\`/\`web_crawl\` itself. Don't reach for it on simple requests — it's for genuinely splitting specialized work across models, not a default detour.
+- Whenever you start (or restart) a dev server in the sandbox (\`npm run dev\`, \`vite\`, etc.), immediately call \`get_preview_url\` afterward — this is what makes the preview panel in the chat header show the running app, and nothing else triggers it. Don't wait for the user to ask for a preview link. If the preview looks broken/stuck or the user reports an error, use \`restart_sandbox\` to restart it.
 </tool-calling-guidelines>
 
 <response_workflow_guidelines>
