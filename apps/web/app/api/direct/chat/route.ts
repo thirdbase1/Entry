@@ -292,7 +292,15 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // Gated by `reasoningCapable` (see above) — never sent to a model that
     // doesn't actually support it, which used to hard-fail the whole turn
     // for some providers instead of just running at the model's default.
-    reasoning: (await reasoningCapablePromise) ? resolvedReasoningEffort : 'provider-default',
+    reasoning: (await (async () => {
+      const capable = await reasoningCapablePromise;
+      // Temporary, cheap diagnostic — confirms which branch a real turn
+      // actually took without needing to re-derive this from a debugger.
+      // Safe to leave in permanently: one line, no PII beyond the model id
+      // the user themselves picked.
+      console.log('[direct chat] reasoning gate', { modelId, reasoningCapable: capable, effort: resolvedReasoningEffort });
+      return capable;
+    })()) ? resolvedReasoningEffort : 'provider-default',
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
     },

@@ -175,9 +175,15 @@ export function ChatInterface({
     };
     window.addEventListener('online', onOnline);
     document.addEventListener('visibilitychange', onVisibility);
+    // Belt-and-suspenders third trigger, independent of the browser
+    // actually firing 'online'/'visibilitychange' at all -- see the same
+    // comment in direct-chat-interface.tsx's identical recovery effect
+    // for why relying solely on those two DOM events isn't enough.
+    const pollId = window.setInterval(tryRecover, 5000);
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.clearInterval(pollId);
     };
   }, [sessionId, liveSessionId, initial, router, createdRef]);
 

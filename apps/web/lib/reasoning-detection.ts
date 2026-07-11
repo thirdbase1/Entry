@@ -17,10 +17,20 @@
  *    both sides (lowercase, strip all non-alphanumerics) and check
  *    substring containment either direction.
  * 2. Static well-known reasoning-family naming patterns (o1/o3/o4, r1,
- *    qwq/qvq, "thinking", "reasoning") as a catch-all for models the
- *    Gateway catalog doesn't carry at all (a brand-new release, a niche
- *    open-weight fine-tune, a regional provider) but that still follow
- *    the naming convention every provider in this space converged on.
+ *    qwq/qvq, "thinking", "reasoning", the whole Claude 4+/5+ family,
+ *    gpt-5, gemini 2.5+/3+, grok-3-mini/4, glm-4.5+, kimi-k2-thinking,
+ *    deepseek-v3.1+) as a catch-all for models the Gateway catalog
+ *    doesn't carry at all (a brand-new release, a niche open-weight
+ *    fine-tune, a regional provider) OR — the real reason this tier
+ *    matters even for models the catalog DOES know about — for when
+ *    tier 1 never even got a chance to run at all: tier 1 depends on a
+ *    live fetch to ai-gateway.vercel.sh succeeding from inside a Vercel
+ *    serverless function; if that fetch fails/times out/changes shape,
+ *    `getReasoningCapableGatewaySlugs()` fails closed (empty set), and
+ *    tier 1 can never match anything, including a plain
+ *    "claude-opus-4-6" from a BYOK connection — real Claude/GPT-5/Gemini
+ *    reasoning family names hardcoded here are the fallback that keeps
+ *    working even when the network dependency is unavailable.
  *
  * Both tiers are heuristic, not authoritative — but the alternative is
  * either always showing the control (confusing on plain non-reasoning
@@ -42,8 +52,25 @@ const KNOWN_REASONING_PATTERNS: RegExp[] = [
   /thinking/,
   /reasoning/,
   /deepseek-r/,
+  /deepseek-v3\.[1-9]/,
+  /deepseek-v4/,
   /grok-3-mini/,
   /grok-4/,
+  // Anthropic — every Claude 4.x/5.x model (opus/sonnet/haiku/fable)
+  // supports extended thinking; only 3.x and earlier don't.
+  /claude-(opus|sonnet|haiku|fable)-[4-9]/,
+  // OpenAI — the whole GPT-5 family and o-series are reasoning models.
+  /gpt-5/,
+  // Google — Gemini 2.5+ and all Gemini 3.x are reasoning-capable.
+  /gemini-(2\.5|3)/,
+  // Zhipu / GLM 4.5+.
+  /glm-(4\.[5-9]|5)/,
+  // Moonshot Kimi K2 thinking variants.
+  /kimi-k2.*thinking/,
+  // Perplexity's reasoning-tuned Sonar.
+  /sonar-reasoning/,
+  // Mistral's reasoning line.
+  /magistral/,
 ];
 
 /** Minimum normalized length for a Gateway slug fingerprint to count as a

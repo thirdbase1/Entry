@@ -234,9 +234,20 @@ function DirectChatSession({
     };
     window.addEventListener('online', onOnline);
     document.addEventListener('visibilitychange', onVisibility);
+    // Belt-and-suspenders third trigger, independent of the browser
+    // actually firing 'online'/'visibilitychange' at all: some networks
+    // drop/restore Wi-Fi or cellular without ever firing a real 'offline'
+    // -> 'online' transition (silent DNS/route flap), and a laptop
+    // sleep/wake cycle can resume with the tab still reporting 'visible'
+    // the whole time. Poll every 5s while a turn looks active so a dead
+    // connection still self-heals even when neither event ever fires --
+    // cheap (one lightweight GET), and tryRecover() itself is a no-op
+    // once nothing new is available.
+    const pollId = window.setInterval(tryRecover, 5000);
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.clearInterval(pollId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, chat.id, chat.status]);

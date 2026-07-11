@@ -41,12 +41,17 @@ export async function getReasoningCapableGatewaySlugs(): Promise<Set<string>> {
     const slugs = new Set(data.models.filter(m => m.providers.some(p => p.tags?.includes('reasoning'))).map(m => m.slug));
     cache = { slugs, fetchedAt: Date.now() };
     return slugs;
-  } catch {
+  } catch (err) {
     // Best-effort — on failure, fail CLOSED (treat as not-reasoning-capable)
     // rather than open: silently forwarding a reasoning param to a model
     // that can't handle it breaks the whole turn, whereas not applying a
     // reasoning effort the model would have supported just means it runs
-    // at its own default — degraded, never broken.
+    // at its own default — degraded, never broken. Logged (not swallowed
+    // silently) because this failure mode is exactly what falls back to
+    // the static KNOWN_REASONING_PATTERNS tier in reasoning-detection.ts
+    // for BYOK models — worth knowing about if reasoning ever mysteriously
+    // stops showing for a model that should support it.
+    console.error('[reasoning-capability] Gateway catalog fetch failed, failing closed', err);
     return cache?.slugs ?? new Set();
   }
 }
