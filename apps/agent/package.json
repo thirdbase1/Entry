@@ -25,7 +25,8 @@
     "ai": "^7.0.0",
     "eve": "^0.20.0",
     "parallel-web": "^1.1.0",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@vercel/blob": "^2.5.0"
   },
   "devDependencies": {
     "@types/node": "24.x",

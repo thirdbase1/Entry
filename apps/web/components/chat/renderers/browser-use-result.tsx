@@ -1,20 +1,21 @@
 'use client';
 
 /**
- * Ported 1:1 from pages/chats/renderers/browser-use-result.tsx. Restored
- * the real shell (GenericToolResult, EmbedWebIcon, the exact two-state
- * title copy), the numbered step list with per-step status icon
- * (completed checkmark / spinning loader on the last step while running /
- * red error icon on failure), the screenshot/gif preview, and the final
- * markdown block.
+ * REWRITTEN (2026-07-11) alongside the browser_use tool-impl rewrite —
+ * the tool now returns a clean, self-consistent shape:
+ *   { status: 'finished'|'failed', steps: [{description, screenshotUrl}],
+ *     screenshotUrl (last step's, for convenience), markdown }
+ * `screenshotUrl` values are real, publicly-fetchable Vercel Blob URLs
+ * (uploaded by the tool itself after every action) — not local sandbox
+ * paths and not base64 blobs, so a plain <img src> just works, and they
+ * keep working after the turn/session ends (unlike the old
+ * sessionStorage-only doc preview bug fixed the same day, see
+ * make-it-real-result.tsx's comment).
  *
- * The underlying tool changed under eve (apps/agent/agent/tools/browser_use.ts
- * shells out to `agent-browser ... --json` and returns `{ result: <stdout> }`
- * instead of the original browser-use.com SDK's structured
- * `{currentStatus, stepsInfo, finalGif, finalMarkdown}` object). `result` is
- * parsed defensively for either shape (JSON object/array, or a bare
- * markdown/text string) so the same visual treatment applies regardless of
- * the exact field names agent-browser's CLI emits.
+ * Old browser-use.com-shaped output (currentStatus/stepsInfo/finalGif) is
+ * still parsed as a fallback for any already-in-flight/historical
+ * messages that predate this rewrite, so old chat history doesn't
+ * suddenly render as empty.
  */
 import type { EveDynamicToolPart } from 'eve/react';
 import { useMemo, useState } from 'react';
@@ -23,59 +24,49 @@ import { MarkdownText } from '@/components/ui/markdown';
 import { GenericToolResult } from './generic-tool-result';
 
 interface Step {
-  next_goal?: string;
-  goal?: string;
-  url?: string;
+  description: string;
+  screenshotUrl: string | null;
 }
 
 interface ParsedBrowserResult {
   status: string;
-  screenshot: string | null;
-  gif: string | null;
+  currentScreenshot: string | null;
   markdown: string | null;
   steps: Step[];
 }
 
 function parseBrowserOutput(raw: unknown): ParsedBrowserResult {
-  const empty: ParsedBrowserResult = { status: 'finished', screenshot: null, gif: null, markdown: null, steps: [] };
-  if (!raw) return empty;
+  const empty: ParsedBrowserResult = { status: 'finished', currentScreenshot: null, markdown: null, steps: [] };
+  if (!raw || typeof raw !== 'object') return empty;
+  const obj = raw as Record<string, unknown>;
 
-  let value: unknown = raw;
-  if (typeof raw === 'object' && raw !== null && 'result' in (raw as Record<string, unknown>)) {
-    value = (raw as { result: unknown }).result;
-  }
-  if (typeof value === 'string') {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      // Not JSON — treat the whole string as the final markdown summary.
-      return { ...empty, markdown: value as string };
-    }
-  }
-
-  if (Array.isArray(value)) {
-    const last = value[value.length - 1] ?? {};
+  // New shape (current tool-impl).
+  if (Array.isArray(obj.steps) && obj.steps.every(s => s && typeof s === 'object' && 'description' in (s as object))) {
+    const steps = (obj.steps as Array<{ description?: string; screenshotUrl?: string | null }>).map(s => ({
+      description: s.description ?? '',
+      screenshotUrl: s.screenshotUrl ?? null,
+    }));
     return {
-      status: last.currentStatus ?? last.status ?? 'finished',
-      screenshot: last.currentScreenshot ?? last.screenshot ?? null,
-      gif: last.finalGif ?? last.gif ?? null,
-      markdown: last.finalMarkdown ?? last.markdown ?? last.summary ?? null,
-      steps: value.map((item: Record<string, unknown>) => item.step ?? item).filter(Boolean),
+      status: String(obj.status ?? 'finished'),
+      currentScreenshot: (obj.screenshotUrl as string | null | undefined) ?? steps[steps.length - 1]?.screenshotUrl ?? null,
+      markdown: (obj.markdown as string | null | undefined) ?? null,
+      steps,
     };
   }
 
-  if (value && typeof value === 'object') {
-    const obj = value as Record<string, unknown>;
-    return {
-      status: String(obj.currentStatus ?? obj.status ?? 'finished'),
-      screenshot: (obj.currentScreenshot ?? obj.screenshot ?? null) as string | null,
-      gif: (obj.finalGif ?? obj.gif ?? null) as string | null,
-      markdown: (obj.finalMarkdown ?? obj.markdown ?? obj.summary ?? null) as string | null,
-      steps: (obj.stepsInfo ?? obj.steps ?? []) as Step[],
-    };
-  }
-
-  return empty;
+  // Legacy browser-use.com-style shape (old stepsInfo/finalGif fields),
+  // kept purely so historical messages sent before this rewrite still
+  // render something reasonable.
+  const legacySteps = (obj.stepsInfo as Array<Record<string, unknown>> | undefined) ?? [];
+  return {
+    status: String(obj.currentStatus ?? obj.status ?? 'finished'),
+    currentScreenshot: (obj.currentScreenshot ?? obj.screenshot ?? obj.finalGif ?? null) as string | null,
+    markdown: (obj.finalMarkdown ?? obj.markdown ?? obj.summary ?? null) as string | null,
+    steps: legacySteps.map(item => ({
+      description: String(item.next_goal ?? item.goal ?? item.url ?? ''),
+      screenshotUrl: null,
+    })),
+  };
 }
 
 const completedIcon = <SingleSelectCheckSolidIcon fontSize={20} />;
@@ -89,9 +80,19 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
   const output = part.state === 'output-available' ? part.output : undefined;
   const parsed = useMemo(() => parseBrowserOutput(output), [output]);
-  const currentImage = parsed.gif || parsed.screenshot || null;
   const status = isRunning ? 'running' : parsed.status;
   const isFinished = status === 'finished' || status === 'stopped' || status === 'failed' || status === 'paused';
+  const isFailed = status === 'failed' || status === 'stopped';
+
+  // Which step's screenshot is shown big at the top — defaults to the
+  // most recent one, but any thumbnail in the strip below can be clicked
+  // to preview an earlier step instead (see thumbnail strip below).
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const screenshotSteps = useMemo(() => parsed.steps.filter(s => s.screenshotUrl), [parsed.steps]);
+  const activeShot =
+    selectedIndex !== null && screenshotSteps[selectedIndex]
+      ? screenshotSteps[selectedIndex].screenshotUrl
+      : parsed.currentScreenshot ?? (screenshotSteps.length ? screenshotSteps[screenshotSteps.length - 1].screenshotUrl : null);
 
   if (part.state === 'output-error') {
     return (
@@ -105,22 +106,47 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
     <GenericToolResult
       icon={<EmbedWebIcon />}
       title={
-        isFinished ? (
-          <span className="text-sm text-muted-foreground">
-            The browser task has been completed. Below are the steps and results.
-          </span>
+        isRunning ? (
+          <span className="text-sm text-muted-foreground">The browser task is running. Below are the steps and results.</span>
+        ) : isFailed ? (
+          <span className="text-sm text-muted-foreground">The browser task did not complete successfully.</span>
         ) : (
-          <span className="text-sm text-muted-foreground">
-            The browser task is running. Below are the steps and results.
-          </span>
+          <span className="text-sm text-muted-foreground">The browser task has been completed. Below are the steps and results.</span>
         )
       }
     >
       <div className="max-h-150 overflow-y-auto">
-        {currentImage && (
-          <div className="p-4 not-prose">
+        {activeShot && (
+          <div className="p-4 not-prose space-y-2">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={currentImage} alt="Browser screenshot" className="w-full max-h-96 object-contain rounded-lg border" />
+            <img
+              src={activeShot}
+              alt="Browser screenshot"
+              className="w-full max-h-96 object-contain rounded-lg border bg-muted/30"
+            />
+            {screenshotSteps.length > 1 && (
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {screenshotSteps.map((s, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => setSelectedIndex(idx)}
+                    className={`shrink-0 w-16 h-12 rounded border overflow-hidden ${
+                      (selectedIndex ?? screenshotSteps.length - 1) === idx ? 'border-primary ring-1 ring-primary' : 'border-border'
+                    }`}
+                    title={s.description}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={s.screenshotUrl!} alt={s.description} className="w-full h-full object-cover" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {isRunning && !activeShot && (
+          <div className="p-6 flex items-center justify-center">
+            <LoadingIcon />
           </div>
         )}
 
@@ -132,16 +158,23 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
                 let icon = completedIcon;
                 if (isLastStep) {
                   if (status === 'running' || status === 'created') icon = <LoadingIcon />;
-                  else if (status === 'stopped' || status === 'failed' || status === 'paused') icon = errorIcon;
+                  else if (isFailed) icon = errorIcon;
                   else icon = completedIcon;
                 }
                 return (
-                  <div key={index} className="p-1">
+                  <button
+                    key={index}
+                    onClick={() => {
+                      const shotIdx = screenshotSteps.findIndex(s => s === step);
+                      if (shotIdx >= 0) setSelectedIndex(shotIdx);
+                    }}
+                    className="w-full text-left p-1 rounded hover:bg-accent/50 transition-colors"
+                  >
                     <div className="flex items-start gap-3">
                       <div className="flex-shrink-0 mt-0.5">{icon}</div>
-                      <div className="text-sm text-foreground">{step.next_goal ?? step.goal ?? step.url ?? ''}</div>
+                      <div className="text-sm text-foreground">{step.description}</div>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -156,7 +189,7 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
           </div>
         )}
 
-        {parsed.steps.length === 0 && !parsed.markdown && !currentImage && (
+        {parsed.steps.length === 0 && !parsed.markdown && !activeShot && !isRunning && (
           <div className="p-3 text-sm text-muted-foreground text-center">No detailed content available.</div>
         )}
       </div>
