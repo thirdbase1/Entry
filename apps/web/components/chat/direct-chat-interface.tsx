@@ -15,6 +15,28 @@
  * own translation layer for marginal reuse benefit. Reasoning rendering
  * DOES reuse eve's own AIReasoningCard component though — same visual
  * language, no reason to duplicate it.
+ *
+ * Split into two components (2026-07-11) after a confirmed, reproduced bug:
+ * reopening an existing conversation always rendered as an empty/new chat.
+ * Root cause, verified directly against @ai-sdk/react's useChat source
+ * (node_modules/@ai-sdk/react/dist/index.js): useChat only constructs its
+ * internal Chat instance (which is what `messages:` actually seeds) ONCE,
+ * via `useRef(... new Chat(chatOptions))`, and only reconstructs it later
+ * if `id` itself changes. Reopening a saved chat renders with a non-null
+ * `id` (the sessionId) from the very first frame, while the actual message
+ * history is fetched asynchronously — so by the time that fetch resolves,
+ * `id` hasn't changed (it was already correct), useChat never reconstructs,
+ * and the freshly-fetched history is silently discarded. The exact same
+ * problem was already solved correctly one level up for the eve path (see
+ * chat-interface.tsx: it never even renders `ChatInterfaceInner` — the one
+ * that calls useEveAgent — until its own history fetch resolves), but this
+ * component used to do its history fetch AND its useChat call in the same
+ * component, so it never got that protection. Fix: this outer component
+ * now ONLY resolves the initial message history and renders nothing that
+ * calls useChat until that's done; `DirectChatSession` below is the one
+ * that calls useChat, and it never mounts until history is guaranteed
+ * resolved (keyed by sessionId so switching chats always gets a clean
+ * remount too, not just a stale patched-over instance).
  */
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport } from 'ai';
@@ -52,7 +74,52 @@ function ThinkingIndicator() {
   );
 }
 
-export function DirectChatInterface({
+/**
+ * Outer shell: resolves the persisted message history (if resuming a
+ * saved chat) BEFORE anything downstream ever calls useChat. Deliberately
+ * does not itself hold any useChat/transport state — see file comment.
+ */
+export function DirectChatInterface(props: DirectChatInterfaceProps) {
+  const { sessionId } = props;
+  const [initialMessages, setInitialMessages] = useState<any[] | null>(sessionId ? null : []);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    setInitialMessages(null);
+    let cancelled = false;
+    fetch(`/api/chats/${sessionId}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(snap => {
+        if (!cancelled) setInitialMessages(Array.isArray(snap?.events) ? snap.events : []);
+      })
+      .catch(() => {
+        if (!cancelled) setInitialMessages([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  if (initialMessages === null) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+        Loading conversation…
+      </div>
+    );
+  }
+
+  // Keyed by sessionId: guarantees a full remount (fresh useChat Chat
+  // instance) whenever we switch which conversation we're looking at,
+  // instead of relying solely on useChat's own id-diff recreate logic.
+  return <DirectChatSession key={sessionId ?? 'new'} {...props} initialMessages={initialMessages} />;
+}
+
+/**
+ * Only ever mounted once `initialMessages` is already the real, resolved
+ * history (or `[]` for a genuinely brand-new chat) — this is what makes
+ * useChat's one-time Chat-instance construction correct every time.
+ */
+function DirectChatSession({
   sessionId,
   byokModelId,
   requestedModel,
@@ -65,25 +132,12 @@ export function DirectChatInterface({
   className = '',
   headerContent,
   initialMessage,
-}: DirectChatInterfaceProps) {
+  initialMessages,
+}: DirectChatInterfaceProps & { initialMessages: any[] }) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const createdRef = useRef(!!sessionId);
   const [turnError, setTurnError] = useState<string | null>(null);
-  const [initialMessages, setInitialMessages] = useState<any[] | null>(sessionId ? null : []);
-
-  useEffect(() => {
-    if (!sessionId) return;
-    let cancelled = false;
-    fetch(`/api/chats/${sessionId}`)
-      .then(r => (r.ok ? r.json() : null))
-      .then(snap => {
-        if (!cancelled) setInitialMessages(Array.isArray(snap?.events) ? snap.events : []);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
 
   const transport = useMemo(
     () =>
@@ -96,7 +150,7 @@ export function DirectChatInterface({
 
   const chat = useChat({
     id: sessionId,
-    messages: initialMessages ?? [],
+    messages: initialMessages,
     transport,
     onError(error) {
       console.error('[direct chat turn error]', error);
@@ -170,15 +224,37 @@ export function DirectChatInterface({
 
   const sentInitialRef = useRef(false);
   useEffect(() => {
-    if (initialMessage && !sentInitialRef.current && initialMessages && initialMessages.length === 0) {
+    if (initialMessage && !sentInitialRef.current && initialMessages.length === 0) {
       sentInitialRef.current = true;
       void chat.sendMessage({ text: initialMessage });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialMessage, initialMessages]);
+  }, [initialMessage]);
 
+  // Auto-follow-scroll while streaming: keeps the view pinned to the
+  // bottom as new tokens/parts stream in, not just once per whole message.
+  // The previous version only re-ran this effect on messages.length /
+  // showThinkingIndicator changes — both constant for the entire duration
+  // of a single assistant reply streaming in, so mid-stream growth (the
+  // actual "chat should auto scroll up as model [types]" case) never
+  // re-triggered it; you only got a single scroll-to-bottom at the start
+  // and end of a turn, not a smooth follow throughout. A MutationObserver
+  // on the scroll container reacts to every DOM change the stream causes
+  // (each token/part append), and only auto-follows when the user is
+  // already near the bottom -- so it never yanks the view back down if
+  // someone's deliberately scrolled up to reread earlier context.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (!el) return;
+    const isNearBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const scrollToBottom = () => el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    // Always snap to bottom on a genuinely new turn starting.
+    scrollToBottom();
+    const observer = new MutationObserver(() => {
+      if (isNearBottom()) scrollToBottom();
+    });
+    observer.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
   }, [messages.length, showThinkingIndicator]);
 
   const onSend = (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string }) => {
@@ -191,14 +267,6 @@ export function DirectChatInterface({
       setTurnError(err instanceof Error ? err.message : 'Failed to send message. Please try again.');
     });
   };
-
-  if (initialMessages === null) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-        Loading conversation…
-      </div>
-    );
-  }
 
   if (messages.length === 0 && !isBusy) {
     return (
