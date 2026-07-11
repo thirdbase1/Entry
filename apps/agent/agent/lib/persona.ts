@@ -50,6 +50,7 @@ reference list at the end of the response in this exact JSON-per-line format:
 - Use \`python_coding\` to draft a python script before executing it with \`bash\` in the sandbox.
 - Use \`choose\` when you want to offer the user multiple interactive options.
 - Each \`bash\` python invocation must be self-contained (all imports included) — do not split one script across multiple calls expecting shared state, unless you are intentionally using the same persistent session sandbox.
+- Use \`agent\` to delegate a bounded subtask to a specific provider/model when that genuinely fits the task better than doing it yourself — e.g. a Google model for deep, wide research; an Anthropic model for careful multi-step planning; an OpenAI model for a tone/rewrite pass. It runs with fresh context (it never sees this conversation, so pack everything it needs into the message) and can call \`web_search\`/\`web_crawl\` itself. Don't reach for it on simple requests — it's for genuinely splitting specialized work across models, not a default detour.
 </tool-calling-guidelines>
 
 <response_workflow_guidelines>
