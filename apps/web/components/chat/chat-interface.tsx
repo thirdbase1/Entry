@@ -66,6 +66,7 @@ export function ChatInterface({
     sessionId ? null : {}
   );
   const createdRef = useRef(false);
+  const [recoveryKey, setRecoveryKey] = useState(0);
 
   // Model selection lives here (not in ChatInput) so we can decide, before
   // ever mounting an eve session or a direct-model chat, which of the two
@@ -110,6 +111,51 @@ export function ChatInterface({
       cancelled = true;
     };
   }, [sessionId]);
+
+  // Belt-and-suspenders recovery for eve's own path, mirroring the fix
+  // already shipped for the direct/BYOK path (direct-chat-interface.tsx).
+  // eve/react's client DOES already auto-reconnect a broken mid-stream
+  // connection on its own (up to `maxReconnectAttempts`, resuming from the
+  // last event index rather than restarting -- see node_modules/eve/dist/
+  // src/client/open-stream.js) so brief blips are already handled with no
+  // app code needed. But confirmed by reading eve-agent-store.js directly:
+  // once reconnect attempts are EXHAUSTED, the store's send() loop exits
+  // its `for await` normally (the generator just returns instead of
+  // throwing) and sets status to `'ready'` -- NOT `'error'` -- meaning a
+  // turn truncated by a long-enough outage looks IDENTICAL to a cleanly
+  // finished one from the outside. Status alone can't detect that case, so
+  // this compares actual persisted event counts instead: whenever the tab
+  // regains focus/network, refetch the server's authoritative snapshot,
+  // and if it has strictly more events than what's currently rendered,
+  // force a full remount of ChatInterfaceInner with the fresh snapshot
+  // (bumping `recoveryKey`, since useEveAgent's initialEvents/initialSession
+  // are only ever read once at construction -- there's no public API to
+  // hot-patch an existing instance's projected state).
+  useEffect(() => {
+    if (!sessionId) return;
+    const tryRecover = () => {
+      void (async () => {
+        const snap = await fetchSnapshot(sessionId);
+        const persistedEvents = Array.isArray(snap?.events) ? (snap!.events as unknown[]) : null;
+        const currentEvents = Array.isArray(initial?.events) ? (initial!.events as unknown[]) : [];
+        if (!persistedEvents) return;
+        if (persistedEvents.length > currentEvents.length) {
+          setInitial(snap ?? {});
+          setRecoveryKey(k => k + 1);
+        }
+      })();
+    };
+    const onOnline = () => tryRecover();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tryRecover();
+    };
+    window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [sessionId, initial]);
 
   useEffect(() => {
     if (modelInitializedRef.current) return;
@@ -171,7 +217,7 @@ export function ChatInterface({
 
   return (
     <ChatInterfaceInner
-      key={`eve-${sessionId ?? 'new'}`}
+      key={`eve-${sessionId ?? 'new'}-${recoveryKey}`}
       sessionId={sessionId}
       initialEvents={initial.events as any}
       initialSession={initial.cursor as any}
@@ -224,6 +270,14 @@ function ChatInterfaceInner({
   const agent = useEveAgent({
     initialEvents,
     initialSession,
+    // Default is 3 -- fine for a flaky packet or two, not enough for a
+    // backgrounded mobile tab (routinely suspended for way longer than 3
+    // quick reconnect attempts can cover) or a real network drop of more
+    // than a few seconds. Each attempt just reopens the stream from the
+    // last received index (see open-stream.js) -- cheap to retry more.
+    // The chat-interface.tsx-level recovery effect above is the fallback
+    // for outages long enough to exhaust even this.
+    maxReconnectAttempts: 20,
     onError(error) {
       console.error('[eve turn error]', error);
       setTurnError(error.message || 'Something went wrong generating a response. Please try again.');

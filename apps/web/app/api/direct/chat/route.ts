@@ -74,6 +74,7 @@ import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
+import { isGatewayModelReasoningCapable, isByokModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
 import type { ToolExecCtx } from '@entry/agent/tool-impls/types';
 
@@ -97,7 +98,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const userId = session.user.id;
 
   const body = await req.json().catch(() => ({}));
-  const { id, messages, byokModelId, requestedModel, reasoningEffort } = body ?? {};
+  const { id, messages, byokModelId, requestedModel, reasoningEffort, disabledTools } = body ?? {};
   if (!byokModelId && !requestedModel) {
     return Response.json({ error: 'byokModelId or requestedModel is required' }, { status: 400 });
   }
@@ -128,6 +129,19 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const { model, providerLabel, modelId } = byokModelId
     ? await resolveByokModel(byokModelId, userId)
     : resolveGatewayModel(requestedModel);
+
+  // Gate the reasoning param on whether this SPECIFIC resolved model
+  // actually supports it — never trust the client alone here. Confirmed
+  // real bug (2026-07-11): forwarding a `reasoning` value unconditionally
+  // to every model, including plain non-reasoning ones, made turns fail
+  // outright for some providers (OpenAI-compatible endpoints reject any
+  // `reasoning_effort` at all on a non-reasoning model with a hard 400 —
+  // see reasoning-capability.ts's file comment for the confirmed source).
+  // 'provider-default' never needed gating (it was already a no-op), so
+  // this only changes behavior for an explicit non-default pick against a
+  // model that doesn't support it — from "the whole turn errors" to "runs
+  // fine at the model's own default reasoning behavior".
+  const reasoningCapable = byokModelId ? await isByokModelReasoningCapable(modelId) : await isGatewayModelReasoningCapable(modelId);
 
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
@@ -190,6 +204,62 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // awaited yet) rather than after it — see preSave's comment.
   const modelMessages = convertToModelMessages(uiMessages);
 
+  // Only `choose` and `web_crawl` are always-on (not user-toggleable in
+  // the Tools menu — see chat-config.tsx's `configurableTools`); every
+  // other entry here can be individually turned off. Building the full
+  // set and then filtering (rather than a chain of `disabledSet.has(...)
+  // ? undefined : tool(...)` conditionals scattered inline) keeps the
+  // filter logic in one obvious place and the tool defs themselves
+  // unchanged from before.
+  const disabledToolSet = new Set(Array.isArray(disabledTools) ? disabledTools.filter((t: unknown): t is string => typeof t === 'string') : []);
+  const allTools = {
+    choose: tool({ description: choose.description, inputSchema: choose.inputSchema, execute: choose.execute }),
+    web_crawl: tool({ description: webCrawl.description, inputSchema: webCrawl.inputSchema, execute: webCrawl.execute }),
+    web_search: tool({ description: webSearch.description, inputSchema: webSearch.inputSchema, execute: webSearch.execute }),
+    task_analysis: tool({
+      description: taskAnalysis.description,
+      inputSchema: taskAnalysis.inputSchema,
+      execute: (input: { task: string; context?: string; availableTools?: string[] }) => taskAnalysis.execute(input, execCtx),
+    }),
+    code_artifact: tool({
+      description: codeArtifact.description,
+      inputSchema: codeArtifact.inputSchema,
+      execute: (input: { title: string; userPrompt: string }) => codeArtifact.execute(input, execCtx),
+    }),
+    python_coding: tool({
+      description: pythonCoding.description,
+      inputSchema: pythonCoding.inputSchema,
+      execute: (input: { requirements: string }) => pythonCoding.execute(input, execCtx),
+    }),
+    make_it_real: tool({
+      description: makeItReal.description,
+      inputSchema: makeItReal.inputSchema,
+      execute: (input: { instructions?: string; markdown: string }) => makeItReal.execute(input, execCtx),
+    }),
+    doc_compose: tool({
+      description: docCompose.description,
+      inputSchema: docCompose.inputSchema,
+      execute: (input: { title: string; userPrompt: string }) => docCompose.execute(input, execCtx),
+    }),
+    bash: tool({
+      description: bash.description,
+      inputSchema: bash.inputSchema,
+      execute: (input: { command: string }) => bash.execute(input, execCtx),
+    }),
+    browser_use: tool({
+      description: browserUse.description,
+      inputSchema: browserUse.inputSchema,
+      execute: (input: { task: string }) => browserUse.execute(input, execCtx),
+    }),
+  } as const;
+  // Confirmed real bug (2026-07-11): this used to be sent as-is regardless
+  // of the user's Tools menu picks — chat-input.tsx's onSend already
+  // collected `disabledTools` and passed it all the way down, but this
+  // route never read it off the body at all, so every turn always got
+  // every single tool's full schema attached (unnecessary prompt/latency
+  // overhead) AND a disabled tool could still be called by the model.
+  const activeTools = Object.fromEntries(Object.entries(allTools).filter(([name]) => !disabledToolSet.has(name))) as typeof allTools;
+
   const result = streamText({
     model,
     system: SYSTEM_PROMPT,
@@ -205,50 +275,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // replaced, and it actually honors the user's selected effort level
     // instead of a fixed, non-configurable 8000-token budget for Claude
     // only. See REASONING_LEVELS above for how the value is sourced.
-    reasoning: resolvedReasoningEffort,
+    // Gated by `reasoningCapable` (see above) — never sent to a model that
+    // doesn't actually support it, which used to hard-fail the whole turn
+    // for some providers instead of just running at the model's default.
+    reasoning: reasoningCapable ? resolvedReasoningEffort : 'provider-default',
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
     },
-    tools: {
-      choose: tool({ description: choose.description, inputSchema: choose.inputSchema, execute: choose.execute }),
-      web_crawl: tool({ description: webCrawl.description, inputSchema: webCrawl.inputSchema, execute: webCrawl.execute }),
-      web_search: tool({ description: webSearch.description, inputSchema: webSearch.inputSchema, execute: webSearch.execute }),
-      task_analysis: tool({
-        description: taskAnalysis.description,
-        inputSchema: taskAnalysis.inputSchema,
-        execute: (input: { task: string; context?: string; availableTools?: string[] }) => taskAnalysis.execute(input, execCtx),
-      }),
-      code_artifact: tool({
-        description: codeArtifact.description,
-        inputSchema: codeArtifact.inputSchema,
-        execute: (input: { title: string; userPrompt: string }) => codeArtifact.execute(input, execCtx),
-      }),
-      python_coding: tool({
-        description: pythonCoding.description,
-        inputSchema: pythonCoding.inputSchema,
-        execute: (input: { requirements: string }) => pythonCoding.execute(input, execCtx),
-      }),
-      make_it_real: tool({
-        description: makeItReal.description,
-        inputSchema: makeItReal.inputSchema,
-        execute: (input: { instructions?: string; markdown: string }) => makeItReal.execute(input, execCtx),
-      }),
-      doc_compose: tool({
-        description: docCompose.description,
-        inputSchema: docCompose.inputSchema,
-        execute: (input: { title: string; userPrompt: string }) => docCompose.execute(input, execCtx),
-      }),
-      bash: tool({
-        description: bash.description,
-        inputSchema: bash.inputSchema,
-        execute: (input: { command: string }) => bash.execute(input, execCtx),
-      }),
-      browser_use: tool({
-        description: browserUse.description,
-        inputSchema: browserUse.inputSchema,
-        execute: (input: { task: string }) => browserUse.execute(input, execCtx),
-      }),
-    },
+    tools: activeTools,
   });
 
   // Make sure the durability write has actually landed before the
@@ -274,7 +308,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // onFinish, and a client that reconnects (see direct-chat-interface.tsx's
   // online/visibilitychange recovery fetch) picks up the completed
   // result instead of a stalled/lost one.
-  after(() => result.consumeStream().catch(err => console.error('[direct chat] background consumeStream failed', chatId, err)));
+  after(() => Promise.resolve(result.consumeStream()).catch((err: unknown) => console.error('[direct chat] background consumeStream failed', chatId, err)));
 
   return result.toUIMessageStreamResponse({
     originalMessages: uiMessages,

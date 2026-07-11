@@ -44,6 +44,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
 import { ChatInput } from './chat-input';
+import { useModelOptions } from './chat-config';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import type { AttachedContext } from './chat-context';
 import type { ReasoningEffort } from './chat-config';
@@ -148,6 +149,25 @@ function DirectChatSession({
     [byokModelId, requestedModel, reasoningEffort]
   );
 
+  // Ground-truth "what model is actually answering" label — sourced from
+  // byokModelId/requestedModel (the values this whole session was actually
+  // created/resolved with server-side), never from the ephemeral picker
+  // `model` state alone, so this can never drift from what's truly being
+  // called. Directly addresses a real, reasonable user concern: previously
+  // there was NO visible confirmation anywhere of which model actually
+  // generated a reply (the server tagged every response with
+  // x-direct-chat-model/-provider headers, but nothing in the UI ever
+  // read or displayed them) — a user picking a model with e.g. no
+  // remaining credits had no way to visually verify their pick was even
+  // being honored versus some other fallback happening upstream.
+  const modelOptions = useModelOptions();
+  const activeModelLabel = useMemo(() => {
+    const value = byokModelId ? `byok:${byokModelId}` : requestedModel ? `gateway:${requestedModel}` : undefined;
+    const match = value ? modelOptions.find(o => o.value === value) : undefined;
+    if (match) return match.label;
+    return byokModelId ? `BYOK model (${byokModelId})` : requestedModel || 'Unknown model';
+  }, [modelOptions, byokModelId, requestedModel]);
+
   const chat = useChat({
     id: sessionId,
     messages: initialMessages,
@@ -180,7 +200,23 @@ function DirectChatSession({
   useEffect(() => {
     const tryRecover = () => {
       void (async () => {
-        const activeId = sessionId ?? (createdRef.current ? chat.id : undefined);
+        // `chat.id` is always populated from the very first render (the AI
+        // SDK's Chat class defaults it via generateId() when no `id` prop
+        // is given -- confirmed directly in node_modules/ai/dist/index.js),
+        // and that same id is what DefaultChatTransport sends as `id` in
+        // the POST body, which route.ts then reuses as the persisted
+        // chatId. So it's ALWAYS safe to key off chat.id, even for a
+        // brand-new chat's very first message -- there is no window where
+        // it's genuinely unknown. Previously this was gated behind
+        // `createdRef.current` (only true AFTER the first turn's onFinish
+        // already completed client-side), which meant a dropped connection
+        // during exactly that first turn -- easily the single most likely
+        // moment to lose network/backgrounding, since it's right when
+        // someone fires off a message and switches away -- could never be
+        // recovered at all: the gate itself silently withheld the one id
+        // that was already valid and already matched what the server had
+        // persisted under.
+        const activeId = sessionId ?? chat.id;
         if (!activeId) return;
         if (chat.status !== 'streaming' && chat.status !== 'submitted' && chat.status !== 'error') return;
         try {
@@ -193,6 +229,15 @@ function DirectChatSession({
             chat.setMessages(persisted);
             setTurnError(null);
             chat.clearError();
+            // Mirror onFinish's own first-turn navigation: if the client's
+            // onFinish never got to run (the stream broke before it could
+            // fire), the URL would otherwise be stuck on the "new chat"
+            // route forever despite the chat now genuinely being persisted
+            // under `activeId` -- a refresh later would lose it from view.
+            if (!createdRef.current) {
+              createdRef.current = true;
+              if (!sessionId) router.replace(`/chats/${activeId}`);
+            }
           }
         } catch {
           // best-effort -- retried on the next online/visibility event
@@ -262,7 +307,13 @@ function DirectChatSession({
     // (chat-interface.tsx remounts into the right path); here we only ever
     // send under the current byokModelId/requestedModel.
     setTurnError(null);
-    void chat.sendMessage({ text: input }).catch(err => {
+    // Confirmed real bug (2026-07-11): the Tools menu's disabledTools was
+    // collected here (opts.disabledTools) but never actually sent to the
+    // server — every turn got every tool regardless of what was toggled
+    // off in the UI. `sendMessage`'s second-arg `body` gets shallow-merged
+    // on top of the transport's static body (byokModelId/requestedModel/
+    // reasoningEffort), so this is additive, not a replacement.
+    void chat.sendMessage({ text: input }, { body: { disabledTools: opts?.disabledTools ?? [] } }).catch(err => {
       console.error('[direct chat send failed]', err);
       setTurnError(err instanceof Error ? err.message : 'Failed to send message. Please try again.');
     });
@@ -272,6 +323,7 @@ function DirectChatSession({
     return (
       <div className="flex flex-col justify-center h-full p-4 gap-4 max-w-[800px] mx-auto">
         <div className="text-[26px] font-medium text-center mb-9 text-foreground">{placeholderTitle}</div>
+        <div className="text-xs text-muted-foreground text-center -mt-6 mb-2">Running: {activeModelLabel}</div>
         <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} model={model} onModelChange={setModel} reasoningEffort={reasoningEffort} onReasoningEffortChange={setReasoningEffort} />
         {turnError && (
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 text-center">
@@ -285,6 +337,7 @@ function DirectChatSession({
   return (
     <div className={`flex flex-col h-full ${className}`}>
       {headerContent}
+      <div className="text-xs text-muted-foreground text-center py-1 border-b border-border/50">Running: {activeModelLabel}</div>
       <div className="flex-1 h-0 flex flex-col relative">
         <div ref={scrollRef} className="flex-1 overflow-y-auto py-4">
           <div className="max-w-[832px] mx-auto px-4 w-full flex flex-col [&>*:not(:first-child)]:mt-4">
