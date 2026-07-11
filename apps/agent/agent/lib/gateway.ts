@@ -6,18 +6,32 @@
  * in packages/ai's zod-v3-typed `copilotProvider` (this app pins zod v4,
  * per eve's own `defineTool` Standard Schema requirement).
  *
- * Per explicit instruction, NO hardcoded model id lives here anymore.
- * `resolveModel()` fetches the live Gateway catalog
- * (`gateway.getAvailableModels()`, same API packages/ai/src/models.ts
- * uses) and picks the first language-type model — same "no
- * defaultForOutputType flag, first live capable match" policy as
- * packages/ai/src/provider.ts, so both apps resolve defaults the same way.
- * Callers that need a SPECIFIC model still just pass its id straight
- * through — this only removes the *fallback* hardcoding, not the ability
- * to target an exact model.
+ * FIXED (2026-07-11) — real, confirmed cause of "tool calling is slow":
+ * the previous policy here ("first live capable match" from
+ * `gateway.getAvailableModels()`, mirroring packages/ai/src/provider.ts)
+ * resolved, in production right now, to `bytedance/seed-1.8` — a
+ * reasoning-capable model — for EVERY SINGLE call these 5 tools make
+ * (task_analysis, code_artifact, python_coding, make_it_real, doc_compose).
+ * That's not a deliberate choice anywhere in the code, just whatever
+ * happens to sort first in the Gateway's catalog response — entirely
+ * unrelated to speed, and actively the opposite of it. Every one of these
+ * tool calls was paying for a full reasoning-model completion as a hidden
+ * side effect nested inside a single step of the OUTER agent loop, on top
+ * of that outer loop's own per-step latency — directly compounding the
+ * "any time it does tool calling" complaint.
+ *
+ * Now defaults to an explicit, fast, non-reasoning alias suited to these
+ * tasks (structured JSON / short code drafts / markdown bodies — none of
+ * which need frontier reasoning). Per standing instruction, this is a
+ * Gateway alias (`provider/model-name`), never a dated vendor-specific
+ * snapshot id. Falls back to the old "first live match" catalog lookup
+ * only if the pinned model is ever missing from the live catalog, so this
+ * never hard-fails just because a provider renames/retires one id.
  */
 import { gateway } from '@ai-sdk/gateway';
 import type { LanguageModel } from 'ai';
+
+const FAST_DEFAULT_MODEL_ID = 'anthropic/claude-3.5-haiku';
 
 let cachedDefault: { id: string; fetchedAt: number } | null = null;
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
@@ -27,7 +41,24 @@ async function resolveDefaultModelId(): Promise<string> {
     return cachedDefault.id;
   }
   const { models } = await gateway.getAvailableModels();
-  const candidate = models.find(m => m.modelType === 'language' || !m.modelType);
+  const pinned = models.find(m => m.id === FAST_DEFAULT_MODEL_ID);
+  if (pinned) {
+    cachedDefault = { id: pinned.id, fetchedAt: Date.now() };
+    return pinned.id;
+  }
+  // Pinned fast model isn't live right now (renamed/retired upstream) —
+  // fall back to a couple of other known-fast, non-reasoning aliases
+  // before falling back to just the first language model at all, so an
+  // outage in the pinned id doesn't silently reintroduce the
+  // reasoning-model tax either. (GatewayLanguageModelEntry has no
+  // `reasoning` flag to filter by generically -- /api/server/models
+  // derives that client-facing flag from its own separate metadata, not
+  // from this raw catalog type -- so fall back to a short explicit list
+  // instead of an inferred filter.)
+  const otherFastAliases = ['openai/gpt-4o-mini', 'google/gemini-2.5-flash-lite'];
+  const candidate =
+    otherFastAliases.map(id => models.find(m => m.id === id)).find(Boolean) ??
+    models.find(m => m.modelType === 'language' || !m.modelType);
   if (!candidate) {
     throw new Error('No language model returned by the Gateway catalog — check AI_GATEWAY_API_KEY / connectivity.');
   }
