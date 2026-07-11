@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useMemo } from 'react';
 import AppSidebar from '@/components/ui/sidebar/sidebar';
+import { ThemeToggle } from '@/components/theme-toggle';
 import { UserInfo } from '@/components/sidebar/user-info';
 import { Cmdk } from '@/components/cmdk';
 import { cn } from '@/lib/utils';
@@ -189,8 +190,9 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
     <div className="relative flex size-full justify-end h-dvh">
       {/* sidebar */}
       <AppSidebar id="app-sidebar" className="bg-muted/30">
-        <header className="w-full h-15 p-3 flex items-center">
+        <header className="w-full h-15 p-3 flex items-center justify-between">
           <img src="/logo.jpg" alt="logo" className="w-6 h-6" />
+          <ThemeToggle />
         </header>
         <div className="flex-1 h-0">
           <SidebarContent />

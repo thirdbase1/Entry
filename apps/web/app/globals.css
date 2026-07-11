@@ -85,7 +85,11 @@
 }
 
 .panel {
-  @apply border rounded-lg overflow-hidden shadow-view bg-white;
+  /* was hardcoded bg-white — invisible in light mode (matched the page
+     background anyway) but a jarring white box once dark mode is enabled.
+     bg-card is the same design-system token used by every other panel/card
+     surface in the app, and already flips correctly per [data-theme]. */
+  @apply border rounded-lg overflow-hidden shadow-view bg-card;
 }
 .onboarding-title {
   @apply mb-2 text-center text-2xl font-bold tracking-[-0.32px];

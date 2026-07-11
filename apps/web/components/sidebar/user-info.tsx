@@ -26,7 +26,14 @@ export function UserInfo() {
     <div className="flex items-center justify-between px-1 gap-2 h-[42px]">
       <div
         className="flex items-center justify-center w-6 h-6 rounded-full text-xs font-medium text-primary-foreground"
-        style={{ backgroundColor: 'hsl(var(--primary))' }}
+        // Was `hsl(var(--primary))` — --primary (a raw H/S/L triplet) is
+        // never defined anywhere in this app (verified: grep across
+        // globals.css and the design-token package), only --color-primary
+        // (a full CSS color value, not an HSL triplet) is. So this avatar
+        // background has been silently resolving to nothing this whole
+        // time. Fixed while wiring dark mode through this file's
+        // neighborhood, since it's a one-line, unrelated-risk fix.
+        style={{ backgroundColor: 'var(--color-primary)' }}
       >
         {initials}
       </div>
