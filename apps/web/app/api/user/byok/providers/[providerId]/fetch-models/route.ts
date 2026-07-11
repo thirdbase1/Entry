@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma, decryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
+import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
 
 /**
  * POST /api/user/byok/providers/:providerId/fetch-models
@@ -68,6 +69,23 @@ export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { 
   if (!provider) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
   const apiKey = provider.encryptedApiKey ? decryptApiKey(provider.encryptedApiKey) : undefined;
+
+  // Self-heal older provider rows saved before normalizeBaseUrl() existed
+  // (2026-07-11) — e.g. an ANTHROPIC-compatibility row whose baseUrl is
+  // just the origin, missing `/v1`. Confirmed real bug: the settings
+  // page's AutoSaveField only calls PATCH when the typed value actually
+  // *differs* from what's already saved (see its `commit()` guard), so
+  // telling a user to "just hit save again" on an unchanged field is a
+  // no-op that never reaches the server at all — the only way to fix an
+  // already-broken row was editing the text to something different first.
+  // Doing the normalize-and-persist right here instead means the one
+  // button a user actually has for this ("Fetch models") is what fixes
+  // it, with no reliance on re-triggering a save.
+  const normalizedBaseUrl = normalizeBaseUrl(provider.compatibility, provider.baseUrl);
+  if (normalizedBaseUrl !== provider.baseUrl) {
+    await prisma.userModelProvider.update({ where: { id: providerId }, data: { baseUrl: normalizedBaseUrl } });
+    provider.baseUrl = normalizedBaseUrl;
+  }
 
   try {
     const discovered = await discoverModels(provider.compatibility, provider.baseUrl, apiKey);

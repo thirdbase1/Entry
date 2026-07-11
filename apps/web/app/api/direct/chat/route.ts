@@ -141,7 +141,21 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // this only changes behavior for an explicit non-default pick against a
   // model that doesn't support it — from "the whole turn errors" to "runs
   // fine at the model's own default reasoning behavior".
-  const reasoningCapable = byokModelId ? await isByokModelReasoningCapable(modelId) : await isGatewayModelReasoningCapable(modelId);
+  //
+  // Confirmed real bug (2026-07-11, found investigating "tool calls are
+  // slow"): this was a hard `await` sitting here, BEFORE preSave and
+  // BEFORE streamText even started. Both branches ultimately call
+  // getReasoningCapableGatewaySlugs(), which on any cache miss/expiry (its
+  // TTL is 5 minutes) does a real external fetch to
+  // ai-gateway.vercel.sh/v1/models/catalog — so roughly every 5 minutes,
+  // literally every single turn (BYOK or Gateway, reasoning-capable model
+  // or not) paid that entire external round trip serially in front of the
+  // actual model call, on top of whatever the provider itself took. Same
+  // shape of bug as the preSave fix below (a network call sitting in the
+  // critical path that the model call never actually depended on) —
+  // fixed the same way: kick it off now, only await the result at the
+  // one place it's actually consumed (right before streamText).
+  const reasoningCapablePromise = byokModelId ? isByokModelReasoningCapable(modelId) : isGatewayModelReasoningCapable(modelId);
 
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
@@ -278,7 +292,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // Gated by `reasoningCapable` (see above) — never sent to a model that
     // doesn't actually support it, which used to hard-fail the whole turn
     // for some providers instead of just running at the model's default.
-    reasoning: reasoningCapable ? resolvedReasoningEffort : 'provider-default',
+    reasoning: (await reasoningCapablePromise) ? resolvedReasoningEffort : 'provider-default',
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
     },
