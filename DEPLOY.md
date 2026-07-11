@@ -124,6 +124,35 @@ directly. This is exactly what `@vercel/next`'s own builder would have
 produced — we're just doing it by hand once instead of letting their
 crashing orchestrator do it.
 
+**⚠️ New migrations need an extra step — read this if `packages/db/prisma/migrations`
+has any new folder since your last deploy.** `npm run build` (below) runs
+`prisma migrate deploy` locally, using whatever `DATABASE_URL` is in your
+shell — but Neon's Vercel integration does not let `vercel env pull`/`env
+ls` export the real production value at all (confirmed: comes back empty
+by design), so there is no way to point a LOCAL `prisma migrate deploy` at
+the real production database. `npm run build`'s migration step now fails
+loudly instead of silently succeeding against the wrong one if
+`DATABASE_URL` looks local (see
+`packages/db/scripts/guard-production-migrate.js`) — this is exactly what
+happened on 2026-07-11 (a migration "succeeded" against `.env`'s local dev
+DB while real production silently never got it, then broke at runtime).
+
+**The actual fix: apply new migrations to production from inside the
+deployed app itself**, where `DATABASE_URL` resolves to the real value —
+`POST /api/admin/db/migrate` (any logged-in admin user) applies every
+migration folder not yet recorded in production's `_prisma_migrations`,
+the same way `prisma migrate deploy` would. `GET` on the same route shows
+applied vs. pending without changing anything. Deploy order for a release
+with new migrations: deploy first (below), then call this route once —
+the running code and the schema it expects go live together either way,
+and any request that touches the new table/column simply waits the few
+seconds until the migrate call completes right after.
+
+For a release with NO new migrations (verify: `git diff` against
+`packages/db/prisma/migrations` is empty since the last deploy), skip the
+local migrate step entirely rather than fighting the guard —
+`SKIP_PRODUCTION_MIGRATE_GUARD=1 npm run build`.
+
 ```bash
 # One-time, if you haven't already:
 npm i -g vercel

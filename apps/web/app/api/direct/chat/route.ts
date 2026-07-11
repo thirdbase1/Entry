@@ -76,6 +76,7 @@ import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { isGatewayModelReasoningCapable, isByokModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
+import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
 import type { ToolExecCtx } from '@entry/agent/tool-impls/types';
 
@@ -130,7 +131,13 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   if (!Array.isArray(messages) || messages.length === 0) {
     return Response.json({ error: 'messages is required' }, { status: 400 });
   }
-  const uiMessages = messages as UIMessage[];
+  // Repair any dangling tool-call left over from an interrupted earlier
+  // turn BEFORE it's used for anything below (both for convertToModelMessages
+  // and for preSave's own persisted copy) — see sanitize-messages.ts's file
+  // comment for the full story on why an unrepaired one throws instantly,
+  // before the model is ever called, and bricks every future turn in this
+  // same chat until repaired.
+  const uiMessages = sanitizeDanglingToolCalls(messages as UIMessage[]);
 
   // Resolve BEFORE any streaming starts — a bad/missing key or unknown
   // model slug surfaces as a clean JSON error, not a broken half-open
@@ -424,8 +431,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       return 'Something went wrong generating a response. Please try again.';
     },
     async onFinish({ messages: finalMessages }) {
+      // Same repair as above, applied to what THIS turn is about to
+      // persist — a stream cut off mid-tool-call (disconnect, crash, an
+      // execute() that never resolves) would otherwise save a dangling
+      // call right now and brick every future turn on this chat, exactly
+      // the failure this whole file's sanitizer exists to prevent.
+      const sanitizedFinalMessages = sanitizeDanglingToolCalls(finalMessages as UIMessage[]);
       await prisma.eveChatSession
-        .update({ where: { id: chatId, userId }, data: { events: finalMessages as any } })
+        .update({ where: { id: chatId, userId }, data: { events: sanitizedFinalMessages as any } })
         .catch(err => {
           console.error('[direct chat] final save failed', chatId, err);
           logError({ source: 'direct-chat-final-save', error: err, userId, chatId });

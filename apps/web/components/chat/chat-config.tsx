@@ -177,7 +177,24 @@ export function useModelOptions() {
                   // naming-pattern fallback (o1/o3/r1/thinking/etc.) for
                   // models the Gateway catalog doesn't carry at all. See
                   // lib/reasoning-detection.ts for the full matching logic.
-                  const supportsReasoning = looksLikeReasoningModel(m.modelId || m.label || '', gatewayReasoningIds);
+                  //
+                  // Confirmed real bug (2026-07-11, user-reported "reasoning
+                  // still doesn't show despite enabling it"): this used to
+                  // be ONLY the heuristic guess above, completely ignoring
+                  // `m.reasoningEnabled` — the exact manual per-model
+                  // override the Settings page's "Thinking" toggle writes,
+                  // and the SAME field /api/direct/chat's route.ts already
+                  // trusts server-side (`manualReasoningOverride`) specifically
+                  // BECAUSE the heuristic has real false negatives. Net
+                  // effect: a user who manually enabled reasoning for a
+                  // model the heuristic didn't recognize (that's the whole
+                  // reason the toggle exists) got `supportsReasoning: false`
+                  // here regardless — hiding the ReasoningEffortMenu control
+                  // AND (see chat-input.tsx) never sending a reasoningEffort
+                  // at all, even though the server was fully ready to honor
+                  // it and stream back real reasoning parts. The manual
+                  // override must win outright, same as server-side.
+                  const supportsReasoning = m.reasoningEnabled === true || looksLikeReasoningModel(m.modelId || m.label || '', gatewayReasoningIds);
                   return {
                     label: `${p.label} · ${m.label || m.modelId}`,
                     value: `byok:${m.id}`,

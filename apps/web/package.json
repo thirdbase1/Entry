@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "npm run migrate:deploy && next build --webpack",
     "start": "next start",
-    "migrate:deploy": "cd ../../packages/db && node ../../node_modules/prisma/build/index.js migrate deploy"
+    "migrate:deploy": "node ../../packages/db/scripts/run-production-migrate.js"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.21",

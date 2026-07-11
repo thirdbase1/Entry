@@ -33,6 +33,19 @@ const nextConfig: NextConfig = {
   // ourselves via the Build Output API, bypassing the broken orchestration
   // entirely.
   output: 'standalone',
+  // Bundles the raw migration.sql files into the standalone/serverless
+  // output for the one route that needs to read them at runtime
+  // (/api/admin/db/migrate) — Next's output file tracing only follows the
+  // actual JS import graph by default, so these plain .sql files (never
+  // `import`ed, only read from disk at request time) wouldn't otherwise
+  // make it into the deployed bundle at all. See that route's file
+  // comment for why it exists: Neon's Vercel integration doesn't let the
+  // CLI export the real production DATABASE_URL, so `prisma migrate
+  // deploy` can only safely run from inside a deployed function, not a
+  // local shell.
+  outputFileTracingIncludes: {
+    '/api/admin/db/migrate': ['../../packages/db/prisma/migrations/**/*'],
+  },
   // Vercel's build containers report "2 cores, 8 GB" in their UI, but
   // Node's os.cpus().length (which Next.js's `experimental.cpus` default
   // derives from) often reads the underlying HOST's full core count on

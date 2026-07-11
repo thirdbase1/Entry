@@ -13,6 +13,7 @@ import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 import { toast } from '@/lib/toast';
+import { useOnlineStatus } from './use-online-status';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -88,6 +89,22 @@ export function ChatInterface({
   // path, closed the same way -- key off whichever id is known, not just
   // the one the URL happens to reflect yet.
   const [liveSessionId, setLiveSessionId] = useState<string | undefined>(undefined);
+
+  // See use-online-status.ts's own comment for the full story: the
+  // recovery effect below already repairs a turn silently dropped by a
+  // network outage or a backgrounded/suspended tab, but until now nothing
+  // ever told the user that was happening -- a real outage and a quiet
+  // moment rendered identically. `isRecovering` flips true only while an
+  // online/visibility-triggered recovery check is actually in flight (not
+  // during the routine 3s background poll, which would otherwise make
+  // this flicker on every single tick even when nothing is wrong), and is
+  // what the banner below reads to show "Reconnecting…" instead of
+  // nothing. `hasEverDroppedRef` gates the one-time success toast so it
+  // only fires after a real recovery (found + adopted newer persisted
+  // events), never on a routine no-op check.
+  const isOnline = useOnlineStatus();
+  const [isRecovering, setIsRecovering] = useState(false);
+  const hasEverDroppedRef = useRef(false);
 
   // Model selection lives here (not in ChatInput) so we can decide, before
   // ever mounting an eve session or a direct-model chat, which of the two
@@ -168,30 +185,44 @@ export function ChatInterface({
   useEffect(() => {
     const activeId = sessionId ?? liveSessionId;
     if (!activeId) return;
-    const tryRecover = () => {
+    // `showRecovering` distinguishes the two explicit triggers (the user
+    // actually just came back -- online/visible) from the routine 3s
+    // background poll below, which fires constantly and would otherwise
+    // make the banner flicker on every tick even when the connection was
+    // never actually lost.
+    const tryRecover = (showRecovering: boolean) => {
       void (async () => {
-        const snap = await fetchSnapshot(activeId);
-        const persistedEvents = Array.isArray(snap?.events) ? (snap!.events as unknown[]) : null;
-        const currentEvents = Array.isArray(initial?.events) ? (initial!.events as unknown[]) : [];
-        if (!persistedEvents) return;
-        if (persistedEvents.length > currentEvents.length) {
-          setInitial(snap ?? {});
-          setRecoveryKey(k => k + 1);
-          // Mirror onFinish's own first-turn navigation: if the client's
-          // onFinish never got to run (the stream broke before it could
-          // fire), the URL would otherwise be stuck on the "new chat"
-          // route forever despite the chat now genuinely being persisted
-          // under `activeId`.
-          if (!createdRef.current) {
-            createdRef.current = true;
-            if (!sessionId) router.replace(`/chats/${activeId}`);
+        if (showRecovering) setIsRecovering(true);
+        try {
+          const snap = await fetchSnapshot(activeId);
+          const persistedEvents = Array.isArray(snap?.events) ? (snap!.events as unknown[]) : null;
+          const currentEvents = Array.isArray(initial?.events) ? (initial!.events as unknown[]) : [];
+          if (!persistedEvents) return;
+          if (persistedEvents.length > currentEvents.length) {
+            setInitial(snap ?? {});
+            setRecoveryKey(k => k + 1);
+            if (hasEverDroppedRef.current || showRecovering) {
+              hasEverDroppedRef.current = true;
+              toast('Back online — caught up on what you missed');
+            }
+            // Mirror onFinish's own first-turn navigation: if the client's
+            // onFinish never got to run (the stream broke before it could
+            // fire), the URL would otherwise be stuck on the "new chat"
+            // route forever despite the chat now genuinely being persisted
+            // under `activeId`.
+            if (!createdRef.current) {
+              createdRef.current = true;
+              if (!sessionId) router.replace(`/chats/${activeId}`);
+            }
           }
+        } finally {
+          if (showRecovering) setIsRecovering(false);
         }
       })();
     };
-    const onOnline = () => tryRecover();
+    const onOnline = () => tryRecover(true);
     const onVisibility = () => {
-      if (document.visibilityState === 'visible') tryRecover();
+      if (document.visibilityState === 'visible') tryRecover(true);
     };
     window.addEventListener('online', onOnline);
     document.addEventListener('visibilitychange', onVisibility);
@@ -203,8 +234,8 @@ export function ChatInterface({
     // tick) -- this is what makes a plain page reload land on an
     // up-to-date answer fast instead of sitting on stale/incomplete
     // events for up to 3s first every single time.
-    tryRecover();
-    const pollId = window.setInterval(tryRecover, 3000);
+    tryRecover(true);
+    const pollId = window.setInterval(() => tryRecover(false), 3000);
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
@@ -342,6 +373,8 @@ export function ChatInterface({
       model={model}
       setModel={setModel}
       onSessionIdKnown={setLiveSessionId}
+      isOnline={isOnline}
+      isRecovering={isRecovering}
     />
   );
 }
@@ -362,6 +395,8 @@ function ChatInterfaceInner({
   model,
   setModel,
   onSessionIdKnown,
+  isOnline,
+  isRecovering,
 }: ChatInterfaceProps & {
   initialEvents?: any;
   initialSession?: any;
@@ -375,6 +410,13 @@ function ChatInterfaceInner({
    *  recovery effect can key off it too — see the `liveSessionId` comment
    *  above. */
   onSessionIdKnown: (sessionId: string | undefined) => void;
+  /** Lifted from the parent ChatInterface -- see its own `isOnline`/
+   *  `isRecovering` comment for the full story. Passed down rather than
+   *  duplicated here since the parent already owns the one recovery
+   *  effect (keyed off `liveSessionId`/`sessionId`) that both components
+   *  need to reflect. */
+  isOnline: boolean;
+  isRecovering: boolean;
 }) {
   // Turn-level failure banner. Without this, a turn that ends in
   // status "error" (e.g. run_model throwing because a BYOK provider
@@ -457,6 +499,12 @@ function ChatInterfaceInner({
   // with no assistant reply after it is what that situation looks like
   // from a fresh mount, independent of `agent.status`.
   const pendingTurn = !isBusy && messages.length > 0 && messages[messages.length - 1]?.role === 'user';
+  // Covers the other silent-drop shape `pendingTurn` above can't: a reply
+  // that had already started streaming before the connection broke (last
+  // message is already an assistant one, so `pendingTurn`'s user-message
+  // check never fires) mid-recovery. `isRecovering` (see its own comment
+  // above) is what actually flips this on -- only for the two explicit
+  // "you just came back" triggers, never the silent 3s background poll.
   const downArrowRef = useRef<DownArrowRef>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -564,11 +612,21 @@ function ChatInterfaceInner({
         />
       </div>
       <AggregatedTodoList messages={messages} />
-      {pendingTurn && !turnError && (
+      {!isOnline && (
+        <div className="max-w-[832px] mx-auto w-full px-4">
+          <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+            You&apos;re offline — I&apos;ll reconnect and catch up automatically once you&apos;re back.
+          </div>
+        </div>
+      )}
+      {isOnline && (isRecovering || pendingTurn) && !turnError && (
         <div className="max-w-[832px] mx-auto w-full px-4">
           <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-pulse shrink-0" />
-            Still working on this — it kept generating in the background while you were away. Catching up now…
+            {isRecovering && !pendingTurn
+              ? 'Reconnecting…'
+              : 'Still working on this — it kept generating in the background while you were away. Catching up now…'}
           </div>
         </div>
       )}
