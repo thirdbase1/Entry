@@ -12,6 +12,7 @@ import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
+import { toast } from '@/lib/toast';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -24,6 +25,10 @@ interface ChatInterfaceProps {
   initialMessage?: string;
   /** Pre-attached context (e.g. a doc, when opened from a doc's "chat about this" button). */
   initialAttachedContext?: import('./chat-context').AttachedContext[];
+  /** Preselect a model for a brand-new chat (e.g. ?model=byok:xyz after the
+   *  cross-bucket redirect above) — takes priority over the last-used
+   *  localStorage value, since the user just explicitly picked this one. */
+  initialModel?: string;
 }
 
 /** localStorage key for the user's last-selected model, so a BYOK choice
@@ -60,6 +65,7 @@ export function ChatInterface({
   headerContent,
   initialMessage,
   initialAttachedContext,
+  initialModel,
 }: ChatInterfaceProps) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -96,6 +102,7 @@ export function ChatInterface({
   // as before.
   const [model, setModelState] = useState<string>(() => {
     if (sessionId) return DEFAULT_MODEL_ID;
+    if (initialModel) return initialModel;
     if (typeof window === 'undefined') return DEFAULT_MODEL_ID;
     try {
       return window.localStorage.getItem(LAST_MODEL_STORAGE_KEY) || DEFAULT_MODEL_ID;
@@ -103,7 +110,19 @@ export function ChatInterface({
       return DEFAULT_MODEL_ID;
     }
   });
+  // Tracks whether the LIVE picker was actually touched by the user during
+  // this component's lifetime, as opposed to just being seeded from a
+  // resumed chat's stored model (see the seeding effect below, which now
+  // deliberately bypasses this via setModelState directly). Needed so the
+  // cross-bucket-redirect effect further down can't misfire during the
+  // one-render gap between mount (model = DEFAULT_MODEL_ID) and that
+  // seeding effect settling `model` to match `initial` — without this
+  // guard, a freshly-opened BYOK/Gateway chat would see model=DEFAULT for
+  // one render while initial.byokModelId is already set, look exactly
+  // like a real cross-bucket pick, and wrongly redirect away immediately.
+  const userChangedModelRef = useRef(false);
   const setModel = useCallback((next: string) => {
+    userChangedModelRef.current = true;
     setModelState(next);
     if (typeof window === 'undefined') return;
     try {
@@ -197,8 +216,14 @@ export function ChatInterface({
     if (modelInitializedRef.current) return;
     if (!initial) return;
     modelInitializedRef.current = true;
-    if (initial.byokModelId) setModel(`byok:${initial.byokModelId}`);
-    else if (initial.requestedModel) setModel(`gateway:${initial.requestedModel}`);
+    // setModelState directly, NOT setModel — this is seeding the picker
+    // to reflect a resumed chat's already-locked-in model, not a real
+    // user preference change. Using setModel here used to also (a)
+    // overwrite the user's "last used model" localStorage default just
+    // from opening an old chat, and (b) as of this fix, would incorrectly
+    // flip userChangedModelRef and defeat its entire purpose above.
+    if (initial.byokModelId) setModelState(`byok:${initial.byokModelId}`);
+    else if (initial.requestedModel) setModelState(`gateway:${initial.requestedModel}`);
   }, [initial]);
 
   if (!initial) {
@@ -209,25 +234,58 @@ export function ChatInterface({
     );
   }
 
-  // A chat's runtime is decided ONCE and never hot-swapped mid-thread:
-  // for a brand-new chat (no sessionId yet), whatever model is currently
-  // selected when the first message is sent decides it. For a chat being
-  // resumed, the runtime it was ALREADY created under (byokModelId or
-  // requestedModel stored on the EveChatSession row) decides it,
-  // regardless of what the picker shows right now.
+  // FIXED (2026-07-11): this used to lock a resumed chat's routing to
+  // whatever `initial.byokModelId`/`initial.requestedModel` were at
+  // creation time, full stop — the live `model` picker updated
+  // localStorage and the UI's checkmark, but never actually changed what
+  // got sent. Confirmed, reported bug: "switch model, doesn't change,
+  // still uses the model I first used."
   //
-  // ANY explicit model pick — BYOK or a Gateway slug — now bypasses eve
-  // entirely via DirectChatInterface (see apps/web/app/api/direct/chat's
-  // file comment for why: eve's root agent used to be a mandatory,
-  // non-streaming, identity-leaking relay in front of every picked model).
-  // Only "Default" (no pick) still goes to eve's own ChatInterfaceInner.
-  const isDirect = sessionId
-    ? !!(initial.byokModelId || initial.requestedModel)
-    : model.startsWith('byok:') || model.startsWith('gateway:');
+  // What's actually locked, and can't be: which BUCKET a resumed row
+  // belongs to — eve, or direct (BYOK/Gateway) — because eve rows and
+  // direct rows persist completely different message shapes on
+  // EveChatSession (HandleMessageStreamEvent[] vs plain UIMessage[], see
+  // that model's schema comment). A resumed thread can't retroactively
+  // become the other shape.
+  //
+  // What's NOT locked, and was wrongly being treated as if it were: WHICH
+  // specific model within the direct bucket is used. BYOK<->BYOK,
+  // BYOK<->Gateway, Gateway<->Gateway are all the exact same route
+  // (/api/direct/chat) and the exact same message shape — nothing stops
+  // that from tracking the live picker turn to turn, and now it does.
+  const rowIsDirect = sessionId ? !!(initial.byokModelId || initial.requestedModel) : null; // null = brand-new, bucket not decided yet
+  const liveIsDirect = model.startsWith('byok:') || model.startsWith('gateway:');
+  const isDirect = rowIsDirect === null ? liveIsDirect : rowIsDirect;
+  // Crossing eve<->direct on an EXISTING thread can't be hot-applied (see
+  // above) — instead of silently ignoring the pick (the original bug,
+  // just for the other combination), fork into a brand-new chat under
+  // the newly-picked model and say so, rather than pretending nothing
+  // happened.
+  const crossedBucket = rowIsDirect !== null && rowIsDirect !== liveIsDirect;
+
+  useEffect(() => {
+    if (!crossedBucket) return;
+    if (!userChangedModelRef.current) return; // seeding-gap guard, see above
+    toast(
+      liveIsDirect
+        ? "Switching models here starts a new chat — this thread can't change models."
+        : "Switching to Default here starts a new chat — this thread can't change models."
+    );
+    const params = new URLSearchParams({ model });
+    router.push(`/chats?${params.toString()}`);
+  }, [crossedBucket, liveIsDirect, model, router]);
 
   if (isDirect) {
-    const byokModelId = sessionId ? initial.byokModelId ?? undefined : model.startsWith('byok:') ? model.slice('byok:'.length) : undefined;
-    const requestedModel = sessionId
+    // While `crossedBucket` (redirect in flight above), keep rendering
+    // THIS row under its original, still-true bucket/model — never the
+    // live pick that doesn't apply to it — so there's no flash of a
+    // half-switched state before the redirect lands.
+    const byokModelId = crossedBucket
+      ? initial.byokModelId ?? undefined
+      : model.startsWith('byok:')
+        ? model.slice('byok:'.length)
+        : undefined;
+    const requestedModel = crossedBucket
       ? initial.requestedModel ?? undefined
       : model.startsWith('gateway:')
         ? model.slice('gateway:'.length)

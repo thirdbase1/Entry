@@ -12,6 +12,7 @@ export default function NewChatPage() {
         placeholderTitle="What can I help you with?"
         className="flex-1"
         initialMessage={searchParams.get('msg') ?? undefined}
+        initialModel={searchParams.get('model') ?? undefined}
       />
     </div>
   );
