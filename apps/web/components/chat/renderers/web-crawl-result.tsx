@@ -5,6 +5,13 @@
  * exact same result-list rendering as web-search-result.tsx (the original
  * imports `useWebResult` from the search renderer too), just a different
  * icon (PublishIcon) and title ("Crawling completed").
+ *
+ * FIXED (2026-07-11) — same real bug as web-search-result.tsx: the actual
+ * `web_crawl` tool-impl (apps/agent/agent/lib/tool-impls/web_crawl.ts)
+ * returns a bare ARRAY, not `{results: [...]}` — so `rawResults` was `[]`
+ * on every real crawl. See that file's comment for the full story; fixed
+ * identically here (bare-array unwrap + snippet derived from `content`,
+ * since Parallel's real output has no separate snippet field).
  */
 import type { EveDynamicToolPart } from 'eve/react';
 import { useMemo } from 'react';
@@ -38,28 +45,41 @@ interface ParsedResult {
 function useWebResult(results: CrawlResultItem[]) {
   return useMemo<ParsedResult[]>(() => {
     if (!Array.isArray(results)) return [];
-    return results.map(result => ({
-      title: result.title || result.name || 'Untitled',
-      url: result.url || result.link || '#',
-      snippet: result.snippet || result.description || result.text || '',
-      content: result.content || result.body || result.fullText || '',
-      favicon:
-        result.favicon ||
-        (() => {
-          try {
-            const domain = new URL(result.url || result.link || 'https://example.com').hostname;
-            return `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
-          } catch {
-            return undefined;
-          }
-        })(),
-    }));
+    return results.map(result => {
+      const content = result.content || result.body || result.fullText || '';
+      const snippet =
+        result.snippet ||
+        result.description ||
+        result.text ||
+        (content ? content.slice(0, 200) + (content.length > 200 ? '...' : '') : '');
+      return {
+        title: result.title || result.name || 'Untitled',
+        url: result.url || result.link || '#',
+        snippet,
+        content,
+        favicon:
+          result.favicon ||
+          (() => {
+            try {
+              const domain = new URL(result.url || result.link || 'https://example.com').hostname;
+              return `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
+            } catch {
+              return undefined;
+            }
+          })(),
+      };
+    });
   }, [results]);
 }
 
 export function WebCrawlResult({ part }: { part: EveDynamicToolPart }) {
-  const output = part.state === 'output-available' ? (part.output as { results?: CrawlResultItem[] } | undefined) : undefined;
-  const rawResults = output?.results ?? [];
+  const output =
+    part.state === 'output-available'
+      ? (part.output as CrawlResultItem[] | { results?: CrawlResultItem[] } | undefined)
+      : undefined;
+  // Real tool output is a bare array; also accept a `{results: [...]}`
+  // wrapper defensively in case that ever changes upstream.
+  const rawResults = Array.isArray(output) ? output : (output?.results ?? []);
   const searchResults = useWebResult(rawResults);
   const resultCount = searchResults.length;
 

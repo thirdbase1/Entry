@@ -10,6 +10,16 @@
  * content preview/copy button) — mirrored here 1:1, and the running state
  * uses GeneratingCard with the literal original copy "Generating..." (not
  * "Composing…").
+ *
+ * FIXED (2026-07-11) — real, confirmed bug: the actual `doc_compose`
+ * tool-impl (apps/agent/agent/lib/tool-impls/doc_compose.ts) returns
+ * `{docId, title, markdown, wordCount}` — this was reading `output.content`
+ * (field never existed) with a fallback to `input.markdown` (also never
+ * existed — doc_compose's real input schema is `{title, userPrompt}`, no
+ * `markdown` field). Net effect: clicking this card opened a completely
+ * BLANK document, silently discarding the real generated content that
+ * genuinely exists server-side in `output.markdown`. Now reads the real
+ * field names on both sides.
  */
 import type { EveDynamicToolPart } from 'eve/react';
 import { PageIcon } from '@blocksuite/icons/rc';
@@ -18,13 +28,16 @@ import { GenericToolResult } from './generic-tool-result';
 import { GeneratingCard } from './generating-card';
 
 export function DocComposeResult({ part }: { part: EveDynamicToolPart }) {
-  const input = part.input as { title?: string; markdown?: string } | undefined;
-  const output = part.state === 'output-available' ? (part.output as { content?: string; title?: string } | undefined) : undefined;
+  const input = part.input as { title?: string; userPrompt?: string } | undefined;
+  const output = part.state === 'output-available' ? (part.output as { markdown?: string; title?: string } | undefined) : undefined;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
   const { openDoc } = useOpenDocContext();
 
   if (isRunning) {
-    return <GeneratingCard title="Generating..." content={input?.markdown} />;
+    // No partial content available during generation (doc_compose uses a
+    // single blocking generateText call, no incremental streaming) — show
+    // the user's original ask as context instead of nothing.
+    return <GeneratingCard title="Generating..." content={input?.userPrompt} />;
   }
 
   if (part.state === 'output-error') {
@@ -35,7 +48,7 @@ export function DocComposeResult({ part }: { part: EveDynamicToolPart }) {
     );
   }
 
-  const content = output?.content ?? input?.markdown ?? '';
+  const content = output?.markdown ?? '';
   const title = output?.title ?? input?.title ?? 'Document';
 
   const handleClick = () => {

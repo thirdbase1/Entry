@@ -2,17 +2,25 @@
 
 /**
  * Ported 1:1 from pages/chats/renderers/web-search-result.tsx. Restored the
- * real shell (GenericToolResult: rounded-2xl, h-14 header, expand icon,
- * height-animated content) and the real result-row layout: favicon (with
- * Google favicon-service fallback + graceful hide-on-error), linked title,
- * snippet, an optional gray content-preview box (truncated to 500 chars),
- * and the URL — all results shown in a scrollable max-h list, not sliced to
- * a handful. Title copy matches the original exactly ("The search is
- * complete, and these webpages have been searched") with the count shown
- * next to it, always-on (not swapped for a "Searching…" placeholder — the
- * original's isRunning/streaming call state uses a separate GenericToolCalling
- * card upstream in chat-content-stream-objects, this component only ever
- * renders once results exist).
+ * real result-row layout: favicon (with Google favicon-service fallback +
+ * graceful hide-on-error), linked title, snippet, an optional gray
+ * content-preview box (truncated to 500 chars), and the URL — all results
+ * shown in a scrollable max-h list, not sliced to a handful.
+ *
+ * FIXED (2026-07-11) — real, confirmed bug, not a display-polish thing:
+ * the actual `web_search` tool-impl (apps/agent/agent/lib/tool-impls/
+ * web_search.ts) returns a bare ARRAY (`result.results.map(...)`) as its
+ * whole output. This component was reading `part.output.results` — an
+ * object-wrapper shape that never existed — so `rawResults` was `[]`
+ * on every single real search, no matter how many results Parallel
+ * actually found. The card rendered and *expanded* fine; it just always
+ * showed "No search results found" underneath. Also: the real tool output
+ * only ever has `{title, url, content, publishedDate}` — no `snippet`,
+ * `name`/`link`, or `favicon` field ever comes back from it — so the old
+ * `result.snippet || result.description || result.text` chain always fell
+ * through to `undefined` too. Now derives a short snippet from `content`
+ * (first ~200 chars) so the preview line actually has something in it,
+ * while the full `content` remains available in the expandable box below.
  */
 import type { EveDynamicToolPart } from 'eve/react';
 import { useMemo } from 'react';
@@ -45,28 +53,44 @@ interface ParsedResult {
 function useWebResult(results: SearchResultItem[]) {
   return useMemo<ParsedResult[]>(() => {
     if (!Array.isArray(results)) return [];
-    return results.map(result => ({
-      title: result.title || result.name || 'Untitled',
-      url: result.url || result.link || '#',
-      snippet: result.snippet || result.description || result.text || '',
-      content: result.content || result.body || result.fullText || '',
-      favicon:
-        result.favicon ||
-        (() => {
-          try {
-            const domain = new URL(result.url || result.link || 'https://example.com').hostname;
-            return `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
-          } catch {
-            return undefined;
-          }
-        })(),
-    }));
+    return results.map(result => {
+      const content = result.content || result.body || result.fullText || '';
+      const snippet =
+        result.snippet ||
+        result.description ||
+        result.text ||
+        // Parallel's real output has no separate snippet field, only
+        // `content` — derive a short preview from it rather than showing
+        // a blank line for every real search result.
+        (content ? content.slice(0, 200) + (content.length > 200 ? '...' : '') : '');
+      return {
+        title: result.title || result.name || 'Untitled',
+        url: result.url || result.link || '#',
+        snippet,
+        content,
+        favicon:
+          result.favicon ||
+          (() => {
+            try {
+              const domain = new URL(result.url || result.link || 'https://example.com').hostname;
+              return `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
+            } catch {
+              return undefined;
+            }
+          })(),
+      };
+    });
   }, [results]);
 }
 
 export function WebSearchResult({ part }: { part: EveDynamicToolPart }) {
-  const output = part.state === 'output-available' ? (part.output as { results?: SearchResultItem[] } | undefined) : undefined;
-  const rawResults = output?.results ?? [];
+  const output =
+    part.state === 'output-available'
+      ? (part.output as SearchResultItem[] | { results?: SearchResultItem[] } | undefined)
+      : undefined;
+  // Real tool output is a bare array; also accept a `{results: [...]}`
+  // wrapper defensively in case that ever changes upstream.
+  const rawResults = Array.isArray(output) ? output : (output?.results ?? []);
   const searchResults = useWebResult(rawResults);
   const resultCount = searchResults.length;
 
