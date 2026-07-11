@@ -49,6 +49,7 @@ import type { AttachedContext } from './chat-context';
 import type { ReasoningEffort } from './chat-config';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
+import { ChooseResult } from './renderers/choose-result';
 
 interface DirectChatInterfaceProps {
   sessionId?: string;
@@ -64,6 +65,21 @@ interface DirectChatInterfaceProps {
   className?: string;
   headerContent?: React.ReactNode;
   initialMessage?: string;
+}
+
+/** Same heuristic as message-renderer.tsx's findChooseAnswer, adapted for plain AI SDK UIMessages. */
+function findDirectChooseAnswer(messages: any[], afterIndex: number, options: string[]): string[] {
+  for (let i = afterIndex + 1; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== 'user') continue;
+    const text = (m.parts ?? [])
+      .filter((p: any) => p.type === 'text')
+      .map((p: any) => p.text)
+      .join('');
+    const matched = options.filter(o => text.includes(o));
+    if (matched.length) return text.split(', ');
+  }
+  return [];
 }
 
 function ThinkingIndicator() {
@@ -394,6 +410,32 @@ function DirectChatSession({
                         return <AIReasoningCard key={i} text={(part as any).text ?? ''} loading={stillThinking} />;
                       }
                       if (part.type.startsWith('tool-')) {
+                        const state = ('state' in part ? (part as any).state : 'output-available') as ToolState;
+                        const toolName = part.type.replace('tool-', '');
+                        const input = 'input' in part ? (part as any).input : undefined;
+                        const output = 'output' in part ? (part as any).output : undefined;
+                        const errorText = state === 'output-error' ? ((part as any).errorText ?? 'Tool call failed.') : undefined;
+
+                        // Fixed (2026-07-11): `choose` is always-on for this
+                        // surface too (see route.ts), but until now it fell
+                        // straight into the generic Tool card below — raw
+                        // JSON dump, no way to actually pick an option. This
+                        // path never had the eve chat's special case for it.
+                        // Same interactive picker component, reused as-is —
+                        // no separate/duplicate UI to keep in sync.
+                        if (toolName === 'choose') {
+                          const options = (output?.options ?? input?.options ?? []) as string[];
+                          const answered = findDirectChooseAnswer(messages, mi, options);
+                          return (
+                            <ChooseResult
+                              key={i}
+                              part={part as any}
+                              answered={answered.length ? answered : undefined}
+                              onAnswer={onSend}
+                            />
+                          );
+                        }
+
                         // Real AI SDK "Tool" component here too (2026-07-11,
                         // per explicit request) — this is the BYOK/Gateway
                         // direct-chat path's own tool-part rendering (a
@@ -401,11 +443,6 @@ function DirectChatSession({
                         // badge before), now sharing the exact same
                         // components/ui/tool.tsx primitives as the eve chat
                         // path's GenericToolResult/GenericToolCalling.
-                        const state = ('state' in part ? (part as any).state : 'output-available') as ToolState;
-                        const toolName = part.type.replace('tool-', '');
-                        const input = 'input' in part ? (part as any).input : undefined;
-                        const output = 'output' in part ? (part as any).output : undefined;
-                        const errorText = state === 'output-error' ? ((part as any).errorText ?? 'Tool call failed.') : undefined;
                         return (
                           <Tool key={i} className="my-1">
                             <ToolHeader title={toolName} state={state} />
