@@ -34,7 +34,7 @@ export function PythonCodeResult({ part }: { part: EveDynamicToolPart }) {
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult title="Code generation failed" icon={<FilePythonIcon />}>
+      <GenericToolResult title="Code generation failed" icon={<FilePythonIcon />} status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );

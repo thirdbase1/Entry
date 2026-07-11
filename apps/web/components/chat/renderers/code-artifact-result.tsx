@@ -68,7 +68,7 @@ export function CodeArtifactResult({ part }: { part: EveDynamicToolPart }) {
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult title={title} icon={<FileIconHtmlIcon />}>
+      <GenericToolResult title={title} icon={<FileIconHtmlIcon />} status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );

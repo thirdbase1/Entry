@@ -26,7 +26,7 @@ export function GenericToolCard({ part }: { part: EveDynamicToolPart }) {
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult icon={<CheckBoxCheckSolidIcon />} title={`${name} failed`}>
+      <GenericToolResult icon={<CheckBoxCheckSolidIcon />} title={`${name} failed`} status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );

@@ -127,9 +127,17 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // Resolve BEFORE any streaming starts — a bad/missing key or unknown
   // model slug surfaces as a clean JSON error, not a broken half-open
   // stream.
-  const { model, providerLabel, modelId } = byokModelId
+  const resolved = byokModelId
     ? await resolveByokModel(byokModelId, userId)
     : resolveGatewayModel(requestedModel);
+  const { model, providerLabel, modelId } = resolved;
+  // Manual per-model override (2026-07-11) — only ever present on the BYOK
+  // branch (resolveGatewayModel's return shape has no such field, Gateway
+  // models are always heuristic-free via the real catalog tag instead).
+  // See reasoning-capability.ts's file comment for why the BYOK heuristic
+  // needs an escape hatch at all: it's a naming-pattern guess with real
+  // false negatives, and this is the user explicitly telling us better.
+  const manualReasoningOverride = byokModelId ? (resolved as { reasoningEnabled?: boolean }).reasoningEnabled === true : false;
 
   // Gate the reasoning param on whether this SPECIFIC resolved model
   // actually supports it — never trust the client alone here. Confirmed
@@ -156,7 +164,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // critical path that the model call never actually depended on) —
   // fixed the same way: kick it off now, only await the result at the
   // one place it's actually consumed (right before streamText).
-  const reasoningCapablePromise = byokModelId ? isByokModelReasoningCapable(modelId) : isGatewayModelReasoningCapable(modelId);
+  const reasoningCapablePromise = manualReasoningOverride
+    ? Promise.resolve(true)
+    : byokModelId
+      ? isByokModelReasoningCapable(modelId)
+      : isGatewayModelReasoningCapable(modelId);
 
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 

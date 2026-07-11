@@ -109,7 +109,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { 
     const models = await prisma.userModelProviderModel.findMany({ where: { providerId }, orderBy: { modelId: 'asc' } });
     return NextResponse.json({
       fetched: discovered.length,
-      models: models.map(m => ({ id: m.id, modelId: m.modelId, label: m.label, isEnabled: m.isEnabled })),
+      models: models.map(m => ({ id: m.id, modelId: m.modelId, label: m.label, isEnabled: m.isEnabled, reasoningEnabled: m.reasoningEnabled })),
     });
   } catch (error: any) {
     const message = error?.message ?? 'Failed to fetch models from that base URL.';

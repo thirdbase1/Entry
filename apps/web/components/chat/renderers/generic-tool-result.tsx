@@ -3,22 +3,30 @@
 /**
  * Shared shell for a completed tool call's result — used by web-search,
  * web-crawl, code-artifact, doc-compose, make-it-real, python-code,
- * task-analysis, browser-use, and the generic/default fallback (see
- * message-renderer.tsx's ToolPart dispatch).
+ * task-analysis, browser-use, agent-delegate, choose, ai-reasoning-card,
+ * and the generic/default fallback (see message-renderer.tsx's ToolPart
+ * dispatch).
  *
- * Rewritten (2026-07-11) per explicit, repeated user feedback ("I don't
- * like any of the tool card") — previously this rendered a bordered,
- * box-shadowed, rounded-2xl, 56px-tall header on every single tool call,
- * so a multi-tool turn produced a stack of heavy cards before any real
- * answer text appeared. Now a single plain text line (icon + title +
- * count), no box/border/shadow/fixed height. The expand/collapse toggle
- * is kept — detail (search results, code, etc.) is still one click away,
- * just not shoved in your face by default and not wrapped in a "card"
- * anymore when it is expanded either (plain indented block, no bg/border).
+ * Rebuilt (2026-07-11) on top of the real AI SDK "Tool" component
+ * (components/ui/tool.tsx, hand-ported from `npx ai-elements add tool` —
+ * see that file's comment for why hand-ported instead of CLI-installed)
+ * per explicit user request ("the real shadcn-style Tool component,
+ * collapsible with status badges — add to all the tool calling"). Genuine
+ * @radix-ui/react-collapsible under the hood now (was a hand-rolled
+ * AnimatePresence height animation before) plus a real status <Badge>
+ * (Pending/Running/Completed/Error) in the header — every one of this
+ * shell's ~12 call sites gets both automatically with zero changes to
+ * those files, since they only ever touch this shared component's public
+ * props (icon/title/count/actions/children/onClick/autoExpand), which are
+ * unchanged. Only new prop: `status`, defaulting to 'output-available'
+ * ("Completed") — callers' existing output-error branches were updated to
+ * pass `status="output-error"` so the badge is accurate instead of always
+ * reading "Completed".
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
-import { ExpandCloseIcon, ExpandFullIcon } from '@blocksuite/icons/rc';
+import { ChevronDown } from 'lucide-react';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { ToolStatusBadge, type ToolState } from '@/components/ui/tool';
 import { cn } from '@/lib/utils';
 
 export function GenericToolResult({
@@ -31,6 +39,7 @@ export function GenericToolResult({
   className,
   onClick,
   autoExpand,
+  status = 'output-available',
 }: {
   icon?: ReactNode;
   title: ReactNode;
@@ -45,6 +54,11 @@ export function GenericToolResult({
    *  false. A manual expand/collapse click opts out of this for the rest
    *  of this instance's life — the user's explicit choice always wins. */
   autoExpand?: boolean;
+  /** Status badge shown in the header. Defaults to "Completed" — pass
+   *  'output-error' from an error branch, or 'input-streaming' /
+   *  'input-available' for a still-running call (see GenericToolCalling,
+   *  which renders the same shell in those two states). */
+  status?: ToolState;
 }) {
   const [collapsed, setCollapsed] = useState(autoExpand === undefined ? true : !autoExpand);
   const userToggledRef = useRef(false);
@@ -58,50 +72,50 @@ export function GenericToolResult({
     setCollapsed(!autoExpand);
   }, [autoExpand]);
 
-  const toggleCollapsed = () => {
-    userToggledRef.current = true;
-    setCollapsed(!collapsed);
-    onCollapseChange?.(!collapsed);
-  };
-
   return (
-    <div className={cn('mb-1.5', className, onClick ? 'cursor-pointer' : '')} onClick={onClick} data-collapsed={collapsed}>
-      <div className="flex items-center gap-1.5 py-0.5 text-xs text-muted-foreground">
+    <Collapsible
+      open={!collapsed}
+      onOpenChange={open => {
+        userToggledRef.current = true;
+        setCollapsed(!open);
+        onCollapseChange?.(!open);
+      }}
+      className={cn('not-prose mb-1.5 w-full rounded-lg border bg-card/40', onClick ? 'cursor-pointer' : '', className)}
+      onClick={onClick}
+    >
+      <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground">
         {icon ? <div className="size-3.5 shrink-0 flex items-center justify-center">{icon}</div> : null}
-        <div className="min-w-0 truncate">
+        <div className="min-w-0 truncate flex-1">
           {title}
           {count ? <span className="ml-1 opacity-70">{count}</span> : null}
         </div>
+        <ToolStatusBadge state={status} />
         <div className="flex items-center gap-1.5">
           {actions}
           {children ? (
-            <button
-              onClick={e => {
-                e.stopPropagation();
-                toggleCollapsed();
-              }}
-              className="size-4 shrink-0 flex items-center justify-center rounded hover:bg-accent transition-colors text-muted-foreground/70"
-            >
-              {collapsed ? <ExpandFullIcon className="size-3" /> : <ExpandCloseIcon className="size-3" />}
-            </button>
+            <CollapsibleTrigger asChild>
+              <button
+                onClick={e => e.stopPropagation()}
+                className="group size-5 shrink-0 flex items-center justify-center rounded hover:bg-accent transition-colors text-muted-foreground/70"
+              >
+                <ChevronDown className="size-3.5 transition-transform group-data-[state=open]:rotate-180" />
+              </button>
+            </CollapsibleTrigger>
           ) : null}
         </div>
       </div>
       {children ? (
-        <AnimatePresence>
-          {collapsed ? null : (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ damping: 10, stiffness: 100, mass: 0.5 }}
-              className="pl-5"
-            >
-              {children}
-            </motion.div>
+        <CollapsibleContent
+          className={cn(
+            'overflow-hidden border-t',
+            'data-[state=closed]:animate-out data-[state=open]:animate-in',
+            'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
+            'data-[state=closed]:slide-out-to-top-1 data-[state=open]:slide-in-from-top-1'
           )}
-        </AnimatePresence>
+        >
+          <div className="pl-2">{children}</div>
+        </CollapsibleContent>
       ) : null}
-    </div>
+    </Collapsible>
   );
 }

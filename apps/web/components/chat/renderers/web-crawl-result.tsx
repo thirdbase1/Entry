@@ -85,7 +85,7 @@ export function WebCrawlResult({ part }: { part: EveDynamicToolPart }) {
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult icon={<PublishIcon />} title="Crawling failed">
+      <GenericToolResult icon={<PublishIcon />} title="Crawling failed" status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );

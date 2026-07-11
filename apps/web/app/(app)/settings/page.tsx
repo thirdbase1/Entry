@@ -126,6 +126,13 @@ interface ProviderModel {
   modelId: string;
   label?: string | null;
   isEnabled: boolean;
+  /** Manual per-model override of the server's reasoning-capability
+   *  heuristic (see reasoning-capability.ts) — when on, /api/direct/chat
+   *  always forwards the user's picked reasoning effort to this model
+   *  regardless of what the naming-pattern guess thinks, so a
+   *  reasoning-capable model the heuristic doesn't recognize can still
+   *  show "thinking". Off by default; purely additive. */
+  reasoningEnabled: boolean;
 }
 
 interface Provider {
@@ -385,6 +392,22 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
     [provider, onUpdate]
   );
 
+  // Manual reasoning override toggle (2026-07-11) — see ProviderModel's
+  // `reasoningEnabled` comment for why this exists. Same optimistic-update
+  // + fire-and-forget PATCH pattern as toggleModel above, just the other
+  // field.
+  const toggleReasoning = useCallback(
+    async (modelRowId: string, reasoningEnabled: boolean) => {
+      onUpdate({ ...provider, models: provider.models.map(m => (m.id === modelRowId ? { ...m, reasoningEnabled } : m)) });
+      await fetch(`/api/user/byok/providers/${provider.id}/models/${modelRowId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reasoningEnabled }),
+      });
+    },
+    [provider, onUpdate]
+  );
+
   const removeModel = useCallback(
     async (modelRowId: string) => {
       onUpdate({ ...provider, models: provider.models.filter(m => m.id !== modelRowId) });
@@ -474,6 +497,10 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
           {provider.models.map(m => (
             <div key={m.id} className="flex items-center gap-2 py-1">
               <span className="flex-1 truncate text-sm text-foreground font-mono">{m.label || m.modelId}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Thinking</span>
+                <Toggle checked={m.reasoningEnabled} onChange={() => toggleReasoning(m.id, !m.reasoningEnabled)} />
+              </div>
               <Toggle checked={m.isEnabled} onChange={() => toggleModel(m.id, !m.isEnabled)} />
               <button onClick={() => removeModel(m.id)} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-destructive">
                 <DeleteIcon className="w-3.5 h-3.5" />

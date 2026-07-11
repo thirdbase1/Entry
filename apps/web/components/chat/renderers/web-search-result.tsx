@@ -96,7 +96,7 @@ export function WebSearchResult({ part }: { part: EveDynamicToolPart }) {
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult icon={<WebIcon />} title="Web search failed">
+      <GenericToolResult icon={<WebIcon />} title="Web search failed" status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );

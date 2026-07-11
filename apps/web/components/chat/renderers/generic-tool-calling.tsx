@@ -4,30 +4,29 @@
  * "Tool is running" placeholder — used while a tool-call is in progress
  * but has no partial content to preview yet.
  *
- * Rewritten (2026-07-11) per explicit, repeated user feedback ("I don't
- * like any of the tool card") — the old version was a bordered,
- * box-shadowed, rounded-2xl, 56px-tall card. With a multi-tool turn
- * (common — task_analysis -> web_search -> bash -> ...) that meant a
- * stack of heavy boxes taking up most of the screen before any real
- * answer text ever appeared. Now a single plain text line: spinner +
- * title + elapsed time, no box/border/shadow at all — matches the
- * minimal inline style direct-chat-interface.tsx already used for its
- * own (non-eve) tool call rendering, so both chat paths now look the same.
+ * Rebuilt (2026-07-11) to use the real AI SDK "Tool" shell
+ * (components/ui/tool.tsx — see generic-tool-result.tsx's file comment
+ * for the full story) per explicit user request to put the real
+ * shadcn-style Tool component with status badges on every tool-calling
+ * surface, including in-flight calls, not just finished ones. Same
+ * bordered/rounded Tool container + a real "Pending"/"Running" status
+ * <Badge> in place of the old plain spinner-and-text line, elapsed timer
+ * kept as-is.
  */
 import { useEffect, useState } from 'react';
-
-function Spinner() {
-  return <span className="inline-block w-3 h-3 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin" />;
-}
+import { Tool, ToolStatusBadge, type ToolState } from '@/components/ui/tool';
 
 export function GenericToolCalling({
   icon,
   title,
   displayTime = true,
+  state = 'input-available',
 }: {
   icon?: React.ReactNode;
   title: string;
   displayTime?: boolean;
+  /** 'input-streaming' -> "Pending" badge, 'input-available' (default) -> "Running". */
+  state?: Extract<ToolState, 'input-streaming' | 'input-available'>;
 }) {
   const [seconds, setSeconds] = useState(0);
 
@@ -39,10 +38,17 @@ export function GenericToolCalling({
   const elapsedTime = seconds > 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
 
   return (
-    <div className="flex items-center gap-1.5 py-1 text-xs text-muted-foreground">
-      {icon ?? <Spinner />}
-      <span>{title}</span>
-      {displayTime && <span className="opacity-70">· {elapsedTime}</span>}
-    </div>
+    <Tool className="mb-1.5">
+      <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground">
+        {icon ?? (
+          <span className="inline-block w-3 h-3 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin shrink-0" />
+        )}
+        <span className="min-w-0 truncate flex-1">
+          {title}
+          {displayTime && <span className="opacity-70"> · {elapsedTime}</span>}
+        </span>
+        <ToolStatusBadge state={state} />
+      </div>
+    </Tool>
   );
 }

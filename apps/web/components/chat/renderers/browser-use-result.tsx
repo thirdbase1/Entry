@@ -95,7 +95,7 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult icon={<EmbedWebIcon />} title="The browser task failed.">
+      <GenericToolResult icon={<EmbedWebIcon />} title="The browser task failed." status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );

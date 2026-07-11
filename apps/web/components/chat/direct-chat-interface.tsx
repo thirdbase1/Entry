@@ -48,6 +48,7 @@ import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import type { AttachedContext } from './chat-context';
 import type { ReasoningEffort } from './chat-config';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
+import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
 
 interface DirectChatInterfaceProps {
   sessionId?: string;
@@ -393,23 +394,41 @@ function DirectChatSession({
                         return <AIReasoningCard key={i} text={(part as any).text ?? ''} loading={stillThinking} />;
                       }
                       if (part.type.startsWith('tool-')) {
-                        const state = 'state' in part ? (part as any).state : undefined;
-                        const isError = state === 'output-error';
-                        const errorText = isError ? ((part as any).errorText ?? 'Tool call failed.') : undefined;
+                        // Real AI SDK "Tool" component here too (2026-07-11,
+                        // per explicit request) — this is the BYOK/Gateway
+                        // direct-chat path's own tool-part rendering (a
+                        // plain unboxed <div>, no collapsible, no status
+                        // badge before), now sharing the exact same
+                        // components/ui/tool.tsx primitives as the eve chat
+                        // path's GenericToolResult/GenericToolCalling.
+                        const state = ('state' in part ? (part as any).state : 'output-available') as ToolState;
+                        const toolName = part.type.replace('tool-', '');
+                        const input = 'input' in part ? (part as any).input : undefined;
+                        const output = 'output' in part ? (part as any).output : undefined;
+                        const errorText = state === 'output-error' ? ((part as any).errorText ?? 'Tool call failed.') : undefined;
                         return (
-                          <div
-                            key={i}
-                            className={
-                              isError
-                                ? 'text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-2 py-1.5 my-1'
-                                : 'text-xs text-muted-foreground bg-muted/50 rounded-md px-2 py-1 my-1 font-mono'
-                            }
-                          >
-                            <div>
-                              {part.type.replace('tool-', '')} {state ? `· ${state}` : ''}
-                            </div>
-                            {isError && <div className="mt-0.5 font-sans">{errorText}</div>}
-                          </div>
+                          <Tool key={i} className="my-1">
+                            <ToolHeader title={toolName} state={state} />
+                            <ToolContent>
+                              {errorText ? (
+                                <ToolOutput errorText={errorText} />
+                              ) : (
+                                <ToolOutput
+                                  output={
+                                    output !== undefined ? (
+                                      <pre className="whitespace-pre-wrap break-all font-mono p-2 rounded-md bg-muted/50 max-h-48 overflow-auto">
+                                        {typeof output === 'string' ? output : JSON.stringify(output, null, 2)}
+                                      </pre>
+                                    ) : input !== undefined ? (
+                                      <pre className="whitespace-pre-wrap break-all font-mono p-2 rounded-md bg-muted/50 max-h-48 overflow-auto">
+                                        {JSON.stringify(input, null, 2)}
+                                      </pre>
+                                    ) : undefined
+                                  }
+                                />
+                              )}
+                            </ToolContent>
+                          </Tool>
                         );
                       }
                       return null;

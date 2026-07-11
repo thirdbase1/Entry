@@ -466,6 +466,19 @@ model UserModelProviderModel {
   modelId    String   @map("model_id") @db.VarChar // the provider's own model slug, e.g. "llama-3.3-70b-versatile"
   label      String?  @db.VarChar // optional friendly display name, defaults to modelId in the UI
   isEnabled  Boolean  @default(true) @map("is_enabled") // whether this model shows in the chat model selector
+  // Manual per-model override (2026-07-11) — /api/direct/chat's
+  // reasoning-capability gate (lib/direct-chat/reasoning-capability.ts)
+  // only has a naming-pattern heuristic to go on for BYOK models (no
+  // catalog to authoritatively ask, unlike Gateway models), so it has real
+  // false negatives: a genuinely reasoning-capable model with an
+  // unrecognized name silently never gets a `reasoning` value forwarded,
+  // and "thinking" never shows no matter what effort level the user picks.
+  // When true, this UNCONDITIONALLY overrides that heuristic to capable —
+  // set from the settings page's per-model "Thinking" toggle, for exactly
+  // the models where the user knows better than the naming guess.
+  // Default false: does not change behavior for any model that already
+  // works via the heuristic, purely an opt-in escape hatch.
+  reasoningEnabled Boolean @default(false) @map("reasoning_enabled")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   provider UserModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)

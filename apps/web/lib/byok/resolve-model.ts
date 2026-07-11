@@ -22,6 +22,9 @@ export interface ResolvedByokModel {
   model: LanguageModel;
   providerLabel: string;
   modelId: string;
+  /** Manual per-model override of the reasoning-capability heuristic —
+   *  see reasoning-capability.ts + the settings page's "Thinking" toggle. */
+  reasoningEnabled: boolean;
 }
 
 /** Ownership-checked: a model row id alone is never sufficient — it must belong to userId. */
@@ -51,5 +54,5 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
       break;
   }
 
-  return { model, providerLabel: provider.label, modelId: modelRow.modelId };
+  return { model, providerLabel: provider.label, modelId: modelRow.modelId, reasoningEnabled: modelRow.reasoningEnabled };
 }

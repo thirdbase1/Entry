@@ -41,9 +41,9 @@ export function AgentDelegateResult({ part }: { part: EveDynamicToolPart }) {
 
   if (part.state === 'output-error') {
     return (
-      <div className="rounded-lg border border-border bg-card w-full p-4 text-sm text-destructive">
-        {part.errorText}
-      </div>
+      <GenericToolResult icon={<GroupIcon />} title="Delegation failed" status="output-error">
+        <div className="p-3 text-sm text-destructive">{part.errorText}</div>
+      </GenericToolResult>
     );
   }
 
@@ -51,9 +51,9 @@ export function AgentDelegateResult({ part }: { part: EveDynamicToolPart }) {
 
   if (output?.error) {
     return (
-      <div className="rounded-lg border border-border bg-card w-full p-4 text-sm text-destructive">
-        {output.error}
-      </div>
+      <GenericToolResult icon={<GroupIcon />} title="Delegation failed" status="output-error">
+        <div className="p-3 text-sm text-destructive">{output.error}</div>
+      </GenericToolResult>
     );
   }
 

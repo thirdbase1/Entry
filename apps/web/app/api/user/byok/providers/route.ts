@@ -29,7 +29,7 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
       hasApiKey: !!p.encryptedApiKey,
       lastFetchedAt: p.lastFetchedAt,
       lastError: p.lastError,
-      models: p.models.map(m => ({ id: m.id, modelId: m.modelId, label: m.label, isEnabled: m.isEnabled })),
+      models: p.models.map(m => ({ id: m.id, modelId: m.modelId, label: m.label, isEnabled: m.isEnabled, reasoningEnabled: m.reasoningEnabled })),
     })),
   });
 });

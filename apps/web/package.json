@@ -27,10 +27,12 @@
     "@entry/queue": "*",
     "@lit/react": "^1.0.8",
     "@lobehub/icons": "^5.10.1",
+    "@radix-ui/react-collapsible": "^1.1.16",
     "@tailwindcss/postcss": "^4.3.2",
     "@tailwindcss/typography": "^0.5.20",
     "@toeverything/theme": "^1.1.23",
     "@vercel/blob": "^2.5.0",
+    "@vercel/sandbox": "^2.5.0",
     "babel-loader": "^10.1.1",
     "better-auth": "^1.6.23",
     "clsx": "^2.1.1",
@@ -51,8 +53,7 @@
     "unist-util-visit": "^5.1.0",
     "y-protocols": "^1.0.7",
     "yjs": "^13.6.31",
-    "zustand": "^5.0.14",
-    "@vercel/sandbox": "^2.5.0"
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@types/hast": "^3.0.4",
