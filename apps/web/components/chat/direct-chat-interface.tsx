@@ -44,7 +44,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
 import { ChatInput } from './chat-input';
-import { useModelOptions } from './chat-config';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import type { AttachedContext } from './chat-context';
 import type { ReasoningEffort } from './chat-config';
@@ -149,25 +148,10 @@ function DirectChatSession({
     [byokModelId, requestedModel, reasoningEffort]
   );
 
-  // Ground-truth "what model is actually answering" label — sourced from
-  // byokModelId/requestedModel (the values this whole session was actually
-  // created/resolved with server-side), never from the ephemeral picker
-  // `model` state alone, so this can never drift from what's truly being
-  // called. Directly addresses a real, reasonable user concern: previously
-  // there was NO visible confirmation anywhere of which model actually
-  // generated a reply (the server tagged every response with
-  // x-direct-chat-model/-provider headers, but nothing in the UI ever
-  // read or displayed them) — a user picking a model with e.g. no
-  // remaining credits had no way to visually verify their pick was even
-  // being honored versus some other fallback happening upstream.
-  const modelOptions = useModelOptions();
-  const activeModelLabel = useMemo(() => {
-    const value = byokModelId ? `byok:${byokModelId}` : requestedModel ? `gateway:${requestedModel}` : undefined;
-    const match = value ? modelOptions.find(o => o.value === value) : undefined;
-    if (match) return match.label;
-    return byokModelId ? `BYOK model (${byokModelId})` : requestedModel || 'Unknown model';
-  }, [modelOptions, byokModelId, requestedModel]);
-
+  // (2026-07-11) Removed the "Running: <model>" label per explicit user
+  // request ("remove that stuff that show what model is running, I don't
+  // like it") — was previously shown above the chat input and in the
+  // header bar, sourced from byokModelId/requestedModel via useModelOptions.
   const chat = useChat({
     id: sessionId,
     messages: initialMessages,
@@ -323,7 +307,6 @@ function DirectChatSession({
     return (
       <div className="flex flex-col justify-center h-full p-4 gap-4 max-w-[800px] mx-auto">
         <div className="text-[26px] font-medium text-center mb-9 text-foreground">{placeholderTitle}</div>
-        <div className="text-xs text-muted-foreground text-center -mt-6 mb-2">Running: {activeModelLabel}</div>
         <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} model={model} onModelChange={setModel} reasoningEffort={reasoningEffort} onReasoningEffortChange={setReasoningEffort} />
         {turnError && (
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 text-center">
@@ -337,7 +320,6 @@ function DirectChatSession({
   return (
     <div className={`flex flex-col h-full ${className}`}>
       {headerContent}
-      <div className="text-xs text-muted-foreground text-center py-1 border-b border-border/50">Running: {activeModelLabel}</div>
       <div className="flex-1 h-0 flex flex-col relative">
         <div ref={scrollRef} className="flex-1 overflow-y-auto py-4">
           <div className="max-w-[832px] mx-auto px-4 w-full flex flex-col [&>*:not(:first-child)]:mt-4">
