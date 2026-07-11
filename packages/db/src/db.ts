@@ -78,5 +78,3 @@ export * from './generated/client';
 export * from './generated/enums';
 
 export { encryptApiKey, decryptApiKey, maskApiKey } from './crypto/byok.js';
-export { logError } from './error-log.js';
-export type { LogErrorInput } from './error-log.js';

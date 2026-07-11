@@ -23,6 +23,9 @@
       "@entry/db": [
         "../../packages/db/src/db.ts"
       ],
+      "@entry/db/error-log": [
+        "../../packages/db/src/error-log.ts"
+      ],
       "@entry/auth": [
         "../../packages/auth/src/index.ts"
       ],

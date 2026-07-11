@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { logError } from '@entry/db';
+import { logError } from '@entry/db/error-log';
 
 /**
  * Wraps a route handler so any thrown error (config errors like a missing
