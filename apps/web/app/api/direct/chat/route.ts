@@ -69,7 +69,7 @@ import { NextRequest, after } from 'next/server';
 export const maxDuration = 1800;
 import { streamText, tool, stepCountIs, convertToModelMessages, type UIMessage } from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
-import { prisma } from '@entry/db';
+import { prisma, logError } from '@entry/db';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
@@ -194,7 +194,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     } else {
       await prisma.eveChatSession.update({ where: { id: chatId, userId }, data: { events: uiMessages as any } });
     }
-  })().catch(err => console.error('[direct chat] pre-stream save failed', chatId, err));
+  })().catch(err => {
+    console.error('[direct chat] pre-stream save failed', chatId, err);
+    logError({ source: 'direct-chat-presave', error: err, userId, chatId });
+  });
 
   // Minimal structural ctx — enough for the 10 reused tool-impls. See
   // ToolExecCtx: only `session.id` / `session.auth.current.principalId`
@@ -303,6 +306,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     })()) ? resolvedReasoningEffort : 'provider-default',
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
+      logError({ source: 'direct-chat-streamtext', error, userId, chatId, context: { providerLabel, modelId } });
     },
     tools: activeTools,
   });
@@ -330,7 +334,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // onFinish, and a client that reconnects (see direct-chat-interface.tsx's
   // online/visibilitychange recovery fetch) picks up the completed
   // result instead of a stalled/lost one.
-  after(() => Promise.resolve(result.consumeStream()).catch((err: unknown) => console.error('[direct chat] background consumeStream failed', chatId, err)));
+  after(() =>
+    Promise.resolve(result.consumeStream()).catch((err: unknown) => {
+      console.error('[direct chat] background consumeStream failed', chatId, err);
+      logError({ source: 'direct-chat-consumestream', error: err, userId, chatId, context: { providerLabel, modelId } });
+    })
+  );
 
   return result.toUIMessageStreamResponse({
     originalMessages: uiMessages,
@@ -340,9 +349,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // Default behavior swallows the real error into a generic "An error
       // occurred." with nothing else — confirmed cause of "tool calls fail
       // and the AI doesn't respond, no error even shown". Log the full
-      // error server-side and surface a real, readable message to the
-      // client instead.
+      // error server-side (console for a live tail + a durable DB row so
+      // it's still findable after the fact, see logError's file comment)
+      // and surface a real, readable message to the client instead.
       console.error('[direct chat] turn error', chatId, providerLabel, modelId, error);
+      logError({ source: 'direct-chat-turn', error, userId, chatId, context: { providerLabel, modelId } });
       if (error instanceof Error) return error.message;
       if (typeof error === 'string') return error;
       return 'Something went wrong generating a response. Please try again.';
@@ -350,7 +361,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     async onFinish({ messages: finalMessages }) {
       await prisma.eveChatSession
         .update({ where: { id: chatId, userId }, data: { events: finalMessages as any } })
-        .catch(err => console.error('[direct chat] final save failed', chatId, err));
+        .catch(err => {
+          console.error('[direct chat] final save failed', chatId, err);
+          logError({ source: 'direct-chat-final-save', error: err, userId, chatId });
+        });
     },
     headers: {
       'x-direct-chat-session-id': chatId,

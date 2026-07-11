@@ -47,6 +47,7 @@ import { ChatInput } from './chat-input';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import type { AttachedContext } from './chat-context';
 import type { ReasoningEffort } from './chat-config';
+import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 
 interface DirectChatInterfaceProps {
   sessionId?: string;
@@ -158,7 +159,7 @@ function DirectChatSession({
     transport,
     onError(error) {
       console.error('[direct chat turn error]', error);
-      setTurnError(error.message || 'Something went wrong generating a response. Please try again.');
+      setTurnError(readableChatErrorMessage(error));
     },
     async onFinish() {
       setTurnError(null);
@@ -202,7 +203,22 @@ function DirectChatSession({
         // persisted under.
         const activeId = sessionId ?? chat.id;
         if (!activeId) return;
-        if (chat.status !== 'streaming' && chat.status !== 'submitted' && chat.status !== 'error') return;
+        // Confirmed real gap (2026-07-11): this used to bail out unless
+        // `chat.status` was already 'streaming'/'submitted'/'error' -- but
+        // status is a property of THIS component instance, reset to
+        // 'ready' on every fresh mount (including a plain page reload).
+        // A reload that happens WHILE a turn is still generating server-
+        // side (kept alive by route.ts's after()+consumeStream() durability
+        // fix) landed on a brand-new mount with status 'ready', so this
+        // guard silently skipped recovery forever -- the one case it most
+        // needed to run. Falling back to inspecting the actual message
+        // shape catches that: the last message being from 'user' with no
+        // assistant reply yet is exactly what an interrupted-mid-turn
+        // reload looks like from a fresh mount, regardless of what
+        // `chat.status` (re-)initialized to.
+        const lastMsg = chat.messages[chat.messages.length - 1];
+        const looksIncomplete = !lastMsg || lastMsg.role === 'user';
+        if (chat.status !== 'streaming' && chat.status !== 'submitted' && chat.status !== 'error' && !looksIncomplete) return;
         try {
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) return;
@@ -239,11 +255,16 @@ function DirectChatSession({
     // drop/restore Wi-Fi or cellular without ever firing a real 'offline'
     // -> 'online' transition (silent DNS/route flap), and a laptop
     // sleep/wake cycle can resume with the tab still reporting 'visible'
-    // the whole time. Poll every 5s while a turn looks active so a dead
-    // connection still self-heals even when neither event ever fires --
-    // cheap (one lightweight GET), and tryRecover() itself is a no-op
-    // once nothing new is available.
-    const pollId = window.setInterval(tryRecover, 5000);
+    // the whole time. Poll every 3s while a turn looks active (or looks
+    // interrupted-mid-turn on a fresh mount, see looksIncomplete above) so
+    // a dead connection still self-heals even when neither event ever
+    // fires -- cheap (one lightweight GET), and tryRecover() itself is a
+    // no-op once nothing new is available. Also fire once immediately
+    // (not just after the first interval tick) so a reload lands on an
+    // up-to-date answer as fast as possible instead of waiting up to 3s
+    // doing nothing first.
+    tryRecover();
+    const pollId = window.setInterval(tryRecover, 3000);
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
@@ -255,6 +276,14 @@ function DirectChatSession({
   const isBusy = chat.status === 'submitted' || chat.status === 'streaming';
   const messages = chat.messages;
   const lastMessage = messages[messages.length - 1];
+  // True right after a fresh mount (e.g. a reload) that landed mid-turn --
+  // the last thing in history is the user's own message with no assistant
+  // reply after it yet, and this component instance's own `isBusy` says
+  // nothing is happening (status resets to 'ready' on every fresh mount,
+  // see the recovery effect's `looksIncomplete` comment above for why that
+  // alone can't be trusted). Distinct from `showThinkingIndicator` below,
+  // which only ever covers a turn that started IN this same instance.
+  const pendingTurn = !isBusy && messages.length > 0 && lastMessage?.role === 'user';
   // "Thinking…" indicator: visible from the moment a message is sent until
   // the assistant's reply actually has SOMETHING to show (text, a tool
   // call, or reasoning) — covers response latency, then gets out of the
@@ -308,9 +337,21 @@ function DirectChatSession({
     // off in the UI. `sendMessage`'s second-arg `body` gets shallow-merged
     // on top of the transport's static body (byokModelId/requestedModel/
     // reasoningEffort), so this is additive, not a replacement.
-    void chat.sendMessage({ text: input }, { body: { disabledTools: opts?.disabledTools ?? [] } }).catch(err => {
+    //
+    // Retries the SEND itself (not the model's answer) up to twice with
+    // backoff on a genuine network-level failure -- a `sendMessage` promise
+    // only ever rejects when the request never made it to/from the server
+    // at all (DNS hiccup, dropped Wi-Fi, a proxy timeout mid-handshake);
+    // once the server actually receives it, failures come back as a
+    // resolved stream with an error part instead, which `onError` above
+    // already handles and this deliberately does NOT retry (retrying an
+    // already-processed request risks the model seeing a duplicate turn).
+    // "Every request should go through" (real ask, 2026-07-11) means this
+    // one narrow, safe class of failure shouldn't just give up after one
+    // flaky attempt.
+    void sendWithRetry(() => chat.sendMessage({ text: input }, { body: { disabledTools: opts?.disabledTools ?? [] } })).catch(err => {
       console.error('[direct chat send failed]', err);
-      setTurnError(err instanceof Error ? err.message : 'Failed to send message. Please try again.');
+      setTurnError(readableChatErrorMessage(err));
     });
   };
 
@@ -386,6 +427,14 @@ function DirectChatSession({
           </div>
         </div>
       </div>
+      {pendingTurn && !turnError && (
+        <div className="max-w-[832px] mx-auto w-full px-4">
+          <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-pulse shrink-0" />
+            Still working on this — it kept generating in the background while you were away. Catching up now…
+          </div>
+        </div>
+      )}
       {turnError && (
         <div className="max-w-[832px] mx-auto w-full px-4">
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">

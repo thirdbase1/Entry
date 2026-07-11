@@ -536,3 +536,31 @@ model EveChatSession {
   @@index([userId])
   @@map("eve_chat_sessions")
 }
+
+// Persistent, queryable error log — added 2026-07-11 per explicit request
+// ("log everything so we can spot error once"). Confirmed real gap:
+// server-side failures were only ever `console.error`'d, and Vercel's
+// `vercel logs` CLI only tails a very short live window (confirmed
+// directly — a test message's log was already gone within a couple
+// minutes of checking), so almost every real production error was
+// effectively unrecoverable after the fact. This table is the durable
+// side-channel: every catch/onError block that already logs to console
+// ALSO writes one row here, fire-and-forget (a logging failure must never
+// break the actual request), so any error can be queried later by userId,
+// chatId, source, or time range instead of needing to catch it live.
+model ErrorLog {
+  id        String   @id @default(cuid())
+  source    String   @db.VarChar // e.g. "direct-chat", "eve-chat", "byok-fetch-models"
+  message   String   @db.Text
+  stack     String?  @db.Text
+  userId    String?  @map("user_id") @db.VarChar
+  chatId    String?  @map("chat_id") @db.VarChar
+  context   Json?    @db.JsonB // free-form extra detail (modelId, providerLabel, status code, etc.)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([source])
+  @@index([userId])
+  @@index([chatId])
+  @@index([createdAt])
+  @@map("error_logs")
+}

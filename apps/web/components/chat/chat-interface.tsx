@@ -11,6 +11,7 @@ import { buildConfigContext, DEFAULT_MODEL_ID, useReasoningEffort } from './chat
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
+import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -178,8 +179,13 @@ export function ChatInterface({
     // Belt-and-suspenders third trigger, independent of the browser
     // actually firing 'online'/'visibilitychange' at all -- see the same
     // comment in direct-chat-interface.tsx's identical recovery effect
-    // for why relying solely on those two DOM events isn't enough.
-    const pollId = window.setInterval(tryRecover, 5000);
+    // for why relying solely on those two DOM events isn't enough. Also
+    // fire once immediately on mount (not just after the first interval
+    // tick) -- this is what makes a plain page reload land on an
+    // up-to-date answer fast instead of sitting on stale/incomplete
+    // events for up to 3s first every single time.
+    tryRecover();
+    const pollId = window.setInterval(tryRecover, 3000);
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
@@ -317,7 +323,7 @@ function ChatInterfaceInner({
     maxReconnectAttempts: 20,
     onError(error) {
       console.error('[eve turn error]', error);
-      setTurnError(error.message || 'Something went wrong generating a response. Please try again.');
+      setTurnError(readableChatErrorMessage(error));
     },
     // onError above wraps eve's own `Error(event.data.message)` — but for
     // some failure shapes (e.g. Gateway errors) the actually-useful text
@@ -368,6 +374,16 @@ function ChatInterfaceInner({
 
   const isBusy = agent.status === 'submitted' || agent.status === 'streaming';
   const messages = agent.data.messages;
+  // Same reasoning as direct-chat-interface.tsx's `pendingTurn`: a fresh
+  // mount (e.g. a reload while eve's session was still generating
+  // server-side) always starts `agent.status` at 'ready' regardless of
+  // whether a turn is actually still in flight -- the store's constructor
+  // hardcodes this (confirmed directly in eve-agent-store.js), it never
+  // auto-reconnects to a live stream just from being handed a resumable
+  // `initialSession` cursor. The last event being the user's own message
+  // with no assistant reply after it is what that situation looks like
+  // from a fresh mount, independent of `agent.status`.
+  const pendingTurn = !isBusy && messages.length > 0 && messages[messages.length - 1]?.role === 'user';
   const downArrowRef = useRef<DownArrowRef>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -421,12 +437,16 @@ function ChatInterfaceInner({
           Promise.resolve(buildConfigContext(opts?.model ?? '', opts?.disabledTools ?? [])),
         ]);
         const clientContext = [attachedContext, configHint].filter(Boolean).join('\n\n') || undefined;
-        await agent.send({ message: input, clientContext }).catch(err => {
-          // agent.send rejects when a turn is already in flight, or on a
-          // pre-flight failure before any stream event arrives — onError
-          // above covers mid-stream failures, this covers that gap too.
+        // Retries a genuine network-level send failure up to twice with
+        // backoff -- see send-with-retry.ts's file comment for exactly
+        // which failures qualify and why only those. agent.send rejecting
+        // for any OTHER reason (a turn already in flight, or a real
+        // pre-flight API failure) is left alone: onError above already
+        // covers mid-stream failures, this only closes the "message never
+        // even reached the server" gap.
+        await sendWithRetry(() => agent.send({ message: input, clientContext })).catch(err => {
           console.error('[send failed]', err);
-          setTurnError(err instanceof Error ? err.message : 'Failed to send message. Please try again.');
+          setTurnError(readableChatErrorMessage(err));
         });
       })();
     },
@@ -471,6 +491,14 @@ function ChatInterfaceInner({
         />
       </div>
       <AggregatedTodoList messages={messages} />
+      {pendingTurn && !turnError && (
+        <div className="max-w-[832px] mx-auto w-full px-4">
+          <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
+            <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-pulse shrink-0" />
+            Still working on this — it kept generating in the background while you were away. Catching up now…
+          </div>
+        </div>
+      )}
       {turnError && (
         <div className="max-w-[832px] mx-auto w-full px-4">
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
