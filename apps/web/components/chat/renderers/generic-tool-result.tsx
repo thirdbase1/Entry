@@ -1,16 +1,20 @@
 'use client';
 
 /**
- * Ported 1:1 from pages/chats/renderers/generic-tool-result.tsx +
- * generic-tool-result.css.ts + tool.css.ts. This is the shared collapsible
- * card shell used by web-search, web-crawl, and any other list-style tool
- * result. Previously each renderer hand-rolled its own simplified card
- * (rounded-lg, no shadow, no expand icon, no height animation) — this
- * restores the real shell: rounded-2xl, h-14 header, subtle box-shadow,
- * ExpandFullIcon/ExpandCloseIcon toggle, AnimatePresence height animation,
- * count shown as a plain number next to the title (not a badge), and
- * marginBottom 16px (tool.css.ts's `toolResult`) so cards stack like the
- * original.
+ * Shared shell for a completed tool call's result — used by web-search,
+ * web-crawl, code-artifact, doc-compose, make-it-real, python-code,
+ * task-analysis, browser-use, and the generic/default fallback (see
+ * message-renderer.tsx's ToolPart dispatch).
+ *
+ * Rewritten (2026-07-11) per explicit, repeated user feedback ("I don't
+ * like any of the tool card") — previously this rendered a bordered,
+ * box-shadowed, rounded-2xl, 56px-tall header on every single tool call,
+ * so a multi-tool turn produced a stack of heavy cards before any real
+ * answer text appeared. Now a single plain text line (icon + title +
+ * count), no box/border/shadow/fixed height. The expand/collapse toggle
+ * is kept — detail (search results, code, etc.) is still one click away,
+ * just not shoved in your face by default and not wrapped in a "card"
+ * anymore when it is expanded either (plain indented block, no bg/border).
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -36,16 +40,10 @@ export function GenericToolResult({
   children?: ReactNode;
   className?: string;
   onClick?: () => void;
-  /** When set (e.g. AIReasoningCard passing `loading`), the card auto-opens
-   *  the moment this flips true and auto-collapses back the moment it
-   *  flips false — so a "Thinking…" card is visible live while it's
-   *  actually happening instead of sitting collapsed the whole time, then
-   *  tidies itself back into a one-line "Thought for Ns" once done. A
-   *  manual expand/collapse click at any point opts the card out of this
-   *  auto-behavior for the rest of its life — the user's explicit choice
-   *  always wins over the auto behavior afterward. Omit entirely for
-   *  every other (non-reasoning) use of this shared shell — unaffected,
-   *  same manual-only collapsed-by-default behavior as before. */
+  /** When set (e.g. AIReasoningCard passing `loading`), auto-opens the
+   *  moment this flips true and auto-collapses back the moment it flips
+   *  false. A manual expand/collapse click opts out of this for the rest
+   *  of this instance's life — the user's explicit choice always wins. */
   autoExpand?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(autoExpand === undefined ? true : !autoExpand);
@@ -56,7 +54,7 @@ export function GenericToolResult({
     if (autoExpand === undefined) return;
     if (prevAutoExpandRef.current === autoExpand) return;
     prevAutoExpandRef.current = autoExpand;
-    if (userToggledRef.current) return; // user's manual choice always wins
+    if (userToggledRef.current) return;
     setCollapsed(!autoExpand);
   }, [autoExpand]);
 
@@ -67,32 +65,14 @@ export function GenericToolResult({
   };
 
   return (
-    <div
-      className={cn(
-        'mb-4 border rounded-2xl overflow-hidden bg-card',
-        className,
-        onClick ? 'hover:bg-accent cursor-pointer' : ''
-      )}
-      style={{ boxShadow: '0px 1px 5px 0px rgba(0, 0, 0, 0.05)' }}
-      data-collapsed={collapsed}
-      onClick={onClick}
-    >
-      <header
-        className={cn(
-          'flex items-center gap-2 h-14 px-4 border-b transition-colors duration-400',
-          collapsed && 'border-transparent'
-        )}
-      >
-        {icon ? (
-          <div className="size-5 shrink-0 text-xl flex items-center justify-center text-icon-primary">
-            {icon}
-          </div>
-        ) : null}
-        <div className="w-0 flex-1 text-sm font-medium text-foreground truncate">
+    <div className={cn('mb-1.5', className, onClick ? 'cursor-pointer' : '')} onClick={onClick} data-collapsed={collapsed}>
+      <div className="flex items-center gap-1.5 py-0.5 text-xs text-muted-foreground">
+        {icon ? <div className="size-3.5 shrink-0 flex items-center justify-center">{icon}</div> : null}
+        <div className="min-w-0 truncate">
           {title}
-          {count ? <span className="ml-1 font-normal text-muted-foreground">{count}</span> : null}
+          {count ? <span className="ml-1 opacity-70">{count}</span> : null}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           {actions}
           {children ? (
             <button
@@ -100,13 +80,13 @@ export function GenericToolResult({
                 e.stopPropagation();
                 toggleCollapsed();
               }}
-              className="size-6 shrink-0 flex items-center justify-center rounded hover:bg-accent transition-colors text-muted-foreground"
+              className="size-4 shrink-0 flex items-center justify-center rounded hover:bg-accent transition-colors text-muted-foreground/70"
             >
-              {collapsed ? <ExpandFullIcon /> : <ExpandCloseIcon />}
+              {collapsed ? <ExpandFullIcon className="size-3" /> : <ExpandCloseIcon className="size-3" />}
             </button>
           ) : null}
         </div>
-      </header>
+      </div>
       {children ? (
         <AnimatePresence>
           {collapsed ? null : (
@@ -115,6 +95,7 @@ export function GenericToolResult({
               animate={{ opacity: 1, height: 'auto' }}
               exit={{ opacity: 0, height: 0 }}
               transition={{ damping: 10, stiffness: 100, mass: 0.5 }}
+              className="pl-5"
             >
               {children}
             </motion.div>

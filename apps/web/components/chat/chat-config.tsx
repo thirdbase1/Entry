@@ -45,7 +45,23 @@ export interface ModelOption {
 // by omission.
 export const REASONING_EFFORT_LEVELS = ['provider-default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORT_LEVELS)[number];
-export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'medium';
+// Confirmed real latency cause (2026-07-11, user-reported "slow after tool
+// calling"): the chosen `reasoning` level applies to the WHOLE agentic
+// loop (stepCountIs(120) in route.ts), not just the final user-facing
+// reply -- every single intermediate step (deciding to call a tool,
+// then again after each tool result) pays the full reasoning-token tax
+// for a model that supports it. AI SDK's streamText has no portable
+// per-step reasoning override (checked PrepareStepResult's real type in
+// node_modules/ai/dist/index.d.ts -- only providerOptions, which would
+// mean reintroducing the exact non-portable per-provider special-casing
+// `reasoning` was added specifically to replace). 'medium' by default
+// compounded across a typical multi-tool-call turn was the single
+// biggest, most direct lever available without a much bigger redesign.
+// 'low' is still meaningfully better than 'none' for tricky requests,
+// while nowhere near as expensive per step -- a user who wants deep
+// thinking for one specific hard question can still pick 'high' from
+// the picker.
+export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'low';
 export const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = {
   'provider-default': 'Auto',
   none: 'None',

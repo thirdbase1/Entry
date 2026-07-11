@@ -67,6 +67,20 @@ export function ChatInterface({
   );
   const createdRef = useRef(false);
   const [recoveryKey, setRecoveryKey] = useState(0);
+  // Live eve session id, lifted up from ChatInterfaceInner's `agent.session`
+  // as soon as eve itself confirms it -- populated well before the route's
+  // own `sessionId` prop (which only exists after the FIRST turn's onFinish
+  // already ran + router.replace() landed). Without this, the two recovery
+  // effects below were gated on `sessionId` alone, so a dropped connection
+  // during a brand-new chat's very first turn -- arguably the single most
+  // exposed moment, since the user just fired a message and may switch
+  // away or lose signal immediately after -- silently recovered nothing at
+  // all. Confirmed real (not hypothetical): direct-chat-interface.tsx had
+  // the identical class of bug already found and fixed for the BYOK/direct
+  // path (see its own comment); this is the same gap in the eve/default
+  // path, closed the same way -- key off whichever id is known, not just
+  // the one the URL happens to reflect yet.
+  const [liveSessionId, setLiveSessionId] = useState<string | undefined>(undefined);
 
   // Model selection lives here (not in ChatInput) so we can decide, before
   // ever mounting an eve session or a direct-model chat, which of the two
@@ -132,16 +146,26 @@ export function ChatInterface({
   // are only ever read once at construction -- there's no public API to
   // hot-patch an existing instance's projected state).
   useEffect(() => {
-    if (!sessionId) return;
+    const activeId = sessionId ?? liveSessionId;
+    if (!activeId) return;
     const tryRecover = () => {
       void (async () => {
-        const snap = await fetchSnapshot(sessionId);
+        const snap = await fetchSnapshot(activeId);
         const persistedEvents = Array.isArray(snap?.events) ? (snap!.events as unknown[]) : null;
         const currentEvents = Array.isArray(initial?.events) ? (initial!.events as unknown[]) : [];
         if (!persistedEvents) return;
         if (persistedEvents.length > currentEvents.length) {
           setInitial(snap ?? {});
           setRecoveryKey(k => k + 1);
+          // Mirror onFinish's own first-turn navigation: if the client's
+          // onFinish never got to run (the stream broke before it could
+          // fire), the URL would otherwise be stuck on the "new chat"
+          // route forever despite the chat now genuinely being persisted
+          // under `activeId`.
+          if (!createdRef.current) {
+            createdRef.current = true;
+            if (!sessionId) router.replace(`/chats/${activeId}`);
+          }
         }
       })();
     };
@@ -155,7 +179,7 @@ export function ChatInterface({
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [sessionId, initial]);
+  }, [sessionId, liveSessionId, initial, router, createdRef]);
 
   useEffect(() => {
     if (modelInitializedRef.current) return;
@@ -232,6 +256,7 @@ export function ChatInterface({
       router={router}
       model={model}
       setModel={setModel}
+      onSessionIdKnown={setLiveSessionId}
     />
   );
 }
@@ -251,6 +276,7 @@ function ChatInterfaceInner({
   router,
   model,
   setModel,
+  onSessionIdKnown,
 }: ChatInterfaceProps & {
   initialEvents?: any;
   initialSession?: any;
@@ -259,6 +285,11 @@ function ChatInterfaceInner({
   router: ReturnType<typeof useRouter>;
   model: string;
   setModel: (model: string) => void;
+  /** Reports eve's live session id up to the parent as soon as it's known
+   *  (well before the route `sessionId` prop reflects it) so the parent's
+   *  recovery effect can key off it too — see the `liveSessionId` comment
+   *  above. */
+  onSessionIdKnown: (sessionId: string | undefined) => void;
 }) {
   // Turn-level failure banner. Without this, a turn that ends in
   // status "error" (e.g. run_model throwing because a BYOK provider
@@ -316,6 +347,18 @@ function ChatInterfaceInner({
       await persistSnapshot(sid, snapshot, title).catch(() => {});
     },
   });
+
+  // Report eve's live session id up to the parent AS SOON as eve confirms
+  // it (agent.session is eve's own "resumable cursor", populated once the
+  // stream confirms the session -- well before this turn's onFinish, and
+  // well before the route ever reflects it via router.replace). This is
+  // what lets the parent's recovery effect key off a real id during a
+  // brand-new chat's very first turn instead of sitting dark until that
+  // turn already fully finished client-side.
+  useEffect(() => {
+    onSessionIdKnown(agent.session?.sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent.session?.sessionId]);
 
   const isBusy = agent.status === 'submitted' || agent.status === 'streaming';
   const messages = agent.data.messages;
