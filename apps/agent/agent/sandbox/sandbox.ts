@@ -51,11 +51,56 @@ export default defineSandbox({
 
     // agent-browser (github.com/vercel-labs/agent-browser) + Chrome for
     // Testing, used by tools/browser_use.ts.
+    //
+    // FIXED (2026-07-11): confirmed the real cause of "browser use always
+    // fails" — Vercel Sandbox's base image is a minimal Debian image with
+    // NONE of headless Chrome's required shared libraries (libnss3,
+    // libatk-bridge2.0-0, libgbm1, libasound2, etc. — this is the exact
+    // same well-documented "Chrome in a bare Docker/Debian container"
+    // problem every headless-Chrome-in-CI setup hits: see Puppeteer's own
+    // troubleshooting docs). Without these, `agent-browser install`
+    // downloads the Chrome-for-Testing binary just fine, but launching it
+    // fails immediately on every single run (missing .so errors) — which
+    // is indistinguishable from "the tool doesn't work" from the outside,
+    // every single call. `apt-get install` these BEFORE `agent-browser
+    // install` so the browser can actually launch once installed.
+    await sandbox.run({
+      command:
+        'apt-get update -qq && apt-get install -y -qq --no-install-recommends ' +
+        'libnss3 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 libxkbcommon0 ' +
+        'libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 ' +
+        'libpango-1.0-0 libcairo2 fonts-liberation libappindicator3-1 xdg-utils ' +
+        'libgtk-3-0 ca-certificates',
+    });
     await sandbox.run({ command: 'npm install -g agent-browser' });
-    await sandbox.run({ command: 'agent-browser install' });
+    const browserInstall = await sandbox.run({ command: 'agent-browser install' });
+    if (browserInstall.exitCode !== 0) {
+      // Don't let a flaky download silently poison the whole cached
+      // template — surface it loudly in bootstrap logs (previously this
+      // was never checked at all, so a failed install just meant every
+      // browser_use call quietly failed forever with no diagnostic trail).
+      console.error('[bootstrap] agent-browser install failed:', browserInstall.stderr);
+      throw new Error(`agent-browser install failed (exit ${browserInstall.exitCode}): ${browserInstall.stderr.slice(0, 2000)}`);
+    }
 
-    // Preview-panel support (2026-07-11, see get_preview_url.ts) — pre-installed
-    // so the first preview check doesn't pay npx's cold-download cost.
+    // Preview-panel support (2026-07-11, see get_preview_url.ts).
+    //
+    // FIXED (2026-07-11): localtunnel's public relay (loca.lt) is a small,
+    // community-run free service with no uptime guarantee — confirmed the
+    // real cause of "preview tool always failed" is that loca.lt itself
+    // routinely refuses connections / never assigns a subdomain in time,
+    // independent of anything in our own code. Cloudflare's "quick tunnel"
+    // (cloudflared, trycloudflare.com) is the actively-maintained,
+    // production-grade equivalent — no signup/account/token needed, same
+    // one-shot ease of use, materially more reliable uptime. Installed as
+    // the primary path; get_preview_url.ts falls back to localtunnel only
+    // if the cloudflared binary itself can't be fetched.
+    await sandbox.run({
+      command:
+        'curl -fsSL -o /usr/local/bin/cloudflared ' +
+        'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 ' +
+        '&& chmod +x /usr/local/bin/cloudflared',
+    });
     await sandbox.run({ command: 'npm install -g localtunnel' });
   },
 });

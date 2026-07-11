@@ -67,7 +67,7 @@ import { NextRequest, after } from 'next/server';
 // model instead of a plain function, which is a real architecture change,
 // not a config tweak (see chat about this if/when needed).
 export const maxDuration = 1800;
-import { streamText, tool, stepCountIs, convertToModelMessages, type UIMessage } from 'ai';
+import { streamText, tool, stepCountIs, convertToModelMessages, smoothStream, type UIMessage } from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
@@ -381,6 +381,22 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       logError({ source: 'direct-chat-streamtext', error, userId, chatId, context: { providerLabel, modelId } });
     },
     tools: activeTools,
+    // Fixed (2026-07-11, explicit user report: "streaming is not smooth at
+    // all, looks like it's not streaming"): streamText had zero output
+    // transform, so the UI's update cadence was entirely at the mercy of
+    // however the upstream provider happened to chunk its own SSE bytes --
+    // some OpenAI-compatible endpoints/proxies buffer several sentences (or
+    // even the whole response) into one chunk, which renders as a single
+    // big jump instead of a visible stream regardless of how correct the
+    // client-side rendering is. `smoothStream` re-buffers the real
+    // provider stream and re-emits it word-by-word on a fixed small delay
+    // (AI SDK's own documented fix for exactly this complaint, see
+    // ai-sdk.dev/docs/ai-sdk-core/streaming-text-generation#smoothing-the-stream)
+    // -- decouples the visual cadence from the provider's actual chunk
+    // boundaries so it always looks like a real, even stream no matter how
+    // the upstream API batches it. Defaults (10ms/word) are the same ones
+    // the AI SDK docs recommend for chat UIs.
+    experimental_transform: smoothStream({ chunking: 'word' }),
   });
 
   // Make sure the durability write has actually landed before the

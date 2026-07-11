@@ -1,36 +1,26 @@
 'use client';
 
 /**
- * Ported 1:1 from pages/chats/renderers/ai-reasoning-card.tsx. Uses the
- * real shared GenericToolResult shell (rounded-2xl, h-14 header, expand
- * icon toggle, box-shadow, AnimatePresence height animation) instead of a
- * hand-rolled simplified collapsible. Passes `autoExpand={loading}` so the
- * card auto-opens live the moment reasoning starts streaming and
- * auto-collapses back down to a one-line "Thought for Ns" the moment it
- * finishes — a manual click at any point opts it out of that auto
- * behavior in favor of whatever the user chose. Icon is a spinner only while
- * `loading`, none once finished (matches original: `icon={loading ?
- * <Loading /> : null}`). Title is "Thinking… Ns" while loading, "Thought
- * for Ns" once done, "Thoughts" if there was never a duration — exact
- * original copy/format.
- *
- * Simplified from the original in one intentional way: no fake
- * progressive-typing simulation over the full text (that existed because
- * the original's GraphQL layer delivered full reasoning text in one shot;
- * eve streams real reasoning deltas token by token already, so the real
- * streaming IS the progressive effect — faking a second one on top would
- * double up).
+ * Rebuilt 2026-07-11 per explicit user request ("I don't like the way it
+ * uses card... just show brain 🧠, I can click it to expand"): dropped the
+ * shared `GenericToolResult` card shell entirely (rounded-2xl box,
+ * box-shadow, h-14 header bar) in favor of one plain inline row -- a brain
+ * emoji + a one-line status ("Thinking… Ns" / "Thought for Ns" / "Thoughts")
+ * that's just a bare `<button>`, no border/background/shadow at all. Click
+ * toggles a plain expanded text block underneath (left border rule instead
+ * of a boxed card, same as how the rest of this app already treats
+ * secondary/quiet content). Auto-expands live while streaming (`loading`)
+ * exactly like the old card did, and a manual click at any point still
+ * opts the user out of that auto-behavior for the rest of this turn --
+ * same auto-expand contract as before, just a different shell.
  */
 import { useEffect, useRef, useState } from 'react';
 import { MarkdownText } from '@/components/ui/markdown';
-import { GenericToolResult } from './generic-tool-result';
-
-function Spinner() {
-  return <span className="inline-block w-4 h-4 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin" />;
-}
+import { cn } from '@/lib/utils';
 
 export function AIReasoningCard({ text, loading = false }: { text: string; loading?: boolean }) {
   const [elapsed, setElapsed] = useState(0);
+  const [manuallyToggled, setManuallyToggled] = useState<boolean | null>(null);
   const startRef = useRef(Date.now());
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -48,29 +38,31 @@ export function AIReasoningCard({ text, loading = false }: { text: string; loadi
 
   if (!text) return null;
 
-  const statusText = loading ? (
-    <div className="flex items-center gap-1">
-      <span className="text-sm font-medium">Thinking...</span>
-      <span className="text-sm font-normal">{elapsed}s</span>
-    </div>
-  ) : elapsed > 0 ? (
-    <div className="flex items-center gap-1">
-      <span className="text-sm font-medium">Thought for</span>
-      <span className="text-sm font-normal">{elapsed}s</span>
-    </div>
-  ) : (
-    <div className="flex items-center gap-1">
-      <span className="text-sm font-medium">Thoughts</span>
-    </div>
-  );
+  // Auto-open while streaming (unless the user already manually chose a
+  // state this turn), same as the old card's `autoExpand={loading}`.
+  const expanded = manuallyToggled ?? loading;
+
+  const label = loading ? `Thinking… ${elapsed}s` : elapsed > 0 ? `Thought for ${elapsed}s` : 'Thoughts';
 
   return (
-    <GenericToolResult icon={loading ? <Spinner /> : null} title={statusText} autoExpand={loading}>
-      <div className="px-4 max-h-150 overflow-y-auto">
-        <div ref={contentRef} className="max-w-none my-2">
+    <div className="flex flex-col gap-1 w-full">
+      <button
+        type="button"
+        onClick={() => setManuallyToggled(!expanded)}
+        aria-expanded={expanded}
+        className="flex items-center gap-1.5 self-start text-sm text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <span className={cn('text-base leading-none', loading && 'animate-pulse')} aria-hidden="true">
+          🧠
+        </span>
+        <span className="font-medium">{label}</span>
+      </button>
+
+      {expanded && (
+        <div ref={contentRef} className="pl-5 border-l-2 border-muted ml-1.5 max-h-150 overflow-y-auto">
           <MarkdownText text={text} loading={loading} className="prose prose-sm text-[13px] text-muted-foreground" />
         </div>
-      </div>
-    </GenericToolResult>
+      )}
+    </div>
   );
 }

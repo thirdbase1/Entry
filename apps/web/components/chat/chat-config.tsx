@@ -571,7 +571,30 @@ export function ChatConfigMenu({
  * Builds the structured routing signal for eve's `clientContext`, matching
  * apps/agent/agent/instructions.ts's <model_routing> hard rule.
  */
-export function buildConfigContext(model: string, disabledTools: string[]): string | undefined {
+// Reasoning-effort hint for the "Default" (eve root) chat path (2026-07-11,
+// follow-up to the reasoning-effort selector fix -- that selector only
+// ever rendered for an explicit Gateway/BYOK model pick, where
+// `reasoningEffort` is a real structured request-body param the direct
+// chat route applies via the AI SDK's `reasoning` option. Default/eve
+// chats have no equivalent structured passthrough (eve's own
+// `SendTurnPayload` has no `reasoning` field, and root's fixed model
+// isn't swapped per-turn -- see instructions.ts's file comment for why
+// that indirection was deliberately removed). Same best-effort pattern
+// already used for `disabledTools` just below (a plain-English
+// instruction folded into `clientContext`, not a hard API guarantee) --
+// weaker than the direct path's real enforcement, but still real
+// signal the model sees and generally follows, instead of the control
+// silently doing nothing at all for Default chats.
+const REASONING_EFFORT_HINTS: Partial<Record<ReasoningEffort, string>> = {
+  none: 'Answer this turn with no extended reasoning/thinking -- respond directly and quickly.',
+  minimal: 'Use minimal extended reasoning for this turn -- keep any thinking very brief.',
+  low: 'Use low extended reasoning effort for this turn.',
+  medium: 'Use medium extended reasoning effort for this turn -- think it through properly.',
+  high: 'Use high extended reasoning effort for this turn -- think carefully and thoroughly before answering.',
+  xhigh: 'Use maximum extended reasoning effort for this turn -- think as deeply and thoroughly as possible before answering.',
+};
+
+export function buildConfigContext(model: string, disabledTools: string[], reasoningEffort?: ReasoningEffort): string | undefined {
   const parts: string[] = [];
   if (model && model !== DEFAULT_MODEL_ID) {
     const parsed = parseModelValue(model);
@@ -579,5 +602,9 @@ export function buildConfigContext(model: string, disabledTools: string[]): stri
   }
   const toolLabels = configurableTools.filter(t => disabledTools.includes(t.value)).map(t => t.label);
   if (toolLabels.length) parts.push(`Avoid using these tools for this turn: ${toolLabels.join(', ')}.`);
+  if (reasoningEffort && reasoningEffort !== DEFAULT_REASONING_EFFORT) {
+    const hint = REASONING_EFFORT_HINTS[reasoningEffort];
+    if (hint) parts.push(hint);
+  }
   return parts.length ? parts.join('\n') : undefined;
 }

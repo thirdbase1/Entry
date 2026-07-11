@@ -3,73 +3,54 @@
 /**
  * "Put a browser preview somewhere in the UI, powered by the sandbox of
  * each chat" — the button lives in ChatPageHeader; this is the actual
- * panel it opens. Polls GET /api/chats/[sessionId]/preview.
+ * panel it opens.
  *
- * See ChatPreview's schema comment (packages/db/prisma/schema.prisma) and
- * the route's own file comment (app/api/chats/[sessionId]/preview/
- * route.ts) for the full two-path rationale — direct/BYOK chats get a
- * real, always-current status every poll (this route can reach that
- * sandbox directly); default eve-path chats only reflect whatever the
- * agent's own get_preview_url/restart_sandbox tools last reported, since
- * nothing outside a live agent turn can reach eve's sandbox at all.
+ * Rebuilt 2026-07-11 (explicit user request: "the preview is having
+ * issues, it should always connect... if the preview have issues
+ * connecting it should send it automatically to the AI to fix, showing
+ * the error -- not when I click preview should it be stating [the
+ * error]"): this component used to own its own polling + restart calls,
+ * meaning nothing happened at all unless the user had this panel open.
+ * Polling, the stuck-detection, the self-heal restart attempt, and the
+ * auto-escalation to the agent all now live in `usePreviewAutoFix`
+ * (mounted in ChatPageHeader, always running while the chat page is
+ * open) -- this component is purely presentational over whatever that
+ * hook reports, so a broken preview gets auto-fixed whether or not this
+ * panel is ever opened. See that hook's file comment for the full
+ * self-heal-then-escalate behavior and ChatPreview's schema comment
+ * (packages/db/prisma/schema.prisma) for the two-path (direct vs eve)
+ * rationale.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
+import type { PreviewStatus } from './use-preview-autofix';
 
-type PreviewStatus = {
-  status: string;
-  available: boolean;
-  url?: string | null;
-  port?: number | null;
-  reason?: string | null;
-  error?: string | null;
-  isDirect: boolean;
-  requiresAgentAction: boolean;
-};
-
-export function ChatPreviewPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
-  const [state, setState] = useState<PreviewStatus | null>(null);
+export function ChatPreviewPanel({
+  sessionId: _sessionId,
+  state,
+  autoFixing,
+  onManualRestart,
+  onRefresh,
+  onClose,
+}: {
+  sessionId: string;
+  state: PreviewStatus | null;
+  autoFixing: boolean;
+  onManualRestart: () => Promise<unknown>;
+  onRefresh: () => Promise<void>;
+  onClose: () => void;
+}) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const poll = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/chats/${sessionId}/preview`);
-      if (!res.ok) return;
-      const data = (await res.json()) as PreviewStatus;
-      setState(data);
-    } catch {
-      // Transient network error — next poll tick will retry, no need to
-      // show a scary error for a single missed poll.
-    }
-  }, [sessionId]);
-
-  useEffect(() => {
-    poll();
-    pollRef.current = setInterval(poll, 4000);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [poll]);
-
-  const restart = useCallback(async () => {
+  const restart = async () => {
     setRestarting(true);
     try {
-      const res = await fetch(`/api/chats/${sessionId}/preview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'restart' }),
-      });
-      const data = await res.json();
-      if (data.requiresAgentAction) {
-        setState(prev => (prev ? { ...prev, status: 'stopped', available: false, url: null, requiresAgentAction: true } : prev));
-      } else {
-        await poll();
-      }
+      await onManualRestart();
+      await onRefresh();
     } finally {
       setRestarting(false);
     }
-  }, [sessionId, poll]);
+  };
 
   return (
     <div className="fixed inset-y-0 right-0 w-full sm:w-[480px] bg-card border-l border-border z-50 flex flex-col shadow-xl">
@@ -108,17 +89,17 @@ export function ChatPreviewPanel({ sessionId, onClose }: { sessionId: string; on
         {state && !state.available && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
             <div className="text-sm text-muted-foreground">
-              {state.status === 'error'
-                ? state.error || 'Something went wrong starting the preview.'
-                : state.requiresAgentAction
-                  ? 'No dev server running yet.'
-                  : 'Starting…'}
+              {state.status === 'error' ? state.error || 'Something went wrong starting the preview.' : 'Starting…'}
             </div>
-            {state.requiresAgentAction && (
-              <div className="text-xs text-muted-foreground max-w-xs">
-                Ask the agent in chat to start (or restart) your app — e.g. "run the dev server" — and this panel will pick it up
-                automatically.
+            {autoFixing ? (
+              <div className="flex items-center gap-2 text-xs text-amber-600">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                Not connecting — I've already flagged this to the agent to fix. It'll reconnect automatically once fixed.
               </div>
+            ) : (
+              state.requiresAgentAction && (
+                <div className="text-xs text-muted-foreground max-w-xs">Starting up — this will reconnect automatically once it's ready.</div>
+              )
             )}
           </div>
         )}

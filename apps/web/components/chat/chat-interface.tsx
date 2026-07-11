@@ -5,13 +5,14 @@ import type { EveMessage, UseEveAgentSnapshot } from 'eve/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
-import { ChatInput } from './chat-input';
+import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { resolveContextForSend, type AttachedContext } from './chat-context';
 import { buildConfigContext, DEFAULT_MODEL_ID, useReasoningEffort } from './chat-config';
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
+import { AutoFixSendProvider } from './chat-auto-fix-context';
 import { toast } from '@/lib/toast';
 import { useOnlineStatus } from './use-online-status';
 
@@ -372,6 +373,8 @@ export function ChatInterface({
       router={router}
       model={model}
       setModel={setModel}
+      reasoningEffort={reasoningEffort}
+      setReasoningEffort={setReasoningEffort}
       onSessionIdKnown={setLiveSessionId}
       isOnline={isOnline}
       isRecovering={isRecovering}
@@ -394,10 +397,14 @@ function ChatInterfaceInner({
   router,
   model,
   setModel,
+  reasoningEffort,
+  setReasoningEffort,
   onSessionIdKnown,
   isOnline,
   isRecovering,
 }: ChatInterfaceProps & {
+  reasoningEffort: import('./chat-config').ReasoningEffort;
+  setReasoningEffort: (level: import('./chat-config').ReasoningEffort) => void;
   initialEvents?: any;
   initialSession?: any;
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -550,14 +557,28 @@ function ChatInterfaceInner({
   }, [initialMessage]);
 
   const onSend = useCallback(
-    (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string }) => {
+    (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string; images?: ChatImageAttachment[] }) => {
       setTurnError(null);
       void (async () => {
         const [attachedContext, configHint] = await Promise.all([
           resolveContextForSend(opts?.attached ?? []),
-          Promise.resolve(buildConfigContext(opts?.model ?? '', opts?.disabledTools ?? [])),
+          Promise.resolve(buildConfigContext(opts?.model ?? '', opts?.disabledTools ?? [], reasoningEffort)),
         ]);
         const clientContext = [attachedContext, configHint].filter(Boolean).join('\n\n') || undefined;
+        // Images (2026-07-11, photo-attach feature): eve's `send` accepts
+        // `message` as a plain string OR the AI SDK's UserContent array
+        // (text/image/file parts) -- when there are images, switch to the
+        // array form so the model actually receives them as real image
+        // content, not just a link in the text. NOTE: eve's own
+        // EveMessagePart projection (message-reducer-types) has no
+        // image/file variant yet, so the sent photo won't render a
+        // thumbnail back in this surface's own history the way the
+        // BYOK/Gateway direct-chat path now does -- it still reaches and
+        // is seen by the model, just without a client-side preview here.
+        const message =
+          opts?.images && opts.images.length > 0
+            ? [{ type: 'text' as const, text: input }, ...opts.images.map(img => ({ type: 'image' as const, image: img.url, mediaType: img.mediaType }))]
+            : input;
         // Retries a genuine network-level send failure up to twice with
         // backoff -- see send-with-retry.ts's file comment for exactly
         // which failures qualify and why only those. agent.send rejecting
@@ -565,20 +586,20 @@ function ChatInterfaceInner({
         // pre-flight API failure) is left alone: onError above already
         // covers mid-stream failures, this only closes the "message never
         // even reached the server" gap.
-        await sendWithRetry(() => agent.send({ message: input, clientContext })).catch(err => {
+        await sendWithRetry(() => agent.send({ message, clientContext })).catch(err => {
           console.error('[send failed]', err);
           setTurnError(readableChatErrorMessage(err));
         });
       })();
     },
-    [agent]
+    [agent, reasoningEffort]
   );
 
   if (messages.length === 0 && !isBusy) {
     return (
       <div className="flex flex-col justify-center h-full p-4 gap-4 max-w-[800px] mx-auto">
         <div className="text-[26px] font-medium text-center mb-9 text-foreground">{placeholderTitle}</div>
-        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} />
+        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} reasoningEffort={reasoningEffort} onReasoningEffortChange={setReasoningEffort} />
         {turnError && (
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 text-center">
             {turnError}
@@ -589,57 +610,59 @@ function ChatInterfaceInner({
   }
 
   return (
-    <div className={`flex flex-col h-full ${className}`}>
-      {headerContent}
-      <div className="flex-1 h-0 flex flex-col relative">
-        <div ref={scrollRef} className="flex-1 overflow-y-auto py-4">
-          <div className="max-w-[832px] mx-auto px-4 w-full flex flex-col [&>*:not(:first-child)]:mt-4">
-            {messages.map((m, idx) => (
-              <MessageRenderer
-                key={m.id}
-                message={m}
-                isStreaming={isBusy && idx === messages.length - 1}
-                allMessages={messages}
-                onSend={onSend}
-              />
-            ))}
+    <AutoFixSendProvider send={message => onSend(message)}>
+      <div className={`flex flex-col h-full ${className}`}>
+        {headerContent}
+        <div className="flex-1 h-0 flex flex-col relative">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto py-4">
+            <div className="max-w-[832px] mx-auto px-4 w-full flex flex-col [&>*:not(:first-child)]:mt-4">
+              {messages.map((m, idx) => (
+                <MessageRenderer
+                  key={m.id}
+                  message={m}
+                  isStreaming={isBusy && idx === messages.length - 1}
+                  allMessages={messages}
+                  onSend={onSend}
+                />
+              ))}
+            </div>
           </div>
+          <DownArrow
+            ref={downArrowRef}
+            onClick={scrollToBottom}
+            loading={isBusy}
+          />
         </div>
-        <DownArrow
-          ref={downArrowRef}
-          onClick={scrollToBottom}
-          loading={isBusy}
-        />
+        <AggregatedTodoList messages={messages} />
+        {!isOnline && (
+          <div className="max-w-[832px] mx-auto w-full px-4">
+            <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+              You&apos;re offline — I&apos;ll reconnect and catch up automatically once you&apos;re back.
+            </div>
+          </div>
+        )}
+        {isOnline && (isRecovering || pendingTurn) && !turnError && (
+          <div className="max-w-[832px] mx-auto w-full px-4">
+            <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-pulse shrink-0" />
+              {isRecovering && !pendingTurn
+                ? 'Reconnecting…'
+                : 'Still working on this — it kept generating in the background while you were away. Catching up now…'}
+            </div>
+          </div>
+        )}
+        {turnError && (
+          <div className="max-w-[832px] mx-auto w-full px-4">
+            <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
+              {turnError}
+            </div>
+          </div>
+        )}
+        <div className="sticky bottom-0 z-10 w-full bg-background max-w-[832px] px-4 mx-auto py-4">
+          <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} reasoningEffort={reasoningEffort} onReasoningEffortChange={setReasoningEffort} />
+        </div>
       </div>
-      <AggregatedTodoList messages={messages} />
-      {!isOnline && (
-        <div className="max-w-[832px] mx-auto w-full px-4">
-          <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-            You&apos;re offline — I&apos;ll reconnect and catch up automatically once you&apos;re back.
-          </div>
-        </div>
-      )}
-      {isOnline && (isRecovering || pendingTurn) && !turnError && (
-        <div className="max-w-[832px] mx-auto w-full px-4">
-          <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-pulse shrink-0" />
-            {isRecovering && !pendingTurn
-              ? 'Reconnecting…'
-              : 'Still working on this — it kept generating in the background while you were away. Catching up now…'}
-          </div>
-        </div>
-      )}
-      {turnError && (
-        <div className="max-w-[832px] mx-auto w-full px-4">
-          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
-            {turnError}
-          </div>
-        </div>
-      )}
-      <div className="sticky bottom-0 z-10 w-full bg-background max-w-[832px] px-4 mx-auto py-4">
-        <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} />
-      </div>
-    </div>
+    </AutoFixSendProvider>
   );
 }

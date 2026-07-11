@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useLibraryStore, useAllItems, type Chat } from '@/store/library';
 import { cn } from '@/lib/utils';
 import { ChatPreviewPanel } from './chat-preview-panel';
+import { usePreviewAutoFix } from './use-preview-autofix';
 
 export function ChatPageHeader({ sessionId }: { sessionId: string }) {
   const { toggleCollect } = useLibraryStore();
@@ -18,7 +19,20 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
 
   const [copied, setCopied] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
+  // Always open by default (2026-07-11, explicit user request: "it
+  // should always be available as the whole site open") -- previously
+  // required clicking "Preview" every single time a chat was opened.
+  // User can still close it manually if they want it out of the way for
+  // that session; it just no longer starts hidden.
+  const [previewOpen, setPreviewOpen] = useState(true);
+
+  // Always running (2026-07-11, explicit user request: "not when I click
+  // preview should it be stating [the error]") -- mounted here rather than
+  // inside ChatPreviewPanel itself so a broken preview gets noticed and
+  // auto-fixed whether or not the user ever opens the panel, not only the
+  // moment they happen to click "Preview". See that hook's own comment for
+  // the full self-heal-then-escalate-to-the-agent behavior.
+  const preview = usePreviewAutoFix(sessionId);
 
   // Real public share link, backed by EveChatSession.isPublic/shareToken —
   // generates (once) and enables the share token, then copies the
@@ -95,13 +109,29 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
         </button>
         <button
           onClick={() => setPreviewOpen(true)}
-          title="Preview your app, powered by this chat's sandbox"
-          className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-card hover:bg-accent transition-colors h-8 px-3"
+          title={
+            preview.autoFixing
+              ? "Preview isn't connecting — I've flagged it to the agent to fix"
+              : "Preview your app, powered by this chat's sandbox"
+          }
+          className="relative inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-card hover:bg-accent transition-colors h-8 px-3"
         >
           Preview
+          {preview.autoFixing && (
+            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" aria-hidden="true" />
+          )}
         </button>
       </div>
-      {previewOpen && <ChatPreviewPanel sessionId={sessionId} onClose={() => setPreviewOpen(false)} />}
+      {previewOpen && (
+        <ChatPreviewPanel
+          sessionId={sessionId}
+          state={preview.state}
+          autoFixing={preview.autoFixing}
+          onManualRestart={preview.manualRestart}
+          onRefresh={preview.refresh}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
     </div>
   );
 }

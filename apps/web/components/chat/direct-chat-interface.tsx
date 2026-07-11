@@ -43,11 +43,12 @@ import { DefaultChatTransport } from 'ai';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
-import { ChatInput } from './chat-input';
+import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import type { AttachedContext } from './chat-context';
 import type { ReasoningEffort } from './chat-config';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
+import { AutoFixSendProvider } from './chat-auto-fix-context';
 import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
 import { ChooseResult } from './renderers/choose-result';
 
@@ -343,7 +344,7 @@ function DirectChatSession({
     return () => observer.disconnect();
   }, [messages.length, showThinkingIndicator]);
 
-  const onSend = (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string }) => {
+  const onSend = (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string; images?: ChatImageAttachment[] }) => {
     // Switching to a different model mid-chat is handled by the parent
     // (chat-interface.tsx remounts into the right path); here we only ever
     // send under the current byokModelId/requestedModel.
@@ -366,7 +367,15 @@ function DirectChatSession({
     // "Every request should go through" (real ask, 2026-07-11) means this
     // one narrow, safe class of failure shouldn't just give up after one
     // flaky attempt.
-    void sendWithRetry(() => chat.sendMessage({ text: input }, { body: { disabledTools: opts?.disabledTools ?? [] } })).catch(err => {
+    // Images (2026-07-11, explicit user request -- "many models support
+    // that", re: sending photos): each attached image is already a real
+    // uploaded URL by the time onSend fires (ChatInput uploads on pick,
+    // not on send), so it's just handed straight to sendMessage's native
+    // `files` param as FileUIParts -- convertToModelMessages (route.ts)
+    // turns these into real multimodal image content automatically, no
+    // server-side change needed for that part.
+    const files = (opts?.images ?? []).map(img => ({ type: 'file' as const, mediaType: img.mediaType, url: img.url, filename: img.filename }));
+    void sendWithRetry(() => chat.sendMessage({ text: input, files: files.length > 0 ? files : undefined }, { body: { disabledTools: opts?.disabledTools ?? [] } })).catch(err => {
       console.error('[direct chat send failed]', err);
       setTurnError(readableChatErrorMessage(err));
     });
@@ -387,6 +396,7 @@ function DirectChatSession({
   }
 
   return (
+    <AutoFixSendProvider send={message => onSend(message)}>
     <div className={`flex flex-col h-full ${className}`}>
       {headerContent}
       <div className="flex-1 h-0 flex flex-col relative">
@@ -405,6 +415,27 @@ function DirectChatSession({
                   >
                     {m.parts.map((part, i) => {
                       if (part.type === 'text') return <MarkdownText key={i} text={part.text} />;
+                      // Renders an attached/generated image (2026-07-11,
+                      // photo-attach feature). User-sent images are file
+                      // parts with mediaType image/* -- the part.type
+                      // itself is the AI SDK's generic 'file', not
+                      // anything image-specific, so mediaType is the only
+                      // real signal. Non-image files fall through to a
+                      // plain download link so nothing silently vanishes.
+                      if (part.type === 'file') {
+                        const filePart = part as any;
+                        if ((filePart.mediaType ?? '').startsWith('image/')) {
+                          return (
+                            // eslint-disable-next-line @next/next/no-img-element -- arbitrary uploaded/model blob URL
+                            <img key={i} src={filePart.url} alt={filePart.filename ?? 'attached image'} className="max-w-full max-h-80 rounded-lg object-contain my-1" />
+                          );
+                        }
+                        return (
+                          <a key={i} href={filePart.url} target="_blank" rel="noopener noreferrer" className="text-primary underline text-sm block my-1">
+                            {filePart.filename ?? 'Attached file'}
+                          </a>
+                        );
+                      }
                       if (part.type === 'reasoning') {
                         const stillThinking = isLastAssistant && isBusy && i === m.parts.length - 1;
                         return <AIReasoningCard key={i} text={(part as any).text ?? ''} loading={stillThinking} />;
@@ -512,5 +543,6 @@ function DirectChatSession({
         />
       </div>
     </div>
+    </AutoFixSendProvider>
   );
 }

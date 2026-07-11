@@ -17,6 +17,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { prisma, decryptApiKey } from '@entry/db';
+import { createGatewayRetryFetch } from './gateway-retry-fetch';
 
 export interface ResolvedByokModel {
   model: LanguageModel;
@@ -50,7 +51,12 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
       break;
     case 'OPENAI':
     default:
-      model = createOpenAICompatible({ name: provider.label, baseURL: provider.baseUrl, apiKey })(modelRow.modelId);
+      // `fetch` override retries a confirmed transient gateway bug seen on
+      // at least one real OpenAI-compatible relay (2026-07-11 user report,
+      // "Function id ... is not found" 404) -- see that file's comment for
+      // why this is safe (only retries an exact known-transient pattern,
+      // every other 404 passes through untouched).
+      model = createOpenAICompatible({ name: provider.label, baseURL: provider.baseUrl, apiKey, fetch: createGatewayRetryFetch() })(modelRow.modelId);
       break;
   }
 

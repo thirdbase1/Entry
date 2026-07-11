@@ -29,6 +29,41 @@ import { safeExecute } from './safe-execute.js';
  * the preview", since nothing outside a real tool call can trigger it for
  * this path.
  */
+type TunnelProvider = 'cloudflared' | 'localtunnel';
+
+/** Idempotent: if a tunnel for this exact port+provider is already
+ *  running (e.g. the model calls this tool twice in a row), reuse it
+ *  instead of spawning a second one — parse its already-logged URL back
+ *  out rather than trusting process liveness alone. */
+async function startTunnel(
+  sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>,
+  port: number,
+  provider: TunnelProvider
+): Promise<string | null> {
+  const logFile = `/tmp/.preview-tunnel-${provider}-${port}.log`;
+  const urlPattern = provider === 'cloudflared' ? /https:\/\/[^\s]+\.trycloudflare\.com/ : /https:\/\/[^\s]+\.loca\.lt/;
+  const processPattern = provider === 'cloudflared' ? `cloudflared tunnel --url http://localhost:${port}` : `localtunnel --port ${port}`;
+
+  const existingLog = await sandbox.run({ command: `cat ${logFile} 2>/dev/null || true` });
+  const existingMatch = existingLog.stdout.match(urlPattern);
+  const alreadyRunning = await sandbox.run({ command: `pgrep -f ${JSON.stringify(processPattern)} > /dev/null && echo YES || echo NO` });
+  if (existingMatch && alreadyRunning.stdout.includes('YES')) return existingMatch[0];
+
+  const startCmd =
+    provider === 'cloudflared'
+      ? `command -v cloudflared > /dev/null 2>&1 && (` +
+        `pkill -f ${JSON.stringify(processPattern)} 2>/dev/null; ` +
+        `nohup cloudflared tunnel --url http://localhost:${port} > ${logFile} 2>&1 & ` +
+        `sleep 5)`
+      : `pkill -f ${JSON.stringify(processPattern)} 2>/dev/null; ` + `nohup npx --yes localtunnel --port ${port} > ${logFile} 2>&1 & ` + `sleep 4`;
+
+  const started = await sandbox.run({ command: startCmd });
+  if (provider === 'cloudflared' && started.exitCode !== 0) return null; // cloudflared binary missing — let the fallback try
+  const log = await sandbox.run({ command: `cat ${logFile} 2>/dev/null || true` });
+  const match = log.stdout.match(urlPattern);
+  return match ? match[0] : null;
+}
+
 const PREVIEW_PORTS = [3000, 5173, 8080, 4173, 8000] as const;
 
 export const getPreviewUrlTool = {
@@ -47,32 +82,23 @@ export const getPreviewUrlTool = {
       });
       if (!probe.stdout.includes('UP')) continue;
 
-      // Idempotent: if a tunnel for this exact port is already running
-      // (e.g. the model calls this tool twice in a row), reuse it instead
-      // of spawning a second one — parse its already-logged URL back out.
-      const existingLog = await sandbox.run({ command: `cat /tmp/.preview-tunnel-${port}.log 2>/dev/null || true` });
-      const existingMatch = existingLog.stdout.match(/https:\/\/[^\s]+\.loca\.lt/);
-      const alreadyRunning = await sandbox.run({ command: `pgrep -f "localtunnel --port ${port}" > /dev/null && echo YES || echo NO` });
-
-      let url: string | null = existingMatch && alreadyRunning.stdout.includes('YES') ? existingMatch[0] : null;
-
-      if (!url) {
-        await sandbox.run({
-          command:
-            `pkill -f "localtunnel --port ${port}" 2>/dev/null; ` +
-            `nohup npx --yes localtunnel --port ${port} > /tmp/.preview-tunnel-${port}.log 2>&1 & ` +
-            `sleep 4`,
-        });
-        const log = await sandbox.run({ command: `cat /tmp/.preview-tunnel-${port}.log 2>/dev/null || true` });
-        const match = log.stdout.match(/https:\/\/[^\s]+\.loca\.lt/);
-        url = match ? match[0] : null;
-      }
+      // FIXED (2026-07-11, "preview tool always failed"): loca.lt (the
+      // free public relay localtunnel depends on) has no uptime guarantee
+      // and routinely just doesn't come up in time — confirmed the real
+      // failure mode was the external relay itself, not this code.
+      // cloudflared's "quick tunnel" (trycloudflare.com) is the primary
+      // path now — actively maintained by Cloudflare, no signup/token
+      // needed, materially more reliable. localtunnel is kept ONLY as a
+      // fallback for the rare case cloudflared itself isn't reachable
+      // (see sandbox.ts's bootstrap comment for why both are installed).
+      let url = await startTunnel(sandbox, port, 'cloudflared');
+      if (!url) url = await startTunnel(sandbox, port, 'localtunnel');
 
       if (!url) {
         await prisma.chatPreview.upsert({
           where: { chatId },
-          create: { chatId, status: 'error', errorMessage: 'Dev server is up but the tunnel did not report a URL in time.' },
-          update: { status: 'error', errorMessage: 'Dev server is up but the tunnel did not report a URL in time.', url: null, port },
+          create: { chatId, status: 'error', errorMessage: 'Dev server is up but no tunnel provider reported a URL in time.' },
+          update: { status: 'error', errorMessage: 'Dev server is up but no tunnel provider reported a URL in time.', url: null, port },
         });
         return { available: false, port, error: 'Tunnel failed to start in time — try calling this again in a few seconds.' };
       }
