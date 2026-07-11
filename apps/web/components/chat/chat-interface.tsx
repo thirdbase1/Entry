@@ -226,14 +226,6 @@ export function ChatInterface({
     else if (initial.requestedModel) setModelState(`gateway:${initial.requestedModel}`);
   }, [initial]);
 
-  if (!initial) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-        Loading conversation…
-      </div>
-    );
-  }
-
   // FIXED (2026-07-11): this used to lock a resumed chat's routing to
   // whatever `initial.byokModelId`/`initial.requestedModel` were at
   // creation time, full stop — the live `model` picker updated
@@ -253,7 +245,21 @@ export function ChatInterface({
   // BYOK<->Gateway, Gateway<->Gateway are all the exact same route
   // (/api/direct/chat) and the exact same message shape — nothing stops
   // that from tracking the live picker turn to turn, and now it does.
-  const rowIsDirect = sessionId ? !!(initial.byokModelId || initial.requestedModel) : null; // null = brand-new, bucket not decided yet
+  //
+  // HOTFIX (2026-07-11, later same day): all of this — including the
+  // useEffect right below — MUST stay above the `if (!initial) return
+  // <Loading/>` bailout a few lines down. It was originally added AFTER
+  // that early return, which is a Rules-of-Hooks violation: during the
+  // load flash `initial` is null and React never reaches this useEffect,
+  // but the instant `initial` populates the very same render calls it —
+  // the hook count differs between renders and React throws "Rendered
+  // more hooks than during the previous render", crashing the whole
+  // chat surface. That's the reported crash, and it hit EVERY chat (new
+  // or existing) once `initial` finished loading, not just the
+  // eve<->direct crossover case this effect is actually for. Guard
+  // `rowIsDirect` on `!initial` (null while loading) rather than only on
+  // `sessionId` so `crossedBucket` can't false-positive during that gap.
+  const rowIsDirect = !initial ? null : sessionId ? !!(initial.byokModelId || initial.requestedModel) : null; // null = still loading, or brand-new (bucket not decided yet)
   const liveIsDirect = model.startsWith('byok:') || model.startsWith('gateway:');
   const isDirect = rowIsDirect === null ? liveIsDirect : rowIsDirect;
   // Crossing eve<->direct on an EXISTING thread can't be hot-applied (see
@@ -264,6 +270,7 @@ export function ChatInterface({
   const crossedBucket = rowIsDirect !== null && rowIsDirect !== liveIsDirect;
 
   useEffect(() => {
+    if (!initial) return; // still loading — nothing to cross yet
     if (!crossedBucket) return;
     if (!userChangedModelRef.current) return; // seeding-gap guard, see above
     toast(
@@ -273,7 +280,15 @@ export function ChatInterface({
     );
     const params = new URLSearchParams({ model });
     router.push(`/chats?${params.toString()}`);
-  }, [crossedBucket, liveIsDirect, model, router]);
+  }, [initial, crossedBucket, liveIsDirect, model, router]);
+
+  if (!initial) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+        Loading conversation…
+      </div>
+    );
+  }
 
   if (isDirect) {
     // While `crossedBucket` (redirect in flight above), keep rendering
