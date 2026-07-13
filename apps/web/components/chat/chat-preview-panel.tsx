@@ -23,9 +23,10 @@
  */
 import { useState } from 'react';
 import type { PreviewStatus } from './use-preview-autofix';
+import { ChatFilesTab } from './chat-files-tab';
 
 export function ChatPreviewPanel({
-  sessionId: _sessionId,
+  sessionId,
   state,
   autoFixing,
   onManualRestart,
@@ -41,6 +42,7 @@ export function ChatPreviewPanel({
 }) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [tab, setTab] = useState<'preview' | 'files'>('preview');
 
   const restart = async () => {
     setRestarting(true);
@@ -55,9 +57,22 @@ export function ChatPreviewPanel({
   return (
     <div className="fixed inset-y-0 right-0 w-full sm:w-[480px] bg-card border-l border-border z-50 flex flex-col shadow-xl">
       <div className="h-14 border-b border-border px-4 flex items-center justify-between shrink-0">
-        <div className="text-sm font-medium">Preview</div>
+        <div className="flex items-center gap-1 bg-muted rounded-md p-0.5">
+          <button
+            onClick={() => setTab('preview')}
+            className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'preview' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
+          >
+            Preview
+          </button>
+          <button
+            onClick={() => setTab('files')}
+            className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'files' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
+          >
+            Files
+          </button>
+        </div>
         <div className="flex items-center gap-2">
-          {state?.available && (
+          {tab === 'preview' && state?.available && (
             <button
               onClick={() => setReloadKey(k => k + 1)}
               className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-accent"
@@ -66,13 +81,15 @@ export function ChatPreviewPanel({
               Reload
             </button>
           )}
-          <button
-            onClick={restart}
-            disabled={restarting}
-            className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-accent disabled:opacity-50"
-          >
-            {restarting ? 'Restarting…' : 'Restart'}
-          </button>
+          {tab === 'preview' && (
+            <button
+              onClick={restart}
+              disabled={restarting}
+              className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded hover:bg-accent disabled:opacity-50"
+            >
+              {restarting ? 'Restarting…' : 'Restart'}
+            </button>
+          )}
           <button onClick={onClose} className="w-7 h-7 rounded-md flex items-center justify-center hover:bg-accent text-muted-foreground">
             ✕
           </button>
@@ -80,13 +97,15 @@ export function ChatPreviewPanel({
       </div>
 
       <div className="flex-1 min-h-0 relative bg-background">
-        {!state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
+        {tab === 'files' && <ChatFilesTab sessionId={sessionId} />}
 
-        {state && state.available && state.url && (
+        {tab === 'preview' && !state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
+
+        {tab === 'preview' && state && state.available && state.url && (
           <iframe key={reloadKey} src={state.url} className="w-full h-full border-0" title="App preview" />
         )}
 
-        {state && !state.available && (
+        {tab === 'preview' && state && !state.available && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
             <div className="text-sm text-muted-foreground">
               {state.status === 'error' ? state.error || 'Something went wrong starting the preview.' : 'Starting…'}

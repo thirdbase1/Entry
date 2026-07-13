@@ -214,15 +214,32 @@ export const browserUse = {
       }
 
       const cmd = buildCommand(next);
+      let stepDescription = next.stepDescription;
       if (cmd) {
-        await runCli(cmd);
+        const result = await runCli(cmd);
+        if (!result.ok) {
+          // FIXED (2026-07-13): a failed action (bad ref, element not
+          // clickable, navigation error, ...) used to be silently
+          // swallowed — the loop just moved on to the next iteration as
+          // if nothing happened, so the model never learned its action
+          // didn't work and would often repeat the same failing action
+          // until MAX_STEPS ran out. Surface the real stderr in the step
+          // description so it flows into next iteration's "Steps so far"
+          // context and the model can actually self-correct.
+          stepDescription = `${stepDescription} — FAILED: ${result.stderr.slice(0, 300) || 'no output'}`;
+        }
+      } else {
+        // buildCommand returned null: the model picked an action but
+        // omitted a required field (e.g. "click" with no ref). Previously
+        // this also just silently did nothing for a full step.
+        stepDescription = `${stepDescription} — SKIPPED: action "${next.action}" was missing a required ref/value, nothing was executed.`;
       }
       const shot = await takeScreenshot();
-      steps.push({ description: next.stepDescription, screenshotUrl: shot });
+      steps.push({ description: stepDescription, screenshotUrl: shot });
 
       if (i === MAX_STEPS - 1) {
         finalStatus = 'failed';
-        finalMarkdown = `Stopped after ${MAX_STEPS} steps without the task reporting completion. Last state: ${next.stepDescription}`;
+        finalMarkdown = `Stopped after ${MAX_STEPS} steps without the task reporting completion. Last state: ${stepDescription}`;
       }
     }
 

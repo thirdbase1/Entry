@@ -89,6 +89,7 @@ import { makeItReal } from '@entry/agent/tool-impls/make_it_real';
 import { docCompose } from '@entry/agent/tool-impls/doc_compose';
 import { pythonCoding } from '@entry/agent/tool-impls/python_coding';
 import { browserUse } from '@entry/agent/tool-impls/browser_use';
+import { listFilesTool } from '@entry/agent/tool-impls/list_files';
 import { bash } from '@entry/agent/tool-impls/bash';
 import { saveCredentialTool } from '@entry/agent/tool-impls/save_credential';
 import { listCredentialsTool } from '@entry/agent/tool-impls/list_credentials';
@@ -295,6 +296,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       description: browserUse.description,
       inputSchema: browserUse.inputSchema,
       execute: (input: { task: string }) => browserUse.execute(input, execCtx),
+    }),
+    list_files: tool({
+      description: listFilesTool.description,
+      inputSchema: listFilesTool.inputSchema,
+      execute: (input: { path?: string }) => listFilesTool.execute(input, execCtx),
     }),
     // Credential vault + self-authored skills (2026-07-11) — see
     // apps/agent/agent/lib/credential-vault.ts and each tool-impl's own

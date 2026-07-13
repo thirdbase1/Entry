@@ -660,3 +660,20 @@ model ChatPreview {
 
   @@map("chat_previews")
 }
+
+// One row per chat (id === EveChatSession.id, both paths), mirrors
+// ChatPreview's shape/rationale exactly. Written by the `list_files` tool
+// (eve path) or computed live from the sandbox (direct/BYOK path — see
+// /api/chats/[sessionId]/files) whenever the agent's sandbox file state
+// might be worth showing in the chat header's "Files" tab. `treeJson` is
+// a JSON-encoded array of { path, type: "file"|"dir", size? } entries,
+// kept intentionally flat (not nested objects) so the frontend can build
+// whatever tree shape it wants without a server-side schema change.
+model ChatFileTree {
+  chatId    String   @id @map("chat_id") @db.VarChar
+  treeJson  String   @map("tree_json") @db.Text
+  rootLabel String?  @map("root_label") @db.VarChar
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("chat_file_trees")
+}
