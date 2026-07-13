@@ -1,4 +1,16 @@
 #!/usr/bin/env node
+// FIXED (2026-07-13, real build failure: "require is not defined in ES module
+// scope" — this package's package.json has "type": "module", so a plain
+// `require(...)` at the bottom of this file threw immediately the first time a
+// real Vercel remote build actually reached this step, which never happened
+// before now since deploys had been going out via the local-build/prebuilt path.
+// Converted the two lazy requires to top-level ESM imports + `fileURLToPath` for
+// the `__dirname` equivalent — everything else in this file is unchanged.
+import { spawnSync } from 'node:child_process';
+import resolvedPath from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const scriptDir = resolvedPath.dirname(fileURLToPath(import.meta.url));
 /**
  * Guard in front of `prisma migrate deploy` — refuses to run if
  * `DATABASE_URL` obviously isn't a real production database.
@@ -73,11 +85,9 @@ if (localPatterns.some(p => p.test(url))) {
 
 console.log('[guard-production-migrate] DATABASE_URL looks like a real (non-local) database — proceeding with migrate deploy.');
 
-const { spawnSync } = require('node:child_process');
-const path = require('node:path');
-const prismaCli = path.resolve(__dirname, '..', '..', '..', 'node_modules', 'prisma', 'build', 'index.js');
+const prismaCli = resolvedPath.resolve(scriptDir, '..', '..', '..', 'node_modules', 'prisma', 'build', 'index.js');
 const result = spawnSync(process.execPath, [prismaCli, 'migrate', 'deploy'], {
-  cwd: path.resolve(__dirname, '..'),
+  cwd: resolvedPath.resolve(scriptDir, '..'),
   stdio: 'inherit',
 });
 process.exit(result.status ?? 1);
