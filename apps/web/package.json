@@ -27,6 +27,7 @@
     "@entry/queue": "*",
     "@lit/react": "^1.0.8",
     "@lobehub/icons": "^5.10.1",
+    "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-collapsible": "^1.1.16",
     "@tailwindcss/postcss": "^4.3.2",
     "@tailwindcss/typography": "^0.5.20",

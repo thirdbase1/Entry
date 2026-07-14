@@ -37,6 +37,67 @@ async function listLive(sandbox: { run(opts: { command: string }): Promise<{ exi
     .filter(e => e.path);
 }
 
+/**
+ * Save an edited file back to the live sandbox (2026-07-14, "full coding
+ * environment" push -- the Files tab was read-only until now, a real gap
+ * against "VS Code" as the stated bar: seeing code isn't the same as
+ * being able to fix a line yourself instead of round-tripping through
+ * chat for every small edit). Direct/BYOK only, same reason as `content`
+ * reads above -- only that path has a live sandbox handle outside of a
+ * tool call. Body: { path: string, content: string }.
+ */
+export async function PUT(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
+  const { session } = await getUserSessionFromRequest(req);
+  if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const { sessionId } = await params;
+  const chat = await getChatSession(session.user.id, sessionId);
+  if (!chat) return Response.json({ error: 'Not found' }, { status: 404 });
+
+  const isDirect = Boolean(chat.byokModelId || chat.requestedModel);
+  if (!isDirect) {
+    return Response.json({ error: 'Editing files is only available for direct/BYOK model chats right now.' }, { status: 400 });
+  }
+
+  let body: { path?: string; content?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: 'Invalid request body' }, { status: 400 });
+  }
+  const { path: filePath, content } = body;
+  if (typeof filePath !== 'string' || !filePath || filePath.includes('..')) {
+    return Response.json({ error: 'Invalid path' }, { status: 400 });
+  }
+  if (typeof content !== 'string') {
+    return Response.json({ error: 'content must be a string' }, { status: 400 });
+  }
+  if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_BYTES) {
+    return Response.json({ error: `File is too large to save (limit ${MAX_CONTENT_BYTES / 1024}KB).` }, { status: 413 });
+  }
+
+  try {
+    const sandbox = await getSandboxForChat(sessionId);
+    // Write via a heredoc rather than echo/printf -- content can contain
+    // absolutely anything (quotes, backticks, binary-ish text pasted in)
+    // and a heredoc with a randomized, collision-proof delimiter is the
+    // one shell-write approach that doesn't need per-character escaping.
+    const delimiter = `EOF_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+    const dir = filePath.includes('/') ? filePath.slice(0, filePath.lastIndexOf('/')) : '';
+    const mkdirCmd = dir ? `mkdir -p ${shellQuote(dir)} && ` : '';
+    const cmd = `${mkdirCmd}cat > ${shellQuote(filePath)} << '${delimiter}'
+${content}
+${delimiter}`;
+    const result = await sandbox.run({ command: cmd });
+    if (result.exitCode !== 0) {
+      return Response.json({ error: result.stderr.slice(0, 300) || 'Could not save file' }, { status: 500 });
+    }
+    return Response.json({ success: true, path: filePath });
+  } catch (err) {
+    return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
+}
+
 export async function GET(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });

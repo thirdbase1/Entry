@@ -24,6 +24,7 @@
 import { useState } from 'react';
 import type { PreviewStatus } from './use-preview-autofix';
 import { ChatFilesTab } from './chat-files-tab';
+import { ChatTerminalTab } from './chat-terminal-tab';
 
 export function ChatPreviewPanel({
   sessionId,
@@ -42,7 +43,7 @@ export function ChatPreviewPanel({
 }) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [tab, setTab] = useState<'preview' | 'files'>('preview');
+  const [tab, setTab] = useState<'preview' | 'files' | 'terminal'>('preview');
 
   const restart = async () => {
     setRestarting(true);
@@ -69,6 +70,12 @@ export function ChatPreviewPanel({
             className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'files' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
           >
             Files
+          </button>
+          <button
+            onClick={() => setTab('terminal')}
+            className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'terminal' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
+          >
+            Terminal
           </button>
         </div>
         <div className="flex items-center gap-2">
@@ -98,6 +105,7 @@ export function ChatPreviewPanel({
 
       <div className="flex-1 min-h-0 relative bg-background">
         {tab === 'files' && <ChatFilesTab sessionId={sessionId} />}
+        {tab === 'terminal' && <ChatTerminalTab sessionId={sessionId} />}
 
         {tab === 'preview' && !state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
 

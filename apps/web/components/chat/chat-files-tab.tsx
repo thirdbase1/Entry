@@ -7,12 +7,16 @@
  * for the two-path split rationale (direct/BYOK: live sandbox read;
  * eve-default path: whatever `list_files` last wrote).
  *
- * Deliberately simple: flat entry list -> nested tree built client-side,
- * click a file to fetch+show its content inline (direct/BYOK only — the
- * API 400s with an explanatory message on the eve path, which we render
- * as-is rather than special-casing).
+ * Upgraded (2026-07-14, "full coding environment" push): file content now
+ * renders in the real Monaco editor (CodeEditor) instead of a plain
+ * `<pre>` dump, with syntax highlighting and, on the direct/BYOK path
+ * (the only one with a live sandbox handle to write back to), inline
+ * editing + save via PUT /api/chats/[sessionId]/files. The eve-default
+ * path stays read-only -- same reason it was already read-only for
+ * viewing before this change.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { CodeEditor } from './code-editor';
 
 type Entry = { path: string; type: 'file' | 'dir'; size?: number };
 type TreeNode = { name: string; path: string; type: 'file' | 'dir'; children: Map<string, TreeNode> };
@@ -86,6 +90,7 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isDirect, setIsDirect] = useState(false);
   const [openFile, setOpenFile] = useState<{ path: string; content?: string; error?: string; loading: boolean } | null>(null);
 
   const refresh = useCallback(async () => {
@@ -95,6 +100,7 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
       const data = await res.json();
       setEntries(Array.isArray(data.entries) ? data.entries : []);
       setNotice(data.reason || data.error || null);
+      setIsDirect(Boolean(data.isDirect));
     } catch {
       setNotice('Could not load the file list — try again in a moment.');
     } finally {
@@ -121,6 +127,20 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
     [sessionId]
   );
 
+  const saveFile = useCallback(
+    async (path: string, content: string) => {
+      const res = await fetch(`/api/chats/${sessionId}/files`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, content }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || 'Could not save this file.');
+      setOpenFile(prev => (prev && prev.path === path ? { ...prev, content } : prev));
+    },
+    [sessionId]
+  );
+
   if (openFile) {
     return (
       <div className="flex flex-col h-full">
@@ -130,11 +150,16 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
             Back
           </button>
         </div>
-        <div className="flex-1 overflow-auto p-3">
-          {openFile.loading && <div className="text-xs text-muted-foreground">Loading…</div>}
-          {openFile.error && <div className="text-xs text-muted-foreground">{openFile.error}</div>}
+        <div className="flex-1 min-h-0 relative">
+          {openFile.loading && <div className="text-xs text-muted-foreground p-3">Loading…</div>}
+          {openFile.error && <div className="text-xs text-muted-foreground p-3">{openFile.error}</div>}
           {openFile.content !== undefined && (
-            <pre className="text-xs font-mono whitespace-pre-wrap break-words">{openFile.content}</pre>
+            <CodeEditor
+              path={openFile.path}
+              content={openFile.content}
+              readOnly={!isDirect}
+              onSave={content => saveFile(openFile.path, content)}
+            />
           )}
         </div>
       </div>
