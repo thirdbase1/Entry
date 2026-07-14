@@ -25,6 +25,34 @@
  *        actually sees it and can use its own restart_sandbox/
  *        get_preview_url tools -- same as if the user had typed it in,
  *        just automatic.
+ *
+ * FIXED (2026-07-15, real confirmed bug reported as three symptoms that
+ * turned out to be the same root cause -- "sandbox always fails to
+ * start", "why is the sandbox even trying to start for a new chat that's
+ * empty", "why if AI do tool calling it stop instantly"): this hook used
+ * to start polling the instant the page mounted and treat 3 consecutive
+ * misses (~12s) as "stuck" regardless of anything else going on. On a
+ * brand-new chat, the very first turn frequently does real setup work
+ * (bash/create_skill, npm installs, scaffolding an actual project) for
+ * well over 12 seconds before any dev server exists AT ALL to preview --
+ * there was never a sandbox to be "stuck," it just hadn't been created
+ * yet. Because escalation calls the exact same send path a real user turn
+ * uses (see chat-auto-fix-context.tsx), firing it while that first turn's
+ * own tool calls were still actively streaming aborted them outright --
+ * "the AI stops tool calling instantly" was this hook interrupting its
+ * own agent moments after the turn started, every time, on every fresh
+ * chat, because nothing was actually wrong yet.
+ *
+ * Three real fixes, not just a bigger number:
+ *   1. Never poll/escalate at all for a chat with zero messages -- there
+ *      is nothing to preview yet, full stop (read from AutoFixSendContext).
+ *   2. Never escalate while a turn is actively streaming (`isBusy` from
+ *      AutoFixSendContext) -- a live tool call is expected downtime, not
+ *      a stuck sandbox, and calling `send` right now would abort it.
+ *   3. Give a real grace period after the chat's first-ever turn starts
+ *      before the "stuck" streak counter starts counting at all -- a
+ *      brand-new sandbox routinely takes well over 12s for its first real
+ *      boot (dependency install, initial build), which isn't a failure.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAutoFixSend } from './chat-auto-fix-context';
@@ -41,10 +69,16 @@ export type PreviewStatus = {
 };
 
 const POLL_INTERVAL_MS = 4000;
-// ~12s of consecutive unavailable polls before treating this as a real,
-// stuck problem -- a sandbox normally takes a few seconds to boot, and
-// that's completely normal, not something worth escalating.
-const STUCK_THRESHOLD = 3;
+// ~24s of consecutive unavailable polls before treating this as a real,
+// stuck problem -- doubled from the original 12s (2026-07-15): a sandbox
+// can legitimately take a while to boot the FIRST time (dependency
+// install, initial build), and 12s was routinely shorter than that,
+// which is what caused false "stuck" escalations on brand-new chats.
+const STUCK_THRESHOLD = 6;
+// Grace period after the chat's first-ever turn starts before the stuck
+// counter is even allowed to run -- a fresh sandbox/dev-server on a
+// brand-new chat needs real time to exist at all, let alone boot.
+const INITIAL_GRACE_MS = 45 * 1000;
 // Don't re-nag the agent about the exact same failure more than once
 // every few minutes, even if it keeps recurring turn after turn.
 const RE_ESCALATE_COOLDOWN_MS = 5 * 60 * 1000;
@@ -57,7 +91,9 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
   const selfHealAttemptedRef = useRef(false);
   const lastEscalatedKeyRef = useRef<string | null>(null);
   const lastEscalatedAtRef = useRef(0);
-  const sendAutoFix = useAutoFixSend();
+  const firstSeenAtRef = useRef<number | null>(null);
+  const autoFix = useAutoFixSend();
+  const hasMessages = autoFix?.hasMessages ?? false;
 
   const restart = useCallback(async () => {
     if (!sessionId) return null;
@@ -70,7 +106,9 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
   }, [sessionId]);
 
   const poll = useCallback(async () => {
-    if (!sessionId) return;
+    // Nothing to preview on a chat with no messages yet -- don't even ask.
+    if (!sessionId || !hasMessages) return;
+    if (firstSeenAtRef.current === null) firstSeenAtRef.current = Date.now();
     try {
       const res = await fetch(`/api/chats/${sessionId}/preview`);
       if (!res.ok) return;
@@ -83,6 +121,17 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
         setAutoFixing(false);
         return;
       }
+
+      // A turn is actively streaming right now -- a tool call legitimately
+      // rebuilding/restarting the dev server is expected downtime, not a
+      // stuck sandbox. Don't count it toward the streak, and never send
+      // anything while a turn is in flight (would abort it outright).
+      if (autoFix?.isBusy) return;
+
+      // Still inside the initial grace window since this chat's first
+      // message -- a brand-new sandbox hasn't had a fair chance to exist
+      // yet, let alone boot.
+      if (firstSeenAtRef.current !== null && Date.now() - firstSeenAtRef.current < INITIAL_GRACE_MS) return;
 
       unavailableStreakRef.current += 1;
       if (unavailableStreakRef.current < STUCK_THRESHOLD) return;
@@ -101,11 +150,11 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
       const now = Date.now();
       const alreadyEscalatedThisError = lastEscalatedKeyRef.current === errorKey;
       const cooldownElapsed = now - lastEscalatedAtRef.current > RE_ESCALATE_COOLDOWN_MS;
-      if (sendAutoFix && errorKey && (!alreadyEscalatedThisError || cooldownElapsed)) {
+      if (autoFix?.send && errorKey && (!alreadyEscalatedThisError || cooldownElapsed)) {
         lastEscalatedKeyRef.current = errorKey;
         lastEscalatedAtRef.current = now;
         setAutoFixing(true);
-        sendAutoFix(
+        autoFix.send(
           `The app preview isn't connecting (status: ${data.status}). ${
             data.error || data.reason || 'No further detail was reported.'
           } Please check the dev server/sandbox and fix it (restart it if needed) so the preview connects.`
@@ -115,16 +164,16 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
       // Transient network error -- next poll tick retries, nothing to
       // escalate over a single missed check.
     }
-  }, [sessionId, restart, sendAutoFix]);
+  }, [sessionId, hasMessages, restart, autoFix]);
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !hasMessages) return;
     poll();
     pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [sessionId, poll]);
+  }, [sessionId, hasMessages, poll]);
 
   return { state, autoFixing, manualRestart: restart, refresh: poll };
 }

@@ -396,7 +396,7 @@ function DirectChatSession({
   }
 
   return (
-    <AutoFixSendProvider send={message => onSend(message)}>
+    <AutoFixSendProvider send={message => onSend(message)} isBusy={isBusy} hasMessages={messages.length > 0}>
     <div className={`flex flex-col h-full ${className}`}>
       {headerContent}
       <div className="flex-1 h-0 flex flex-col relative">
