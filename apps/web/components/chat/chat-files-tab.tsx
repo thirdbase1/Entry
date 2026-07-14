@@ -14,6 +14,19 @@
  * editing + save via PUT /api/chats/[sessionId]/files. The eve-default
  * path stays read-only -- same reason it was already read-only for
  * viewing before this change.
+ *
+ * FIXED (2026-07-15, real confirmed bug -- "the file tree is not
+ * properly connected to show the sandbox files"): this only ever fetched
+ * once, on mount. The sandbox itself was always the right one (same
+ * `direct-chat-${chatId}` handle the bash/browser_use tools use --
+ * verified in lib/direct-chat/sandbox.ts), the tab was just showing a
+ * frozen snapshot from whenever it happened to first open -- any file the
+ * agent created or edited afterward while this tab stayed open was
+ * invisible until the user remembered to click Refresh by hand. Now
+ * polls on the same cadence as the preview status (while the tree view is
+ * showing, not the file-content editor -- no point refetching the whole
+ * tree while someone's actively reading/editing one open file), so it
+ * actually tracks the live sandbox instead of a snapshot of it.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { CodeEditor } from './code-editor';
@@ -111,6 +124,16 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Keep the tree live while it's actually being looked at -- only while
+  // showing the list itself, not while a single file's content is open in
+  // the editor (openFile !== null), so an in-progress edit never gets
+  // clobbered by a background refetch.
+  useEffect(() => {
+    if (openFile) return;
+    const interval = setInterval(refresh, 4000);
+    return () => clearInterval(interval);
+  }, [refresh, openFile]);
 
   const openFileContent = useCallback(
     async (path: string) => {
