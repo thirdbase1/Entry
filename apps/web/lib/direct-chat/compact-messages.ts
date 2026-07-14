@@ -126,6 +126,11 @@ function flattenMessageText(m: UIMessage): string {
 export interface CompactionResult {
   messages: UIMessage[];
   wasCompacted: boolean;
+  /** Set only when `wasCompacted` is true. The caller (route.ts) folds
+   *  this into `streamText`'s `instructions` param alongside the main
+   *  persona system prompt -- see below for why this is no longer a fake
+   *  `role: 'system'` entry spliced into the returned `messages` array. */
+  summaryText?: string;
 }
 
 /**
@@ -174,18 +179,21 @@ export async function compactMessagesIfNeeded(uiMessages: UIMessage[], model: La
     return { messages: uiMessages, wasCompacted: false };
   }
 
-  const summaryMessage: UIMessage = {
-    id: `compacted-summary-${Date.now()}`,
-    role: 'system',
-    parts: [
-      {
-        type: 'text',
-        text:
-          `[Earlier conversation summary -- ${olderMessages.length} messages compacted to stay within the model's ` +
-          `context window. This replaces the raw messages below; trust it as accurate history.]\n\n${summaryText}`,
-      },
-    ],
-  } as UIMessage;
+  // Fixed (2026-07-14, real production crash): this used to be returned
+  // as an extra `role: 'system'` UIMessage prepended into `messages`, which
+  // -- once converted and combined with the main persona system prompt
+  // that route.ts separately used to splice into the same array the same
+  // way -- is exactly what the AI SDK's own `messages`/`prompt` validation
+  // rejects by default (confirmed in node_modules/ai/dist/index.js:
+  // "System messages are not allowed in the prompt or messages fields.
+  // Use the instructions option instead."). Returning the plain summary
+  // text instead lets route.ts fold it into `instructions` (which
+  // explicitly supports an array of SystemModelMessage) alongside the
+  // persona prompt, so a long-enough session to actually trigger
+  // compaction no longer crashes every turn afterward.
+  const compactionNote =
+    `[Earlier conversation summary -- ${olderMessages.length} messages compacted to stay within the model's ` +
+    `context window. This replaces the raw messages below; trust it as accurate history.]\n\n${summaryText}`;
 
-  return { messages: [summaryMessage, ...recentMessages], wasCompacted: true };
+  return { messages: recentMessages, wasCompacted: true, summaryText: compactionNote };
 }

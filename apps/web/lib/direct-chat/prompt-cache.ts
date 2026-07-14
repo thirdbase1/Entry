@@ -21,7 +21,7 @@
  * turn (Gateway OpenAI/Google/DeepSeek/xAI picks and non-Anthropic BYOK
  * keys just ignore an `anthropic` key they don't recognize).
  */
-import type { ModelMessage, Tool, ToolSet } from 'ai';
+import type { ModelMessage, SystemModelMessage, Tool, ToolSet } from 'ai';
 
 const CACHE_MARKER = { anthropic: { cacheControl: { type: 'ephemeral' as const, ttl: '5m' as const } } };
 
@@ -40,9 +40,9 @@ export function applyToolCacheBreakpoint<T extends ToolSet>(tools: T): T {
   return result as T;
 }
 
-/** A system message carrying a cache breakpoint -- use in place of streamText's plain `system` string param, which has no providerOptions slot to attach caching to. */
-export function buildCachedSystemMessage(systemPrompt: string): ModelMessage {
-  return { role: 'system', content: systemPrompt, providerOptions: CACHE_MARKER } as ModelMessage;
+/** A system message carrying a cache breakpoint -- pass as streamText's `instructions` param (which accepts a SystemModelMessage precisely for this case), NOT spliced into `messages` -- see route.ts's own comment for the real crash that caused (the SDK rejects any `role: 'system'` entry inside `messages`/`prompt` by default). Typed as `SystemModelMessage` (not the wider `ModelMessage` union) specifically so this is directly assignable to `instructions` without a cast. */
+export function buildCachedSystemMessage(systemPrompt: string): SystemModelMessage {
+  return { role: 'system', content: systemPrompt, providerOptions: CACHE_MARKER };
 }
 
 /** Cache breakpoints on the last assistant AND last user message -- lets the growing conversation history itself get cached incrementally turn over turn, which matters most for exactly the long-running, many-tool-call sessions this was hardest to keep fast on. */

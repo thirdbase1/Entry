@@ -19,12 +19,15 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
 
   const [copied, setCopied] = useState(false);
   const [sharing, setSharing] = useState(false);
-  // Always open by default (2026-07-11, explicit user request: "it
-  // should always be available as the whole site open") -- previously
-  // required clicking "Preview" every single time a chat was opened.
-  // User can still close it manually if they want it out of the way for
-  // that session; it just no longer starts hidden.
-  const [previewOpen, setPreviewOpen] = useState(true);
+  // Reverted (2026-07-14, explicit user request: "that preview panel
+  // should only open when I touch it") -- the 2026-07-11 change above
+  // made it default open on every chat load, which the user has now
+  // explicitly asked to undo: it should stay closed until they actually
+  // click "Preview" themselves. The auto-fix behavior (usePreviewAutoFix
+  // below) is unaffected either way -- it already runs regardless of
+  // whether this panel is open, so a broken preview still gets noticed
+  // and escalated to the agent even while this stays closed by default.
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   // Always running (2026-07-11, explicit user request: "not when I click
   // preview should it be stating [the error]") -- mounted here rather than

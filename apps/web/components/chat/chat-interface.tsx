@@ -106,6 +106,24 @@ export function ChatInterface({
   const isOnline = useOnlineStatus();
   const [isRecovering, setIsRecovering] = useState(false);
   const hasEverDroppedRef = useRef(false);
+  // Live turn state, reported up from ChatInterfaceInner (which has the
+  // only view of the actually-live agent.data.messages/agent.status) so
+  // the recovery effect below can tell "genuinely stuck" apart from
+  // "conversation just grew normally" -- see that effect's own comment
+  // for the bug this fixes. A ref (not state) on purpose: this updates on
+  // every message/status change during normal streaming, and re-running
+  // the recovery effect (which adds/removes window listeners) on every
+  // one of those would be wasteful for no benefit -- the effect only
+  // needs the CURRENT value at the moment it actually checks, not to
+  // re-subscribe every time it changes.
+  const turnStateRef = useRef<{ isBusy: boolean; lastRole: string | undefined; messageCount: number }>({
+    isBusy: false,
+    lastRole: undefined,
+    messageCount: 0,
+  });
+  const handleTurnStateChange = useCallback((s: { isBusy: boolean; lastRole: string | undefined; messageCount: number }) => {
+    turnStateRef.current = s;
+  }, []);
 
   // Model selection lives here (not in ChatInput) so we can decide, before
   // ever mounting an eve session or a direct-model chat, which of the two
@@ -164,36 +182,40 @@ export function ChatInterface({
     };
   }, [sessionId]);
 
-  // Belt-and-suspenders recovery for eve's own path, mirroring the fix
-  // already shipped for the direct/BYOK path (direct-chat-interface.tsx).
-  // eve/react's client DOES already auto-reconnect a broken mid-stream
-  // connection on its own (up to `maxReconnectAttempts`, resuming from the
-  // last event index rather than restarting -- see node_modules/eve/dist/
-  // src/client/open-stream.js) so brief blips are already handled with no
-  // app code needed. But confirmed by reading eve-agent-store.js directly:
-  // once reconnect attempts are EXHAUSTED, the store's send() loop exits
-  // its `for await` normally (the generator just returns instead of
-  // throwing) and sets status to `'ready'` -- NOT `'error'` -- meaning a
-  // turn truncated by a long-enough outage looks IDENTICAL to a cleanly
-  // finished one from the outside. Status alone can't detect that case, so
-  // this compares actual persisted event counts instead: whenever the tab
-  // regains focus/network, refetch the server's authoritative snapshot,
-  // and if it has strictly more events than what's currently rendered,
-  // force a full remount of ChatInterfaceInner with the fresh snapshot
-  // (bumping `recoveryKey`, since useEveAgent's initialEvents/initialSession
-  // are only ever read once at construction -- there's no public API to
-  // hot-patch an existing instance's projected state).
+  // Reworked 2026-07-14: this used to poll every 3s FOREVER, unconditionally
+  // comparing the persisted server event count against `initial.events` --
+  // a snapshot frozen at mount and NEVER updated by normal live streaming
+  // (only by this same recovery path). That meant persisted count grew
+  // past it after literally every single completed turn, so every 3s tick
+  // saw "persisted > current", showed "Back online — caught up" and force-
+  // remounted the whole live session (bumping `recoveryKey`) -- with a
+  // perfectly healthy connection. Confirmed as the real cause of two
+  // reported bugs at once: the "reconnecting/back online" banner flapping
+  // constantly, AND in-flight AI replies dying mid-stream, since the
+  // remount tore down the live eve session out from under it every few
+  // seconds. Fixed by only ever checking when the turn actually looks
+  // stuck -- `turnStateRef` (see above) reports the LIVE current state, not
+  // a stale mount-time snapshot: not busy, and the last message is still
+  // the user's with no reply, which is exactly what "eve's own reconnect
+  // exhausted its attempts and gave up silently" looks like (confirmed in
+  // eve-agent-store.js: exhausted reconnects exit normally to status
+  // 'ready', not 'error' -- status alone can't detect it). No more
+  // permanent poll: eve/react's own client already auto-reconnects brief
+  // blips on its own (up to `maxReconnectAttempts`, resuming from the last
+  // event index -- see node_modules/eve/dist/src/client/open-stream.js);
+  // this effect is only the fallback for outages long enough to exhaust
+  // even that, and it now only ever acts when there's real evidence of it.
   useEffect(() => {
     const activeId = sessionId ?? liveSessionId;
     if (!activeId) return;
-    // `showRecovering` distinguishes the two explicit triggers (the user
-    // actually just came back -- online/visible) from the routine 3s
-    // background poll below, which fires constantly and would otherwise
-    // make the banner flicker on every tick even when the connection was
-    // never actually lost.
-    const tryRecover = (showRecovering: boolean) => {
+    const looksStuck = () => {
+      const s = turnStateRef.current;
+      return s.messageCount > 0 && !s.isBusy && s.lastRole === 'user';
+    };
+    const tryRecover = () => {
+      if (!looksStuck()) return;
       void (async () => {
-        if (showRecovering) setIsRecovering(true);
+        setIsRecovering(true);
         try {
           const snap = await fetchSnapshot(activeId);
           const persistedEvents = Array.isArray(snap?.events) ? (snap!.events as unknown[]) : null;
@@ -202,10 +224,8 @@ export function ChatInterface({
           if (persistedEvents.length > currentEvents.length) {
             setInitial(snap ?? {});
             setRecoveryKey(k => k + 1);
-            if (hasEverDroppedRef.current || showRecovering) {
-              hasEverDroppedRef.current = true;
-              toast('Back online — caught up on what you missed');
-            }
+            hasEverDroppedRef.current = true;
+            toast('Back online — caught up on what you missed');
             // Mirror onFinish's own first-turn navigation: if the client's
             // onFinish never got to run (the stream broke before it could
             // fire), the URL would otherwise be stuck on the "new chat"
@@ -217,30 +237,27 @@ export function ChatInterface({
             }
           }
         } finally {
-          if (showRecovering) setIsRecovering(false);
+          setIsRecovering(false);
         }
       })();
     };
-    const onOnline = () => tryRecover(true);
+    const onOnline = () => tryRecover();
     const onVisibility = () => {
-      if (document.visibilityState === 'visible') tryRecover(true);
+      if (document.visibilityState === 'visible') tryRecover();
     };
     window.addEventListener('online', onOnline);
     document.addEventListener('visibilitychange', onVisibility);
-    // Belt-and-suspenders third trigger, independent of the browser
-    // actually firing 'online'/'visibilitychange' at all -- see the same
-    // comment in direct-chat-interface.tsx's identical recovery effect
-    // for why relying solely on those two DOM events isn't enough. Also
-    // fire once immediately on mount (not just after the first interval
-    // tick) -- this is what makes a plain page reload land on an
-    // up-to-date answer fast instead of sitting on stale/incomplete
-    // events for up to 3s first every single time.
-    tryRecover(true);
-    const pollId = window.setInterval(() => tryRecover(false), 3000);
+    // Also check once on mount -- covers a plain page reload landing
+    // mid-turn (status resets to 'ready' on every fresh mount regardless
+    // of whether the server is still generating, so `looksStuck()` above
+    // is what actually detects that case here, not any online/visibility
+    // event). No interval: `looksStuck()` genuinely won't flip true again
+    // on its own once initial paint settles unless a real drop happens,
+    // and the online/visibility listeners already cover future ones.
+    tryRecover();
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
-      window.clearInterval(pollId);
     };
   }, [sessionId, liveSessionId, initial, router, createdRef]);
 
@@ -378,6 +395,7 @@ export function ChatInterface({
       onSessionIdKnown={setLiveSessionId}
       isOnline={isOnline}
       isRecovering={isRecovering}
+      onTurnStateChange={handleTurnStateChange}
     />
   );
 }
@@ -402,6 +420,7 @@ function ChatInterfaceInner({
   onSessionIdKnown,
   isOnline,
   isRecovering,
+  onTurnStateChange,
 }: ChatInterfaceProps & {
   reasoningEffort: import('./chat-config').ReasoningEffort;
   setReasoningEffort: (level: import('./chat-config').ReasoningEffort) => void;
@@ -424,6 +443,10 @@ function ChatInterfaceInner({
    *  need to reflect. */
   isOnline: boolean;
   isRecovering: boolean;
+  /** Reports the LIVE current turn state up to the parent's recovery
+   *  effect on every change -- see that effect's own comment for why this
+   *  replaced comparing against a stale mount-time snapshot. */
+  onTurnStateChange: (state: { isBusy: boolean; lastRole: string | undefined; messageCount: number }) => void;
 }) {
   // Turn-level failure banner. Without this, a turn that ends in
   // status "error" (e.g. run_model throwing because a BYOK provider
@@ -506,6 +529,17 @@ function ChatInterfaceInner({
   // with no assistant reply after it is what that situation looks like
   // from a fresh mount, independent of `agent.status`.
   const pendingTurn = !isBusy && messages.length > 0 && messages[messages.length - 1]?.role === 'user';
+
+  // Report live turn state up to the parent's recovery effect -- see its
+  // own comment for why this replaced a stale mount-time snapshot
+  // comparison. Deliberately keyed on isBusy/length/role only (not message
+  // content), so this doesn't fire on every streamed token, only on the
+  // transitions that actually matter for "does this look stuck".
+  const lastRole = messages[messages.length - 1]?.role;
+  useEffect(() => {
+    onTurnStateChange({ isBusy, lastRole, messageCount: messages.length });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBusy, messages.length, lastRole]);
   // Covers the other silent-drop shape `pendingTurn` above can't: a reply
   // that had already started streaming before the connection broke (last
   // message is already an assistant one, so `pendingTurn`'s user-message

@@ -253,18 +253,45 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // never touched. See compact-messages.ts's file comment for the real
   // gap this closes (this path had zero context-window protection
   // before, unlike eve's root agent's built-in `compaction` config).
-  const modelMessages = compactMessagesIfNeeded(uiMessages, model, modelId).then(async ({ messages, wasCompacted }) => {
+  // Fixed (2026-07-14, real production crash): the persona system prompt
+  // AND the compaction summary below used to each be prepended INTO this
+  // array as their own `role: 'system'` message. That's what this SDK's
+  // `messages`/`prompt` validation flatly rejects by default -- confirmed
+  // directly from node_modules/ai/dist/index.js: `if
+  // (!allowSystemInMessages && messages.some(m => m.role === 'system'))
+  // throw "System messages are not allowed in the prompt or messages
+  // fields. Use the instructions option instead."` -- and confirmed as a
+  // real live crash (AI_InvalidPromptError on every single turn for at
+  // least one BYOK model, and would have resurfaced separately the first
+  // time any chat got long enough to trigger compact-messages.ts's own
+  // summary injection). The SDK's actual documented mechanism for a
+  // system prompt that still needs providerOptions (cache_control
+  // included) is the separate `instructions` param on streamText, which
+  // explicitly accepts a SystemModelMessage or array of them for exactly
+  // this case -- see node_modules/ai/dist/index.d.ts's own comment: "It
+  // can be a string, or, if you need to pass additional provider options
+  // (e.g. for caching), a SystemModelMessage." Both the persona prompt and
+  // the (optional) compaction summary are combined into `instructions`
+  // below instead of ever being spliced into `messages`.
+  const compactionResult = compactMessagesIfNeeded(uiMessages, model, modelId);
+  const modelMessages = compactionResult.then(async ({ messages, wasCompacted }) => {
     if (wasCompacted) {
       console.log('[direct chat] compacted history before model call', { chatId, modelId, originalCount: uiMessages.length, sentCount: messages.length });
     }
-    // Cache breakpoints (2026-07-14): the system prompt gets its own
-    // message here (a plain `system:` string param on streamText has no
-    // providerOptions slot to attach cache_control to) plus a breakpoint
-    // on the last user+assistant turn, so the growing conversation history
-    // itself gets cached incrementally as the chat gets longer -- see
-    // prompt-cache.ts's file comment for the full "why".
+    // Cache breakpoint on the last user+assistant turn -- so the growing
+    // conversation history itself gets cached incrementally as the chat
+    // gets longer -- see prompt-cache.ts's file comment for the full "why".
     const converted = await convertToModelMessages(messages);
-    return applyConversationCacheControl([buildCachedSystemMessage(SYSTEM_PROMPT), ...converted]);
+    return applyConversationCacheControl(converted);
+  });
+  const instructions = compactionResult.then(({ summaryText }) => {
+    const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
+    if (!summaryText) return systemMessage;
+    // Plain string is fine for the summary -- it's regenerated (and its
+    // text changes) each time compaction re-triggers, so there's no
+    // stable prefix worth a cache_control breakpoint here the way there
+    // is for the persona prompt above.
+    return [systemMessage, { role: 'system' as const, content: summaryText }];
   });
 
   // Only `choose` and `web_crawl` are always-on (not user-toggleable in
@@ -365,6 +392,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const result = streamText({
     model,
     stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
+    // See modelMessages' own comment above for why this (persona prompt +
+    // optional compaction summary) moved here instead of being spliced
+    // into `messages` as fake `role: 'system'` entries -- this is the
+    // SDK's actual supported slot for a system prompt that also needs a
+    // providerOptions/cache_control attachment.
+    instructions: await instructions,
     messages: await modelMessages,
     // Anthropic-family models need extended thinking explicitly turned on
     // to produce reasoning tokens at all (unlike e.g. DeepSeek-R1/o-series,
