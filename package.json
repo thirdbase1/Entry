@@ -13,7 +13,7 @@
     "build": "npm run db:deploy && cd apps/web && next build --webpack",
     "start": "next start apps/web",
     "typecheck": "tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p apps/agent/tsconfig.json",
-    "postinstall": "(cd packages/db && node ../../node_modules/prisma/build/index.js generate) && node scripts/patch-engines.js",
+    "postinstall": "(cd packages/db && node ../../node_modules/prisma/build/index.js generate) && node scripts/patch-engines.js && patch-package",
     "db:migrate": "(cd packages/db && node ../../node_modules/prisma/build/index.js migrate dev)",
     "db:deploy": "node packages/db/scripts/run-production-migrate.js",
     "db:studio": "(cd packages/db && node ../../node_modules/prisma/build/index.js studio)"
@@ -31,5 +31,8 @@
     "esbuild@0.28.1": true,
     "prisma@7.8.0": true,
     "sharp@0.34.5": true
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
   }
 }
