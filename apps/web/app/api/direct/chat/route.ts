@@ -78,6 +78,7 @@ import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { isGatewayModelReasoningCapable, isByokModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { compactMessagesIfNeeded } from '@/lib/direct-chat/compact-messages';
+import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
 import type { ToolExecCtx } from '@entry/agent/tool-impls/types';
 
@@ -255,11 +256,18 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // never touched. See compact-messages.ts's file comment for the real
   // gap this closes (this path had zero context-window protection
   // before, unlike eve's root agent's built-in `compaction` config).
-  const modelMessages = compactMessagesIfNeeded(uiMessages, model, modelId).then(({ messages, wasCompacted }) => {
+  const modelMessages = compactMessagesIfNeeded(uiMessages, model, modelId).then(async ({ messages, wasCompacted }) => {
     if (wasCompacted) {
       console.log('[direct chat] compacted history before model call', { chatId, modelId, originalCount: uiMessages.length, sentCount: messages.length });
     }
-    return convertToModelMessages(messages);
+    // Cache breakpoints (2026-07-14): the system prompt gets its own
+    // message here (a plain `system:` string param on streamText has no
+    // providerOptions slot to attach cache_control to) plus a breakpoint
+    // on the last user+assistant turn, so the growing conversation history
+    // itself gets cached incrementally as the chat gets longer -- see
+    // prompt-cache.ts's file comment for the full "why".
+    const converted = await convertToModelMessages(messages);
+    return applyConversationCacheControl([buildCachedSystemMessage(SYSTEM_PROMPT), ...converted]);
   });
 
   // Only `choose` and `web_crawl` are always-on (not user-toggleable in
@@ -369,7 +377,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   const result = streamText({
     model,
-    system: SYSTEM_PROMPT,
     stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
     messages: await modelMessages,
     // Anthropic-family models need extended thinking explicitly turned on
@@ -398,7 +405,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
       logError({ source: 'direct-chat-streamtext', error, userId, chatId, context: { providerLabel, modelId } });
     },
-    tools: activeTools,
+    tools: applyToolCacheBreakpoint(activeTools),
     // Fixed (2026-07-11, explicit user report: "streaming is not smooth at
     // all, looks like it's not streaming"): streamText had zero output
     // transform, so the UI's update cadence was entirely at the mercy of
