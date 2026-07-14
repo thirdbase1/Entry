@@ -221,7 +221,24 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         },
       });
     } else {
-      await prisma.eveChatSession.update({ where: { id: chatId, userId }, data: { events: uiMessages as any } });
+      // FIXED (2026-07-15, real confirmed bug -- "why if I select another
+      // model to work and when I reload page I see that it has already
+      // automatically switched to [the chat's original model]"): this
+      // used to only ever write byokModelId/requestedModel once, at
+      // creation, in the `if (!existing)` branch above -- every later
+      // turn only updated `events`. Switching models mid-thread already
+      // worked live (see chat-interface.tsx's own 2026-07-11 fix for
+      // "switch model, doesn't change, still uses the model I first
+      // used") but the DB row itself never learned about it, so the very
+      // next full page reload re-seeded the picker from that frozen,
+      // creation-time value and silently reverted every later switch.
+      // Now the row's stored model always reflects whichever one was
+      // actually used for the MOST RECENT turn, matching what
+      // chat-interface.tsx's seeding effect reads back on reload.
+      await prisma.eveChatSession.update({
+        where: { id: chatId, userId },
+        data: { events: uiMessages as any, byokModelId: byokModelId ?? null, requestedModel: byokModelId ? null : (requestedModel ?? null) },
+      });
     }
   })().catch(err => {
     console.error('[direct chat] pre-stream save failed', chatId, err);
@@ -424,6 +441,56 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
       logError({ source: 'direct-chat-streamtext', error, userId, chatId, context: { providerLabel, modelId } });
+    },
+    // Added 2026-07-15 (explicit user report: "after one tool call model
+    // still failed so log everything") — onError/turn-error above only
+    // ever fire for a hard thrown error, which told us NOTHING about the
+    // much more common silent case: the model completes a tool call step
+    // cleanly (no error at all) and then either stops on its own
+    // (finishReason 'stop'/'length'/'content-filter' when the user
+    // expected it to keep going) or the NEXT step's provider call fails
+    // in a way that got swallowed somewhere upstream of onError. Every
+    // single step of every turn now logs its index, finish reason, which
+    // tool(s) were called, whether each tool call actually produced a
+    // result vs errored, and token usage -- so a "stopped after one tool
+    // call" report is a five-second log lookup instead of a guess.
+    onStepFinish(step) {
+      const { stepNumber, finishReason, rawFinishReason, toolCalls, toolResults, usage, text, warnings, content } = step;
+      const toolErrors = content
+        .filter((part): part is Extract<typeof part, { type: 'tool-error' }> => part.type === 'tool-error')
+        .map(part => ({ tool: part.toolName, error: part.error instanceof Error ? part.error.message : String(part.error) }));
+      console.log('[direct chat] step finished', {
+        chatId,
+        providerLabel,
+        modelId,
+        stepNumber,
+        finishReason,
+        rawFinishReason,
+        toolCallCount: toolCalls.length,
+        toolNames: toolCalls.map(c => c.toolName),
+        toolResultCount: toolResults.length,
+        toolErrors,
+        textLength: text.length,
+        usage,
+        warnings,
+      });
+      // A step that finished for any reason OTHER than actually making
+      // more tool calls or a normal stop, OR a tool call that came back
+      // as an actual error, is exactly the "stopped after one tool call"
+      // case the user is describing -- flag it loudly instead of letting
+      // it blend into the normal per-step noise.
+      if ((finishReason && finishReason !== 'tool-calls' && finishReason !== 'stop') || toolErrors.length > 0) {
+        console.warn('[direct chat] step finished with unusual reason or tool error', {
+          chatId,
+          providerLabel,
+          modelId,
+          stepNumber,
+          finishReason,
+          rawFinishReason,
+          toolCallCount: toolCalls.length,
+          toolErrors,
+        });
+      }
     },
     tools: applyToolCacheBreakpoint(activeTools),
     // Fixed (2026-07-11, explicit user report: "streaming is not smooth at
