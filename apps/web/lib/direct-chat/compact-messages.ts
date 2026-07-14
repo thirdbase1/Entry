@@ -12,7 +12,7 @@
  * sent the client's full raw message history to the model, every single
  * turn, with zero token-budget awareness at all. Confirmed real
  * consequence for any long agentic session (many tool calls, each with a
- * sizeable output -- full bash stdout, doc_compose markdown, browser
+ * sizeable output -- full bash stdout, browser
  * screenshots) on this path: total tokens eventually exceed the resolved
  * model's context window, and depending on the provider that means either
  * a hard "context length exceeded" error (matches "runs into issues"

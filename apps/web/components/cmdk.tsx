@@ -2,7 +2,7 @@
 
 /**
  * Ported from components/cmdk/cmdk.tsx + cmdk.css.ts — the ⌘K command
- * palette: search across chats/docs/files, plus quick actions
+ * palette: search across chats/files, plus quick actions
  * (start a new chat with typed text, "New Chat", "Open Library").
  *
  * Adaptations from the original:
@@ -52,20 +52,11 @@ function dayBucket(timestamp: number): 'Today' | 'Yesterday' | 'This Week' | 'Th
 
 function itemLabel(item: AllItem): string {
   if (item.type === 'chat') return item.title ?? 'Untitled chat';
-  if (item.type === 'doc') return item.title;
   return item.fileName;
 }
 
 function itemIcon(item: AllItem): React.ReactNode {
   if (item.type === 'chat') return <ChatIcon className="w-4 h-4" />;
-  if (item.type === 'doc') {
-    return (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-        <path d="M14 2v6h6" />
-      </svg>
-    );
-  }
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
@@ -76,7 +67,7 @@ function itemIcon(item: AllItem): React.ReactNode {
 
 export function Cmdk({ className }: { className?: string }) {
   const router = useRouter();
-  const { chats, docs, files } = useLibraryStore();
+  const { chats, files } = useLibraryStore();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
@@ -104,11 +95,11 @@ export function Cmdk({ className }: { className?: string }) {
 
   const libraryItems: PaletteItem[] = useMemo(() => {
     const lower = search.toLowerCase();
-    const all: AllItem[] = [...chats, ...docs, ...files];
+    const all: AllItem[] = [...chats, ...files];
     return all
       .filter(item => (lower ? itemLabel(item).toLowerCase().includes(lower) : true))
       .map(item => {
-        const id = item.type === 'chat' ? item.sessionId : item.type === 'doc' ? item.docId : item.fileId;
+        const id = item.type === 'chat' ? item.sessionId : item.fileId;
         const path = item.type === 'chat' ? `/chats/${id}` : `/library/${id}`;
         return {
           key: id,
@@ -123,7 +114,7 @@ export function Cmdk({ className }: { className?: string }) {
         };
       })
       .sort((a, b) => b.timestamp - a.timestamp);
-  }, [chats, docs, files, search, router]);
+  }, [chats, files, search, router]);
 
   const actionItems: PaletteItem[] = useMemo(() => {
     const actions: PaletteItem[] = [];
@@ -213,7 +204,7 @@ export function Cmdk({ className }: { className?: string }) {
                 ref={inputRef}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                placeholder="Search chats, docs, files…"
+                placeholder="Search chats, files…"
                 className="h-14 flex-1 bg-transparent outline-none text-base text-foreground placeholder:text-muted-foreground"
                 onKeyDown={e => {
                   if (e.key === 'ArrowDown') {

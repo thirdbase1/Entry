@@ -99,8 +99,6 @@ export function useReasoningEffort() {
 
 export const configurableTools = [
   { label: 'Code Artifact', value: 'code_artifact' },
-  { label: 'Make It Real', value: 'make_it_real' },
-  { label: 'Doc Compose', value: 'doc_compose' },
   { label: 'Web Search', value: 'web_search' },
   { label: 'Python', value: 'python_coding' },
   { label: 'Bash', value: 'bash' },

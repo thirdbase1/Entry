@@ -22,7 +22,7 @@ const TaskAnalysisResultSchema = z.object({
   suggestedApproach: z.string(),
 });
 
-const DEFAULT_TOOLS = ['browser_use', 'web_search', 'web_fetch', 'bash', 'doc_compose', 'task_analysis'];
+const DEFAULT_TOOLS = ['browser_use', 'web_search', 'web_fetch', 'bash', 'task_analysis'];
 
 export const taskAnalysis = {
   description:

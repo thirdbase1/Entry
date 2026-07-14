@@ -16,7 +16,7 @@ export interface ToolExecCtx {
    * BYOK) model rather than the root's own default — see gateway.ts's
    * `model()` override param. When present, every tool-impl that does its
    * own internal sub-generation (task_analysis, code_artifact,
-   * python_coding, make_it_real, doc_compose) must use THIS model instead
+   * python_coding) must use THIS model instead
    * of resolving one from the Gateway catalog, so a BYOK turn never
    * touches Gateway at any depth, not just at the top level.
    */

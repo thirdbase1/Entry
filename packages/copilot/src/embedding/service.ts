@@ -1,5 +1,5 @@
 /**
- * Persistence + search for doc/file/chat embeddings, using raw SQL for the
+ * Persistence + search for file/chat embeddings, using raw SQL for the
  * pgvector `vector(1024)` columns (Prisma's generated client can't type
  * "Unsupported" columns — confirmed by reading schema.prisma directly,
  * `embedding Unsupported("vector(1024)")` — so writes/reads go through
@@ -22,8 +22,8 @@ function toVectorLiteral(embedding: number[]): string {
   return `'[${embedding.join(',')}]'::vector`;
 }
 
-type Table = 'ai_user_doc_embeddings' | 'ai_user_file_embeddings' | 'ai_user_chat_embeddings';
-type IdColumn = 'doc_id' | 'file_id' | 'session_id';
+type Table = 'ai_user_file_embeddings' | 'ai_user_chat_embeddings';
+type IdColumn = 'file_id' | 'session_id';
 
 async function embedAndStore(
   table: Table,
@@ -35,7 +35,7 @@ async function embedAndStore(
   const chunks = chunkText(content);
   if (!chunks.length) return { chunkCount: 0 };
 
-  // Clear old chunks first — a doc/file/chat update may have fewer chunks than before.
+  // Clear old chunks first — a file/chat update may have fewer chunks than before.
   await prisma.$executeRaw(
     Prisma.sql`DELETE FROM ${Prisma.raw(table)} WHERE user_id = ${userId} AND ${Prisma.raw(idColumn)} = ${targetId}`
   );
@@ -52,10 +52,6 @@ async function embedAndStore(
     }
   }
   return { chunkCount: chunks.length };
-}
-
-export async function embedDoc(userId: string, docId: string, content: string) {
-  return embedAndStore('ai_user_doc_embeddings', 'doc_id', userId, docId, content);
 }
 
 export async function embedFile(userId: string, fileId: string, fileName: string, mimeType: string, buffer: Buffer) {
@@ -93,23 +89,18 @@ export async function embedChat(userId: string, sessionId: string) {
 
 export interface SearchResult {
   targetId: string;
-  targetType: 'doc' | 'file' | 'chat';
+  targetType: 'file' | 'chat';
   chunk: number;
   content: string;
   distance: number;
 }
 
-/** Cosine-similarity search across a user's doc + file + chat embeddings. */
+/** Cosine-similarity search across a user's file + chat embeddings. */
 export async function searchEmbeddings(userId: string, query: string, topK = 5): Promise<SearchResult[]> {
   const vector = await embedQuery(query);
   const vectorLiteral = toVectorLiteral(vector);
 
-  const [docRows, fileRows, chatRows] = await Promise.all([
-    prisma.$queryRaw<{ doc_id: string; chunk: number; content: string; distance: number }[]>(
-      Prisma.sql`SELECT doc_id, chunk, content, embedding <=> ${Prisma.raw(vectorLiteral)} AS distance
-        FROM ai_user_doc_embeddings WHERE user_id = ${userId}
-        ORDER BY distance ASC LIMIT ${topK}`
-    ),
+  const [fileRows, chatRows] = await Promise.all([
     prisma.$queryRaw<{ file_id: string; chunk: number; content: string; distance: number }[]>(
       Prisma.sql`SELECT file_id, chunk, content, embedding <=> ${Prisma.raw(vectorLiteral)} AS distance
         FROM ai_user_file_embeddings WHERE user_id = ${userId}
@@ -123,7 +114,6 @@ export async function searchEmbeddings(userId: string, query: string, topK = 5):
   ]);
 
   const results: SearchResult[] = [
-    ...docRows.map(r => ({ targetId: r.doc_id, targetType: 'doc' as const, chunk: r.chunk, content: r.content, distance: r.distance })),
     ...fileRows.map(r => ({ targetId: r.file_id, targetType: 'file' as const, chunk: r.chunk, content: r.content, distance: r.distance })),
     ...chatRows.map(r => ({ targetId: r.session_id, targetType: 'chat' as const, chunk: r.chunk, content: r.content, distance: r.distance })),
   ];

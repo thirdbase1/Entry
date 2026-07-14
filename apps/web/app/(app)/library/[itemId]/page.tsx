@@ -1,8 +1,6 @@
 'use client';
 
 import { use, useEffect, useState } from 'react';
-import { DocPanel } from '@/components/doc-panel/doc-panel';
-import { ChatPanel } from '@/components/chat/chat-panel';
 
 interface FileMeta {
   fileId: string;
@@ -46,23 +44,14 @@ function FileViewer({ file }: { file: FileMeta }) {
 
 export default function LibraryItemPage({ params }: { params: Promise<{ itemId: string }> }) {
   const { itemId } = use(params);
-  const [kind, setKind] = useState<'doc' | 'file' | 'loading' | 'notfound'>('loading');
+  const [kind, setKind] = useState<'file' | 'loading' | 'notfound'>('loading');
   const [file, setFile] = useState<FileMeta | null>(null);
-  // Ported 1:1 from pages/doc-page.tsx's showChatPanel toggle: a second panel
-  // opens beside the doc, pre-scoped to it via ChatPanel's context attachment.
-  const [showChatPanel, setShowChatPanel] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setKind('loading');
-    setShowChatPanel(false);
 
     (async () => {
-      const docRes = await fetch(`/api/copilot/docs/${itemId}`);
-      if (docRes.ok) {
-        if (!cancelled) setKind('doc');
-        return;
-      }
       const fileRes = await fetch(`/api/copilot/files/${itemId}`);
       if (fileRes.ok) {
         const data = await fileRes.json();
@@ -85,20 +74,6 @@ export default function LibraryItemPage({ params }: { params: Promise<{ itemId: 
   }
   if (kind === 'notfound') {
     return <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Not found</div>;
-  }
-  if (kind === 'doc') {
-    return (
-      <>
-        <div className="flex-1 panel h-full">
-          <DocPanel docId={itemId} onOpenChat={() => setShowChatPanel(true)} />
-        </div>
-        {showChatPanel && (
-          <div className="flex-1 panel h-full">
-            <ChatPanel docId={itemId} />
-          </div>
-        )}
-      </>
-    );
   }
   return (
     <div className="flex-1 panel h-full">{file ? <FileViewer file={file} /> : null}</div>

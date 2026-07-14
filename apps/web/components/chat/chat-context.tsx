@@ -3,7 +3,7 @@
 /**
  * Ported from components/chat-context.tsx (`ContextSelectorMenu`/
  * `ContextPreview`) — the "@ mention" style context-attachment picker:
- * pick chats/docs/files from the library to ground the next message.
+ * pick chats/files from the library to ground the next message.
  *
  * Real adaptation, not cosmetic: the original resolved attached context
  * server-side via a GraphQL `copilotContext` (a persistent, named RAG
@@ -12,7 +12,7 @@
  * exist in this port. Instead this uses eve's real, documented
  * `clientContext` field on `send()` — "ephemeral client/page context for
  * the next model call only" (checked directly against
- * node_modules/eve/dist/src/client/types.d.ts) — so selecting a doc/file
+ * node_modules/eve/dist/src/client/types.d.ts) — so selecting a file
  * actually fetches its real content and threads it into that one turn as
  * a model-visible context message. Weaker than a persistent named RAG
  * context (it's resolved fresh per-send, not cached server-side across a
@@ -20,7 +20,7 @@
  *
  * Now upgraded with real semantic search: typing 2+ characters queries
  * `/api/copilot/search` (embedding/service.ts's pgvector cosine search
- * over the user's doc/file chunks) and shows ranked results above the
+ * over the user's file chunks) and shows ranked results above the
  * plain substring-filtered library list, closer to the original's
  * embedding-backed context picker. Falls back to substring filtering if
  * the search call fails or returns nothing (e.g. embeddings pipeline mid-
@@ -38,14 +38,14 @@ import { ChatIcon } from '@/components/icons/chat-icon';
 import { cn } from '@/lib/utils';
 
 export interface AttachedContext {
-  type: 'chat' | 'doc' | 'file';
+  type: 'chat' | 'file';
   id: string;
   label: string;
 }
 
 interface SearchHit {
   targetId: string;
-  targetType: 'doc' | 'file';
+  targetType: 'file';
   chunk: number;
   content: string;
   distance: number;
@@ -53,19 +53,11 @@ interface SearchHit {
 
 function itemLabel(item: AllItem): string {
   if (item.type === 'chat') return item.title ?? 'Untitled chat';
-  if (item.type === 'doc') return item.title;
   return item.fileName;
 }
 
 function itemIcon(type: AttachedContext['type']) {
   if (type === 'chat') return <ChatIcon className="w-3.5 h-3.5" />;
-  if (type === 'doc') {
-    return (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" />
-      </svg>
-    );
-  }
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M13 2v7h7" />
@@ -117,7 +109,7 @@ export function ContextSelectorMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
-  const { chats, docs, files, refresh, initialized } = useLibraryStore();
+  const { chats, files, refresh, initialized } = useLibraryStore();
   const ref = useRef<HTMLDivElement>(null);
   const { hits: searchHits, loading: searching } = useSemanticSearch(search);
 
@@ -125,10 +117,10 @@ export function ContextSelectorMenu({
     if (open && !initialized) refresh();
   }, [open, initialized, refresh]);
 
-  const allItems: AllItem[] = useMemo(() => [...chats, ...docs, ...files], [chats, docs, files]);
+  const allItems: AllItem[] = useMemo(() => [...chats, ...files], [chats, files]);
 
-  const findItem = (type: 'doc' | 'file', id: string) =>
-    allItems.find(i => (i.type === 'doc' ? i.docId === id && type === 'doc' : i.type === 'file' && i.fileId === id && type === 'file'));
+  const findItem = (type: 'file', id: string) =>
+    allItems.find(i => i.type === 'file' && i.fileId === id && type === 'file');
 
   // De-duped search hits, one row per target (best-scoring chunk).
   const dedupedHits = useMemo(() => {
@@ -147,7 +139,7 @@ export function ContextSelectorMenu({
     return allItems
       .filter(item => (lower ? itemLabel(item).toLowerCase().includes(lower) : true))
       .filter(item => {
-        const id = item.type === 'chat' ? item.sessionId : item.type === 'doc' ? item.docId : item.fileId;
+        const id = item.type === 'chat' ? item.sessionId : item.fileId;
         return !attached.some(a => a.id === id && a.type === item.type);
       })
       .slice(0, 30);
@@ -165,7 +157,7 @@ export function ContextSelectorMenu({
               autoFocus
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Search chats, docs, files…"
+              placeholder="Search chats, files…"
               className="w-full bg-transparent outline-none text-sm text-foreground placeholder:text-muted-foreground"
             />
           </div>
@@ -206,7 +198,7 @@ export function ContextSelectorMenu({
               <div className="px-3 py-4 text-xs text-muted-foreground text-center">No results</div>
             )}
             {items.map(item => {
-              const id = item.type === 'chat' ? item.sessionId : item.type === 'doc' ? item.docId : item.fileId;
+              const id = item.type === 'chat' ? item.sessionId : item.fileId;
               return (
                 <button
                   key={`${item.type}-${id}`}
@@ -282,12 +274,6 @@ export async function resolveContextForSend(attached: AttachedContext[]): Promis
   const parts = await Promise.all(
     attached.map(async ctx => {
       try {
-        if (ctx.type === 'doc') {
-          const res = await fetch(`/api/copilot/docs/${ctx.id}`);
-          if (!res.ok) return `[Referenced doc "${ctx.label}" — could not be loaded]`;
-          const data = await res.json();
-          return `[Attached doc: "${ctx.label}"]\n${data.content ?? ''}`;
-        }
         if (ctx.type === 'chat') {
           const res = await fetch(`/api/chats/${ctx.id}`);
           if (!res.ok) return `[Referenced chat "${ctx.label}" — could not be loaded]`;

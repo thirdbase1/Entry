@@ -91,8 +91,8 @@ export const agentDelegate = {
 
     if (ctx?.byokModel) {
       // BYOK turns never touch the Gateway at any depth (same policy as
-      // every other sub-generation tool — task_analysis, doc_compose,
-      // make_it_real, python_coding, code_artifact) so the platform never
+      // every other sub-generation tool — task_analysis,
+      // python_coding, code_artifact) so the platform never
       // foots a Gateway bill on a turn the user is paying for with their
       // own key. A requested provider/model can't be honored here.
       if (provider || model) {

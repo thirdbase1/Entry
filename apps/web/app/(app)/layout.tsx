@@ -3,24 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MainLayout } from '@/components/layout/main-layout';
-import { OpenDocProvider, useOpenDocContext } from '@/contexts/doc-panel-context';
-import { DocPanel } from '@/components/doc-panel/doc-panel';
 import { useAuthStore } from '@/store/auth';
-
-function AppShell({ children }: { children: React.ReactNode }) {
-  const { activeDocId, closeDoc } = useOpenDocContext();
-
-  return (
-    <MainLayout>
-      {children}
-      {activeDocId && (
-        <div className="flex-1 panel h-full">
-          <DocPanel docId={activeDocId} onClose={closeDoc} />
-        </div>
-      )}
-    </MainLayout>
-  );
-}
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -42,9 +25,5 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     return <div className="flex items-center justify-center h-dvh text-muted-foreground text-sm">Loading…</div>;
   }
 
-  return (
-    <OpenDocProvider>
-      <AppShell>{children}</AppShell>
-    </OpenDocProvider>
-  );
+  return <MainLayout>{children}</MainLayout>;
 }

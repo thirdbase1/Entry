@@ -64,12 +64,11 @@ export default defineAgent({
     // query-compiler runtime (`@prisma/client/runtime/query_compiler_fast_bg
     // .postgresql.{mjs,wasm-base64.mjs}`) -- unavoidable, it's how Prisma
     // lazily loads its engine. Any authored tool that transitively touches
-    // the DB (doc_compose.ts / make_it_real.ts, via @entry/copilot's
-    // addDoc() -> @entry/db's `prisma`) pulled this into eve's Rolldown
-    // bundler, which forced a second output chunk and failed hard with
-    // "Expected one bundled authored module" -- confirmed via two separate
-    // real Vercel build failures (first on doc_compose.ts, then on
-    // make_it_real.ts once the first bundling issue was fixed). Declaring
+    // the DB (several still do, via @entry/copilot/@entry/db's `prisma` --
+    // e.g. list_skills.ts, create_skill.ts, credential-vault.ts) pulled
+    // this into eve's Rolldown bundler, which forced a second output chunk
+    // and failed hard with "Expected one bundled authored module" --
+    // confirmed via a real Vercel build failure. Declaring
     // `@prisma/client` external here (per eve's own build.externalDependencies
     // docs: "Prefer this when a package is sensitive to bundling") keeps
     // eve from inlining it at all for every authored module, including

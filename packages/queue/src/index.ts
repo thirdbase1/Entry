@@ -24,7 +24,6 @@ import { send, handleCallback } from '@vercel/queue';
 export enum QueueTopic {
   NIGHTLY_JOB = 'nightly',
   NOTIFICATION = 'notification',
-  DOC = 'doc',
   COPILOT = 'copilot',
   INDEXER = 'indexer',
 }

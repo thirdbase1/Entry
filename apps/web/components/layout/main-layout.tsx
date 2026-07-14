@@ -1,6 +1,6 @@
 'use client';
 
-import { EditIcon, AllDocsIcon, FileIcon, PageIcon, SettingsIcon } from '@blocksuite/icons/rc';
+import { EditIcon, AllDocsIcon, FileIcon, SettingsIcon } from '@blocksuite/icons/rc';
 import { ChatIcon } from '@/components/icons/chat-icon';
 import { AnimatePresence, motion } from 'framer-motion';
 import Link from 'next/link';
@@ -13,7 +13,6 @@ import { Cmdk } from '@/components/cmdk';
 import { cn } from '@/lib/utils';
 import {
   type Chat,
-  type Doc,
   type FileItem,
   useAllItems,
   useLibraryStore,
@@ -22,7 +21,7 @@ import { useSidebarStore } from '@/store/sidebar';
 
 const filterCollected = (items: AllItem[]) =>
   items.filter(item => item?.collected);
-type AllItem = Chat | Doc | FileItem;
+type AllItem = Chat | FileItem;
 
 function ChatItem({ chat }: { chat: Chat }) {
   const pathname = usePathname();
@@ -35,22 +34,6 @@ function ChatItem({ chat }: { chat: Chat }) {
       )}>
         <ChatIcon className="w-5 h-5 text-muted-foreground flex-shrink-0" />
         <div className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-sm">{chat.title ?? 'New Chat'}</div>
-      </li>
-    </Link>
-  );
-}
-
-function DocItem({ doc }: { doc: Doc }) {
-  const pathname = usePathname();
-  const isActive = pathname === `/library/${doc.docId}`;
-  return (
-    <Link href={`/library/${doc.docId}`}>
-      <li className={cn(
-        'h-[30px] rounded flex items-center gap-3 px-2 cursor-pointer hover:bg-accent transition-colors',
-        isActive && 'bg-accent'
-      )}>
-        <PageIcon className="w-5 h-5 text-muted-foreground flex-shrink-0" />
-        <div className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-sm">{doc.title}</div>
       </li>
     </Link>
   );
@@ -160,7 +143,7 @@ function SidebarContent() {
           <ul className="flex flex-col gap-1">
             {collectedItems.map(item => (
               <motion.div
-                key={item.type === 'chat' ? item.sessionId : item.type === 'doc' ? item.docId : item.fileId}
+                key={item.type === 'chat' ? item.sessionId : item.fileId}
                 layout
                 initial={{ opacity: 0, scaleY: 0.8 }}
                 animate={{ opacity: 1, scaleY: 1 }}
@@ -169,8 +152,6 @@ function SidebarContent() {
               >
                 {item.type === 'chat' ? (
                   <ChatItem chat={item} />
-                ) : item.type === 'doc' ? (
-                  <DocItem doc={item} />
                 ) : (
                   <FileItemRow file={item} />
                 )}

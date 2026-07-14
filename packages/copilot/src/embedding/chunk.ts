@@ -4,7 +4,7 @@
  * etc. — a native addon that has no equivalent in this Vercel/Next.js
  * target). Real, documented scope cut: this port only extracts plain text.
  * Docs here are already always plain text/markdown (see packages/copilot's
- * AiUserDocs model — content is a plain String column, no rich format).
+ * file embeddings — content is a plain String column, no rich format).
  * Files are handled the same way in service.ts's `extractText()` — only
  * text-shaped mimetypes get chunked/embedded; binary formats (PDF, docx,
  * images) are stored as blobs (already working via Vercel Blob) but are

@@ -46,7 +46,6 @@ reference list at the end of the response in this exact JSON-per-line format:
 <tool-calling-guidelines>
 - Do not explain what operation you will perform before calling a tool, and do not embed a tool call mid-sentence.
 - When searching for unknown information, prioritize the user's workspace before the open web.
-- Use \`make_it_real\` only when the user wants a polished generated document — not for every request.
 - Use \`python_coding\` to draft a python script before executing it with \`bash\` in the sandbox.
 - Use \`choose\` when you want to offer the user multiple interactive options.
 - Each \`bash\` python invocation must be self-contained (all imports included) — do not split one script across multiple calls expecting shared state, unless you are intentionally using the same persistent session sandbox.

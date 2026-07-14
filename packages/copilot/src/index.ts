@@ -1,16 +1,12 @@
 /**
  * Replaces `plugins/copilot/workspace/{service,resolver}.ts` +
- * `models/copilot-user.ts`'s doc/file half (the `CopilotUserConfigModel`
- * methods operating on `AiUserDocs`/`AiUserFiles`).
+ * `models/copilot-user.ts`'s file half (the `CopilotUserConfigModel`
+ * methods operating on `AiUserFiles`).
  *
- * IMPORTANT NAMING NOTE (flagged directly to the user in chat): despite the
- * original file living under a folder called `workspace/`, this is NOT
- * Entry's multi-user collaborative workspace (there is no such resolver
- * left in this fork — confirmed by a repo-wide grep, this pivoted product
- * dropped multi-doc collab). What's actually here is the copilot's
- * per-user RAG context store: text "docs" and uploaded "files" a user adds
- * so the agent can search them for grounding. Kept the original DB
- * model/field names (`docId`, `sessionId`, etc.) for continuity.
+ * What's here is the copilot's per-user RAG context store: uploaded
+ * "files" a user adds so the agent can search them for grounding. Kept
+ * the original DB model/field names (`fileId`, `sessionId`, etc.) for
+ * continuity.
  *
  * Blob storage: the original's `CopilotStorage` abstraction (S3-shaped) is
  * replaced with **Vercel Blob** (`@vercel/blob`, confirmed real v2.5.0) —
@@ -18,27 +14,19 @@
  * `BLOB_READ_WRITE_TOKEN` (auto-provisioned by Vercel when a Blob store is
  * attached to the project).
  *
- * Embedding pipeline (`copilot.embedding.docs`/`.files` queue jobs ->
- * embedding/service.ts -> `AiUserDocEmbedding`/`AiUserFileEmbedding`
- * pgvector rows -> `searchEmbeddings()`) is now wired: every add/update
- * below enqueues a `jobQueue.add('copilot.embedding.*', ...)` call, mirroring
- * the original service's `queueDocEmbedding`/`queueFileEmbedding` call
- * sites. See embedding/jobs.ts for the consumer side.
+ * Embedding pipeline (`copilot.embedding.files` queue jobs ->
+ * embedding/service.ts -> `AiUserFileEmbedding` pgvector rows ->
+ * `searchEmbeddings()`) is wired: every add below enqueues a
+ * `jobQueue.add('copilot.embedding.files', ...)` call, mirroring the
+ * original service's `queueFileEmbedding` call site. See embedding/jobs.ts
+ * for the consumer side. (The doc/note-editor feature and its
+ * `copilot.embedding.docs` job were removed — this app no longer has a
+ * doc-editing surface.)
  */
 import { put, del } from '@vercel/blob';
 import { prisma } from '@entry/db';
 import { jobQueue } from '@entry/queue';
 export { searchEmbeddings, type SearchResult } from './embedding/service';
-
-export interface CopilotUserDoc {
-  docId: string;
-  sessionId: string;
-  title: string;
-  content: string;
-  metadata: string;
-  createdAt: Date;
-  updatedAt: Date;
-}
 
 export interface CopilotUserFile {
   userId: string;
@@ -54,70 +42,6 @@ export interface CopilotUserFile {
 export interface PaginationInput {
   first?: number;
   offset?: number;
-}
-
-// ---------------- Docs ----------------
-
-export async function addDoc(
-  userId: string,
-  sessionId: string,
-  options: { title: string; content: string; metadata?: string }
-): Promise<CopilotUserDoc> {
-  const { title, content, metadata = '' } = options;
-  const doc = await prisma.aiUserDocs.create({
-    data: { userId, sessionId, title, content, metadata },
-  });
-  await jobQueue.add('copilot.embedding.docs', { userId, docId: doc.docId }).catch(() => {});
-  return doc;
-}
-
-export async function getDoc(userId: string, docId: string): Promise<CopilotUserDoc | null> {
-  return prisma.aiUserDocs.findFirst({ where: { userId, docId } });
-}
-
-export async function updateDoc(
-  userId: string,
-  docId: string,
-  options: { title?: string; content?: string; metadata?: string }
-): Promise<CopilotUserDoc> {
-  if (!options.title && !options.content) {
-    throw new Error('At least one of title or content must be provided for doc update.');
-  }
-  const doc = await prisma.aiUserDocs.update({
-    where: { userId_docId: { userId, docId } },
-    data: {
-      title: options.title,
-      content: options.content,
-      metadata: options.metadata ?? '',
-      updatedAt: new Date(),
-    },
-  });
-  if (options.content) {
-    // only re-embed when content actually changed, mirroring the original's
-    // resolver-level call site (title-only edits don't touch embeddings)
-    await jobQueue.add('copilot.embedding.docs', { userId, docId }).catch(() => {});
-  }
-  return doc;
-}
-
-export async function removeDoc(userId: string, docId: string): Promise<boolean> {
-  const { count } = await prisma.aiUserDocs.deleteMany({ where: { userId, docId } });
-  return count > 0;
-}
-
-export async function listDocs(
-  userId: string,
-  pagination?: PaginationInput
-): Promise<[CopilotUserDoc[], number]> {
-  return Promise.all([
-    prisma.aiUserDocs.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-      skip: pagination?.offset,
-      take: pagination?.first,
-    }),
-    prisma.aiUserDocs.count({ where: { userId } }),
-  ]);
 }
 
 // ---------------- Files ----------------
@@ -227,8 +151,8 @@ export * from './chats';
 /**
  * Registers the `copilot.embedding.*` job handlers (see embedding/jobs.ts)
  * as a STATIC (not dynamic) import — this module's top-level import graph
- * is also traced by eve's agent-tool bundler (doc_compose.ts /
- * make_it_real.ts import `addDoc` from here), whose Rolldown-based bundler
+ * is also traced by eve's agent-tool bundler (several authored tools
+ * transitively import from here), whose Rolldown-based bundler
  * requires every authored tool to resolve to exactly ONE output chunk. A
  * dynamic `import()` anywhere in the reachable graph forces Rolldown to
  * split off a second chunk regardless of whether the containing function

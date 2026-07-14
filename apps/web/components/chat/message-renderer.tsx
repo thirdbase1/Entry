@@ -6,7 +6,6 @@ import { cn } from '@/lib/utils';
 import { MarkdownText } from '@/components/ui/markdown';
 import { GenericToolCard } from './renderers/generic-tool-card';
 import { CodeArtifactResult } from './renderers/code-artifact-result';
-import { DocComposeResult } from './renderers/doc-compose-result';
 import { WebSearchResult } from './renderers/web-search-result';
 import { WebCrawlResult } from './renderers/web-crawl-result';
 import { BrowserUseResult } from './renderers/browser-use-result';
@@ -16,7 +15,6 @@ import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import { ChooseResult } from './renderers/choose-result';
 import { TodoListResult } from './renderers/todo-list-result';
 import { PythonCodeResult } from './renderers/python-code-result';
-import { MakeItRealResult } from './renderers/make-it-real-result';
 import { AgentDelegateResult } from './renderers/agent-delegate-result';
 
 interface MessageRendererProps {
@@ -58,10 +56,6 @@ function ToolPart({
   switch (toolName) {
     case 'code_artifact':
       return <CodeArtifactResult part={part} />;
-    case 'doc_compose':
-      return <DocComposeResult part={part} />;
-    case 'make_it_real':
-      return <MakeItRealResult part={part} />;
     case 'web_search':
     case 'parallel_search':
       return <WebSearchResult part={part} />;

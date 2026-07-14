@@ -8,14 +8,7 @@
  * registration happens in the same process that handles the callback.
  */
 import { registerJobHandler } from '@entry/queue';
-import { prisma } from '@entry/db';
-import { embedDoc, embedFile, embedChat } from './service';
-
-registerJobHandler<{ userId: string; docId: string }>('copilot.embedding.docs', async ({ userId, docId }) => {
-  const doc = await prisma.aiUserDocs.findFirst({ where: { userId, docId } });
-  if (!doc) return; // doc may have been deleted before the job ran
-  await embedDoc(userId, docId, doc.content);
-});
+import { embedFile, embedChat } from './service';
 
 registerJobHandler<{ userId: string; fileId: string; blobId: string; fileName: string; mimeType: string }>(
   'copilot.embedding.files',

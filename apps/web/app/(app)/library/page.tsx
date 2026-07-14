@@ -3,7 +3,7 @@
 /**
  * Ported 1:1 from pages/library-dashboard.tsx.
  * Full library dashboard with:
- * - Category tabs (All / Chats / Documents / Attachments)
+ * - Category tabs (All / Chats / Attachments)
  * - Date-grouped items (Today / Yesterday / This week / This month / Older)
  * - Per-item: icon, title, favorite toggle, context menu with delete
  * - Empty state with "New Chat" CTA
@@ -15,7 +15,6 @@ import {
   FavoritedIcon,
   FavoriteIcon,
   MoreVerticalIcon,
-  PageIcon,
 } from '@blocksuite/icons/rc';
 import { useCallback, useMemo, useState } from 'react';
 import Link from 'next/link';
@@ -29,7 +28,6 @@ import { cn } from '@/lib/utils';
 import {
   type AllItem,
   type Chat,
-  type Doc,
   type FileItem,
   useAllItems,
   useLibraryStore,
@@ -38,7 +36,6 @@ import {
 const categories = [
   { label: 'All', value: 'all' },
   { label: 'Chats', value: 'chats' },
-  { label: 'Documents', value: 'docs' },
   { label: 'Attachments', value: 'files' },
 ];
 
@@ -205,42 +202,6 @@ function ChatRow({ chat }: { chat: Chat }) {
   );
 }
 
-function DocRow({ doc }: { doc: Doc }) {
-  const { toggleCollect, deleteDoc } = useLibraryStore();
-  const [deleting, setDeleting] = useState(false);
-  const router = useRouter();
-
-  const toggle = useCallback(() => toggleCollect('doc', doc.docId), [doc.docId, toggleCollect]);
-
-  const handleDelete = useCallback(async () => {
-    if (deleting) return;
-    setDeleting(true);
-    try {
-      await deleteDoc(doc.docId);
-      toast(`${doc.title} deleted`);
-    } finally {
-      setDeleting(false);
-    }
-  }, [doc.title, doc.docId, deleting, deleteDoc]);
-
-  return (
-    <div
-      className={cn('w-full h-[42px] flex items-center px-3 rounded-lg cursor-pointer hover:bg-accent transition-colors', deleting && 'opacity-50')}
-      onClick={() => router.push(`/library/${doc.docId}`)}
-    >
-      <div className="w-5 h-5 text-muted-foreground mr-3 shrink-0">
-        <PageIcon className="w-5 h-5" />
-      </div>
-      <div className="flex-1 text-sm font-medium text-foreground overflow-hidden text-ellipsis whitespace-nowrap">
-        {doc.title}
-      </div>
-      <div onClick={e => e.stopPropagation()}>
-        <FavoriteAction collected={doc.collected} onToggle={toggle} />
-      </div>
-    </div>
-  );
-}
-
 function FileRow({ file }: { file: FileItem }) {
   const { toggleCollect, deleteFile } = useLibraryStore();
   const [deleting, setDeleting] = useState(false);
@@ -275,7 +236,7 @@ function FileRow({ file }: { file: FileItem }) {
 }
 
 function LibraryDashboardInner() {
-  const { chats, docs, files, initialized } = useLibraryStore();
+  const { chats, files, initialized } = useLibraryStore();
   const allItems = useAllItems();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -286,9 +247,8 @@ function LibraryDashboardInner() {
   const filteredItems = useMemo(() => {
     if (type === 'all') return allItems;
     if (type === 'chats') return chats;
-    if (type === 'docs') return docs;
     return files;
-  }, [allItems, chats, docs, files, type]);
+  }, [allItems, chats, files, type]);
 
   const grouped = useMemo(() => groupByDate(filteredItems), [filteredItems]);
   const isEmpty = filteredItems.length === 0;
@@ -354,8 +314,6 @@ function LibraryDashboardInner() {
                     {items.map(item =>
                       item.type === 'chat' ? (
                         <ChatRow key={`chat-${item.sessionId}`} chat={item} />
-                      ) : item.type === 'doc' ? (
-                        <DocRow key={`doc-${item.docId}`} doc={item} />
                       ) : (
                         <FileRow key={`file-${item.fileId}`} file={item} />
                       )

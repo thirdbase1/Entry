@@ -87,8 +87,6 @@ import { webCrawl } from '@entry/agent/tool-impls/web_crawl';
 import { webSearch } from '@entry/agent/tool-impls/web_search';
 import { taskAnalysis } from '@entry/agent/tool-impls/task_analysis';
 import { codeArtifact } from '@entry/agent/tool-impls/code_artifact';
-import { makeItReal } from '@entry/agent/tool-impls/make_it_real';
-import { docCompose } from '@entry/agent/tool-impls/doc_compose';
 import { pythonCoding } from '@entry/agent/tool-impls/python_coding';
 import { browserUse } from '@entry/agent/tool-impls/browser_use';
 import { listFilesTool } from '@entry/agent/tool-impls/list_files';
@@ -232,8 +230,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   // Minimal structural ctx — enough for the 10 reused tool-impls. See
   // ToolExecCtx: only `session.id` / `session.auth.current.principalId`
-  // are read by most tools here (make_it_real/doc_compose for saving
-  // docs under the right user+chat; the sub-generation tools read
+  // are read by most tools here (the sub-generation tools read
   // `byokModel` so THEY also honor the resolved model instead of quietly
   // falling back to Gateway). `getSandbox` now lazily creates/resumes a
   // real Vercel Sandbox keyed by chatId (see lib/direct-chat/sandbox.ts)
@@ -296,16 +293,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       description: pythonCoding.description,
       inputSchema: pythonCoding.inputSchema,
       execute: (input: { requirements: string }) => pythonCoding.execute(input, execCtx),
-    }),
-    make_it_real: tool({
-      description: makeItReal.description,
-      inputSchema: makeItReal.inputSchema,
-      execute: (input: { instructions?: string; markdown: string }) => makeItReal.execute(input, execCtx),
-    }),
-    doc_compose: tool({
-      description: docCompose.description,
-      inputSchema: docCompose.inputSchema,
-      execute: (input: { title: string; userPrompt: string }) => docCompose.execute(input, execCtx),
     }),
     bash: tool({
       description: bash.description,

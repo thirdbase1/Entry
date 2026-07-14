@@ -3,7 +3,7 @@
 /**
  * Ported from pages/chats/renderers/generating-card.tsx +
  * generating-card.css.ts — shared "streaming preview" shell used while
- * doc_compose/make_it_real/python_coding are still producing partial
+ * python_coding is still producing partial
  * content (`input-streaming` state). The original's CSS-in-JS mask
  * gradient (fade top+bottom over the scrolling preview) is reproduced
  * with a plain Tailwind `mask-image` utility via arbitrary value, since

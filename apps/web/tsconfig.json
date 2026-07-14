@@ -49,9 +49,6 @@
       ],
       "@entry/ws": [
         "../../packages/ws/src/index.ts"
-      ],
-      "@entry/ai": [
-        "../../packages/ai/src/index.ts"
       ]
     },
     "allowJs": true,

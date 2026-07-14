@@ -15,15 +15,6 @@ export interface Chat extends GenericLibraryMetadata {
   type: 'chat';
 }
 
-export interface Doc extends GenericLibraryMetadata {
-  docId: string;
-  title: string;
-  content: string | null;
-  createdAt: string;
-  updatedAt: string;
-  type: 'doc';
-}
-
 export interface FileItem extends GenericLibraryMetadata {
   fileId: string;
   fileName: string;
@@ -35,18 +26,16 @@ export interface FileItem extends GenericLibraryMetadata {
   type: 'file';
 }
 
-export type AllItem = Chat | Doc | FileItem;
+export type AllItem = Chat | FileItem;
 
 export interface LibraryState {
   chats: Chat[];
-  docs: Doc[];
   files: FileItem[];
   loading: boolean;
   initialized: boolean;
   refresh: () => Promise<void>;
-  toggleCollect: (type: 'chat' | 'doc' | 'file', id: string) => Promise<void>;
+  toggleCollect: (type: 'chat' | 'file', id: string) => Promise<void>;
   deleteChat: (sessionId: string) => Promise<void>;
-  deleteDoc: (docId: string) => Promise<void>;
   deleteFile: (fileId: string) => Promise<void>;
 }
 
@@ -54,16 +43,14 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
   loading: false,
   initialized: false,
   chats: [],
-  docs: [],
   files: [],
   refresh: async () => {
     if (get().loading) return;
     set({ loading: true });
 
     try {
-      const [chatsRes, docsRes, filesRes] = await Promise.all([
+      const [chatsRes, filesRes] = await Promise.all([
         fetch('/api/chats').then(r => r.json()).catch(() => ({ sessions: [] })),
-        fetch('/api/copilot/docs').then(r => r.json()).catch(() => ({ docs: [] })),
         fetch('/api/copilot/files').then(r => r.json()).catch(() => ({ files: [] })),
       ]);
 
@@ -74,16 +61,6 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
         createdAt: s.createdAt,
         updatedAt: s.updatedAt,
         collected: s.collected || false,
-      }));
-
-      const docs: Doc[] = (docsRes.docs || []).map((d: any) => ({
-        type: 'doc' as const,
-        docId: d.id,
-        title: d.title || 'Untitled',
-        content: d.content || null,
-        createdAt: d.created_date,
-        updatedAt: d.updated_date,
-        collected: d.collected || false,
       }));
 
       const files: FileItem[] = (filesRes.files || []).map((f: any) => ({
@@ -98,7 +75,7 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
         collected: f.collected || false,
       }));
 
-      set({ chats, docs, files, loading: false, initialized: true });
+      set({ chats, files, loading: false, initialized: true });
     } catch (error) {
       console.error('library:refresh error', error);
       set({ loading: false, initialized: true });
@@ -109,9 +86,6 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
       if (type === 'chat') {
         return { chats: state.chats.map(c => c.sessionId === id ? { ...c, collected: !c.collected } : c) };
       }
-      if (type === 'doc') {
-        return { docs: state.docs.map(d => d.docId === id ? { ...d, collected: !d.collected } : d) };
-      }
       if (type === 'file') {
         return { files: state.files.map(f => f.fileId === id ? { ...f, collected: !f.collected } : f) };
       }
@@ -119,13 +93,6 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
     });
 
     try {
-      if (type === 'doc') {
-        await fetch(`/api/copilot/docs/${id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ collected: !get().docs.find(d => d.docId === id)?.collected }),
-        });
-      }
       if (type === 'chat') {
         await fetch(`/api/chats/${id}`, {
           method: 'PATCH',
@@ -145,14 +112,6 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
       console.error('library:deleteChat error', error);
     }
   },
-  deleteDoc: async (docId) => {
-    set(state => ({ docs: state.docs.filter(d => d.docId !== docId) }));
-    try {
-      await fetch(`/api/copilot/docs/${docId}`, { method: 'DELETE' });
-    } catch (error) {
-      console.error('library:deleteDoc error', error);
-    }
-  },
   deleteFile: async (fileId) => {
     set(state => ({ files: state.files.filter(f => f.fileId !== fileId) }));
     try {
@@ -164,15 +123,15 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
 }));
 
 export function useAllItems(): AllItem[] {
-  const { docs, chats, files } = useLibraryStore();
+  const { chats, files } = useLibraryStore();
   return useMemo(
     () =>
-      [...chats, ...docs, ...files].sort((a, b) => {
+      [...chats, ...files].sort((a, b) => {
         return (
           new Date(b.updatedAt ?? b.createdAt).getTime() -
           new Date(a.updatedAt ?? a.createdAt).getTime()
         );
       }),
-    [chats, docs, files]
+    [chats, files]
   );
 }
