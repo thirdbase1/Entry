@@ -41,6 +41,8 @@ import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { emailOTP } from 'better-auth/plugins';
 import { nextCookies } from 'better-auth/next-js';
 
+import { redisSecondaryStorage } from './redis-secondary-storage';
+
 import { prisma } from '@entry/db';
 import { sendMail } from '@entry/mail';
 import {
@@ -157,7 +159,22 @@ export const auth = betterAuth({
       enabled: true,
       maxAge: 5 * 60, // 5 minutes — avoids DB hit on every request
     },
+    // Keep sessions on Postgres exactly as before, even though
+    // `secondaryStorage` (below) is now configured — see
+    // ./redis-secondary-storage.ts's file comment for why this is needed
+    // (secondaryStorage would otherwise silently move live session storage
+    // to Redis too, a bigger behavior change than "fix rate limiting").
+    storeSessionInDatabase: true,
   },
+
+  // Real distributed rate limiting (2026-07-14 fix — see
+  // ./redis-secondary-storage.ts for the full story: Better Auth's
+  // built-in rate limiter was already enabled in production and the
+  // emailOTP plugin already had per-endpoint rules, but with no
+  // secondaryStorage configured those counters lived in each serverless
+  // invocation's own memory and never persisted between requests, so they
+  // did nothing on Vercel. This one line makes them real.
+  secondaryStorage: redisSecondaryStorage,
 
   // Plugins
   plugins: [

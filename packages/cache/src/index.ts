@@ -163,3 +163,23 @@ export const cache = lazyCacheProvider('UPSTASH_REDIS_URL', undefined, 'UPSTASH_
 export const sessionCache = lazyCacheProvider('UPSTASH_REDIS_SESSION_URL', 'UPSTASH_REDIS_URL', 'UPSTASH_REDIS_SESSION_URL');
 
 export { Redis };
+
+/**
+ * Raw ioredis client accessor, lazy like the CacheProviders above — needed
+ * by consumers that must speak a foreign wire-protocol string contract
+ * directly (e.g. packages/auth's Better Auth `secondaryStorage` adapter,
+ * whose interface is `get(key): Promise<unknown>` /
+ * `set(key, value: string, ttl?)` / `delete(key)` — NOT the JSON-wrapping
+ * CacheProvider methods, which would double-encode values Better Auth
+ * already serializes itself). Reuses the same UPSTASH_REDIS_URL connection
+ * env var as the general `cache` instance, but as its own lazy singleton
+ * so it only connects if something actually calls it.
+ */
+let rawRedisInstance: Redis | null = null;
+export function getRawRedis(): Redis {
+  if (!rawRedisInstance) {
+    const url = process.env.UPSTASH_REDIS_URL ?? process.env.REDIS_URL ?? process.env.KV_URL;
+    rawRedisInstance = redisFor(url, 'UPSTASH_REDIS_URL');
+  }
+  return rawRedisInstance;
+}
