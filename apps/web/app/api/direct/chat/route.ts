@@ -77,6 +77,7 @@ import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { isGatewayModelReasoningCapable, isByokModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
+import { compactMessagesIfNeeded } from '@/lib/direct-chat/compact-messages';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
 import type { ToolExecCtx } from '@entry/agent/tool-impls/types';
 
@@ -248,7 +249,18 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   // Runs concurrently with `preSave` above (both kicked off, neither
   // awaited yet) rather than after it — see preSave's comment.
-  const modelMessages = convertToModelMessages(uiMessages);
+  //
+  // Compaction (2026-07-14): only shortens what's sent to the model for
+  // THIS call -- `uiMessages` itself (persisted + shown in the UI) is
+  // never touched. See compact-messages.ts's file comment for the real
+  // gap this closes (this path had zero context-window protection
+  // before, unlike eve's root agent's built-in `compaction` config).
+  const modelMessages = compactMessagesIfNeeded(uiMessages, model, modelId).then(({ messages, wasCompacted }) => {
+    if (wasCompacted) {
+      console.log('[direct chat] compacted history before model call', { chatId, modelId, originalCount: uiMessages.length, sentCount: messages.length });
+    }
+    return convertToModelMessages(messages);
+  });
 
   // Only `choose` and `web_crawl` are always-on (not user-toggleable in
   // the Tools menu — see chat-config.tsx's `configurableTools`); every
