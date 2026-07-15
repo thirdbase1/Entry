@@ -58,15 +58,21 @@
  */
 import { NextRequest, after } from 'next/server';
 
-// Long autonomous agentic turns (many chained tool calls) need real runway,
-// not the Next.js/Vercel default 300s. 1800s is the current hard ceiling
-// Vercel allows at all (Pro/Enterprise "extended max duration" beta) — a
-// single HTTP function invocation cannot run longer than that on this
-// platform today, full stop; genuinely unbounded (e.g. 50+ minute)
-// autonomous runs need Vercel Workflows' pause/resume durable-execution
-// model instead of a plain function, which is a real architecture change,
-// not a config tweak (see chat about this if/when needed).
-export const maxDuration = 1800;
+// Long autonomous agentic turns (many chained tool calls) need real
+// runway, but the actual ceiling depends on the Vercel plan the project
+// is deployed on, not just the platform's theoretical max: Hobby caps
+// every Serverless Function at 300s (confirmed the hard way -- a live
+// prod deploy was rejected outright with "Builder returned invalid
+// maxDuration value ... must have a maxDuration between 1 and 300 for
+// plan hobby" when this was set to 1800). 1800s is only reachable on
+// Pro/Enterprise's "extended max duration" beta. 300 is the real,
+// current ceiling for this project; genuinely unbounded (e.g. 50+
+// minute) autonomous runs need Vercel Workflows' pause/resume
+// durable-execution model instead of a plain function regardless of
+// plan -- a real architecture change, not a config tweak (see chat
+// about this if/when needed). Bump this back up if/when the project
+// moves to Pro or above.
+export const maxDuration = 300;
 import { streamText, tool, stepCountIs, convertToModelMessages, smoothStream, type UIMessage } from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
@@ -494,7 +500,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // none of it was actually the user's fault. `consumeStream()` reads
   // the result to completion on its own regardless of who else is
   // reading it, and `after()` guarantees that keeps running for the full
-  // 1800s maxDuration budget even after this handler returns the
+  // 300s maxDuration budget (Hobby plan's ceiling) even after this handler returns the
   // Response below -- so the turn always finishes and gets saved via
   // onFinish, and a client that reconnects (see direct-chat-interface.tsx's
   // online/visibilitychange recovery fetch) picks up the completed
