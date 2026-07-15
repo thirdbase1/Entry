@@ -73,9 +73,17 @@ export default defineSandbox({
     // is indistinguishable from "the tool doesn't work" from the outside,
     // every single call. `apt-get install` these BEFORE `agent-browser
     // install` so the browser can actually launch once installed.
+    // E2B sandboxes run commands as a non-root `user` (confirmed via
+    // `whoami` against a live sandbox) -- apt-get needs the lock files
+    // under /var/lib/apt, which that user can't write, so a bare apt-get
+    // fails immediately with exit code 100 ("Could not open lock file ...
+    // Permission denied"). E2B ships passwordless sudo for exactly this
+    // (verified `sudo -n true` succeeds), unlike Vercel Sandbox where the
+    // default user already has root, so this needs sudo only on the e2b
+    // backend path.
     await sandbox.run({
       command:
-        'apt-get update -qq && apt-get install -y -qq --no-install-recommends ' +
+        'sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ' +
         'libnss3 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 libxkbcommon0 ' +
         'libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 ' +
         'libpango-1.0-0 libcairo2 fonts-liberation libappindicator3-1 xdg-utils ' +
