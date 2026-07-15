@@ -62,9 +62,10 @@ const KNOWN_SERVICES: KnownService[] = [
     hint: 'Scoped API key from Dashboard > API Keys — used to deploy to your own Pxxl workspace.',
     placeholder: 'Paste your Pxxl API key',
     tokenUrl: 'https://pxxl.app/dashboard/keys',
+    // Pxxl's actual app-icon mark (purple ringed-planet on white),
+    // pulled from their own apple-touch-icon — not the plain white
+    // navbar wordmark, which is invisible outside a dark background.
     icon: '/integration-logos/pxxl.png',
-    // Pxxl's wordmark is pure white — needs a dark tile or it's invisible.
-    iconBg: 'bg-[#0B0B10]',
   },
   {
     service: 'sendbyte',
