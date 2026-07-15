@@ -490,7 +490,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // synthetic per-word wait entirely -- pure time-to-completion win,
     // no downside for a chat UI that's already rendering tokens as they
     // arrive.
-    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 0.5 }),
+    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 0 }),
   });
 
   // Make sure the durability write has actually landed before the
