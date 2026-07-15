@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { resolveContextForSend, type AttachedContext } from './chat-context';
-import { buildConfigContext, DEFAULT_MODEL_ID, useReasoningEffort } from './chat-config';
+import { buildConfigContext, DEFAULT_MODEL_ID, useModelOptions, useReasoningEffort } from './chat-config';
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
@@ -170,6 +170,35 @@ export function ChatInterface({
   }, []);
   const [reasoningEffort, setReasoningEffort] = useReasoningEffort();
   const modelInitializedRef = useRef(false);
+
+  // Self-healing guard against a stuck-invalid model value (2026-07-15
+  // incident: a production turn was sent with requestedModel: 'auto' --
+  // not a real Gateway catalog entry, not producible by any click path in
+  // chat-config.tsx, almost certainly a stale leftover value from
+  // somewhere earlier -- yet it kept getting resent turn after turn
+  // because nothing ever validated the stored/seeded model against the
+  // REAL catalog once it loaded). Once the live model list is in, if the
+  // current non-default model doesn't match any real option, clear it
+  // back to Default instead of silently sending a bogus slug forever.
+  const modelOptions = useModelOptions();
+  const modelSanityCheckedRef = useRef(false);
+  useEffect(() => {
+    if (modelSanityCheckedRef.current) return;
+    if (modelOptions.length === 0) return; // catalog still loading
+    if (model === DEFAULT_MODEL_ID || !model) return;
+    modelSanityCheckedRef.current = true;
+    const isKnown = modelOptions.some(o => o.value === model);
+    if (isKnown) return;
+    console.warn('[model picker] clearing stale/invalid model value', model);
+    setModelState(DEFAULT_MODEL_ID);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.removeItem(LAST_MODEL_STORAGE_KEY);
+      } catch {
+        // best-effort only
+      }
+    }
+  }, [modelOptions, model]);
 
   useEffect(() => {
     if (!sessionId) return;
