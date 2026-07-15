@@ -252,8 +252,10 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
   /** PATCHes the provider connection itself (label / base URL / API key) —
    * used by the AutoSaveField instances below. Throws on a non-OK response
    * so AutoSaveField reverts the input instead of showing a false "Saved". */
+  const [compatSaving, setCompatSaving] = useState(false);
+
   const patchProvider = useCallback(
-    async (patch: { label?: string; baseUrl?: string; apiKey?: string }) => {
+    async (patch: { label?: string; compatibility?: Compatibility; baseUrl?: string; apiKey?: string }) => {
       const res = await fetch(`/api/user/byok/providers/${provider.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -264,6 +266,26 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
       onUpdate({ ...provider, ...json });
     },
     [provider, onUpdate]
+  );
+
+  // Change compatibility anytime, no need to re-create the connection
+  // (2026-07-15, explicit user request). Fires immediately on select --
+  // this isn't a free-typed AutoSaveField, there's nothing to debounce.
+  const changeCompatibility = useCallback(
+    async (next: Compatibility) => {
+      if (next === provider.compatibility) return;
+      setCompatSaving(true);
+      try {
+        await patchProvider({ compatibility: next });
+      } catch {
+        // patchProvider already leaves `provider` untouched on failure
+        // (onUpdate is only called after a successful response), so the
+        // select just needs to re-render back to the real current value.
+      } finally {
+        setCompatSaving(false);
+      }
+    },
+    [provider.compatibility, patchProvider]
   );
 
   const fetchModels = useCallback(async () => {
@@ -317,8 +339,6 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
     [provider, onUpdate]
   );
 
-  const compatLabel = COMPAT_OPTIONS.find(c => c.value === provider.compatibility)?.label ?? provider.compatibility;
-
   return (
     <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
       <div className="flex items-start justify-between gap-2">
@@ -334,7 +354,19 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
             onSave={next => patchProvider({ baseUrl: next })}
             placeholder="https://api.example.com/v1"
           />
-          <div className="text-xs text-muted-foreground">{compatLabel}</div>
+          <label className="flex flex-col gap-1">
+            <select
+              value={provider.compatibility}
+              onChange={e => changeCompatibility(e.target.value as Compatibility)}
+              disabled={compatSaving}
+              title="Change which API shape this connection speaks — switch anytime, no need to re-add the connection"
+              className="h-7 px-2 rounded-md border bg-background text-foreground text-xs outline-none focus:border-primary w-fit disabled:opacity-50"
+            >
+              {COMPAT_OPTIONS.map(c => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
+            </select>
+          </label>
 
           {!editingKey ? (
             <div className="flex items-center gap-3">
