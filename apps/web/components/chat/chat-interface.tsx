@@ -294,13 +294,32 @@ export function ChatInterface({
     // mid-turn (status resets to 'ready' on every fresh mount regardless
     // of whether the server is still generating, so `looksStuck()` above
     // is what actually detects that case here, not any online/visibility
-    // event). No interval: `looksStuck()` genuinely won't flip true again
-    // on its own once initial paint settles unless a real drop happens,
-    // and the online/visibility listeners already cover future ones.
+    // event).
+    //
+    // WIDENED (2026-07-15, explicit "improve background work reliability"
+    // request): this used to claim no interval was needed because
+    // online/visibility events "already cover future" drops -- true only
+    // for a tab that actually backgrounds or a connection that actually
+    // flaps. It does NOT cover a tab that stays open and foregrounded the
+    // whole time while the turn silently died server-side with no error
+    // event ever reaching the client (a genuinely rare but real failure
+    // mode -- e.g. the underlying provider connection died in a way eve's
+    // own reconnect gave up on silently, see the `pendingTurn`/`isBusy`
+    // comment above) -- in that shape NEITHER browser event ever fires, so
+    // without a poll this chat would simply sit stuck forever until the
+    // user happened to switch tabs or their network happened to blip.
+    // direct-chat-interface.tsx's sibling recovery effect already runs an
+    // always-on interval safely (tryRecover() is already a strict no-op
+    // whenever `looksStuck()` is false, so polling costs nothing on a
+    // healthy turn) -- mirroring that same proven-safe pattern here closes
+    // this one remaining gap instead of only reacting to events that may
+    // never come.
     tryRecover();
+    const pollId = window.setInterval(tryRecover, 5000);
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.clearInterval(pollId);
     };
   }, [sessionId, liveSessionId, initial, router, createdRef]);
 
@@ -739,13 +758,18 @@ function ChatInterfaceInner({
             </div>
           </div>
         )}
-        {isOnline && (isRecovering || pendingTurn) && !turnError && (
+        {/* 2026-07-15: dropped the "Still working on this..." pendingTurn
+            banner text per explicit feedback (felt like unbacked fluff) --
+            the actual pendingTurn/isRecovering state machine underneath is
+            UNCHANGED, so a turn that kept generating while the user was
+            away still resumes and nothing is ever lost; only the "Reconnecting…"
+            transport-level banner remains, since that one reflects a real,
+            momentary state (socket re-establishing) worth surfacing. */}
+        {isOnline && isRecovering && !pendingTurn && !turnError && (
           <div className="max-w-[832px] mx-auto w-full px-4">
             <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-pulse shrink-0" />
-              {isRecovering && !pendingTurn
-                ? 'Reconnecting…'
-                : 'Still working on this — it kept generating in the background while you were away. Catching up now…'}
+              Reconnecting…
             </div>
           </div>
         )}

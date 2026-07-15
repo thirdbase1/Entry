@@ -1,4 +1,4 @@
-import { generateObject } from 'ai';
+import { generateObject, NoObjectGeneratedError } from 'ai';
 import { z } from 'zod';
 import { put } from '@vercel/blob';
 import { model } from '../gateway.js';
@@ -131,6 +131,74 @@ function buildCommand(action: NextAction): string | null {
   }
 }
 
+/**
+ * FIXED (2026-07-15, explicit user report: "browser_use failed: No object
+ * generated: could not parse the response" after two tool calls, whole
+ * page reloaded): `generateObject` had ZERO retry/repair here -- the very
+ * first time the deciding model's raw output didn't parse as strict JSON
+ * matching NextActionSchema (extremely common with faster/cheaper BYOK
+ * models: markdown code fences around the JSON, a trailing comment, one
+ * missing required field), the AI SDK throws `NoObjectGeneratedError`
+ * straight out of this loop. `safeExecute` (see that file) stops that
+ * from tearing down the whole in-flight turn, but it still turns EVERY
+ * browser_use call into a single hard failure with no chance to
+ * self-correct -- exactly what was reported. Real fix: retry a bounded
+ * number of times, and on each retry after the first, append the model's
+ * own bad raw output (`NoObjectGeneratedError.text`) plus an explicit
+ * "that was invalid, fix it" instruction -- the same repair pattern the
+ * AI SDK docs themselves recommend for this exact error
+ * (ai-sdk.dev/docs/reference/ai-sdk-errors/ai-no-object-generated-error).
+ * Only after every retry is exhausted does this now return a normal
+ * "step failed, stopping cleanly" outcome instead of throwing -- so a
+ * genuinely uncooperative model degrades the browser_use call to "gave up
+ * gracefully with an explanation" rather than "crashed."
+ */
+async function generateNextAction(params: {
+  llmModel: Parameters<typeof generateObject>[0]['model'];
+  system: string;
+  task: string;
+  steps: StepResult[];
+  pageState: string;
+}): Promise<{ ok: true; next: NextAction } | { ok: false; reason: string }> {
+  const MAX_ATTEMPTS = 3;
+  let lastBadText = '';
+  let lastErrorMessage = '';
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const baseContent =
+      `Task: ${params.task}\n\n` +
+      `Steps so far (${params.steps.length}): ${params.steps.map((s, idx) => `${idx + 1}. ${s.description}`).join('; ') || '(none yet)'}\n\n` +
+      `Current page snapshot:\n${params.pageState}`;
+    const content =
+      attempt === 0
+        ? baseContent
+        : `${baseContent}\n\n` +
+          `IMPORTANT: your previous response could not be parsed as valid JSON matching the required schema. ` +
+          `Respond with ONLY strict, valid JSON matching the schema -- no markdown code fences, no commentary, ` +
+          `no trailing text before or after the JSON object.` +
+          (lastBadText ? `\n\nYour last (invalid) response was:\n${lastBadText.slice(0, 500)}` : '');
+    try {
+      const { object: next } = await generateObject({
+        model: params.llmModel,
+        schema: NextActionSchema,
+        system: params.system,
+        messages: [{ role: 'user', content }],
+      });
+      return { ok: true, next };
+    } catch (err) {
+      if (NoObjectGeneratedError.isInstance(err)) {
+        lastBadText = err.text ?? '';
+        lastErrorMessage = err.message;
+        continue; // retry with the repair prompt above
+      }
+      // Any other error (network, provider outage, auth) isn't something a
+      // repair prompt can fix -- no point burning retries on it.
+      lastErrorMessage = err instanceof Error ? err.message : String(err);
+      break;
+    }
+  }
+  return { ok: false, reason: lastErrorMessage || 'model did not return a valid next action' };
+}
+
 export const browserUse = {
   description:
     'Autonomously drive a real Chrome browser to complete a task: navigate, click, fill forms, ' +
@@ -184,9 +252,8 @@ export const browserUse = {
       const snap = await runCli('snapshot -i --json');
       const pageState = snap.ok ? snap.stdout.slice(0, 6000) : `(snapshot failed: ${snap.stderr.slice(0, 500)})`;
 
-      const { object: next } = await generateObject({
-        model: llmModel,
-        schema: NextActionSchema,
+      const decision = await generateNextAction({
+        llmModel,
         system:
           'You control a real web browser one action at a time via a CLI. You will be given the ' +
           'overall task, the history of steps already taken, and the current page snapshot (JSON with ' +
@@ -196,16 +263,20 @@ export const browserUse = {
           "attempts, set done=true, success=false, and explain why in summary. Prefer find_text_click " +
           "when a ref is not obviously the right target. Never invent a ref that is not present in the " +
           "snapshot's refs map.",
-        messages: [
-          {
-            role: 'user',
-            content:
-              `Task: ${task}\n\n` +
-              `Steps so far (${steps.length}): ${steps.map((s, idx) => `${idx + 1}. ${s.description}`).join('; ') || '(none yet)'}\n\n` +
-              `Current page snapshot:\n${pageState}`,
-          },
-        ],
+        task,
+        steps,
+        pageState,
       });
+
+      if (!decision.ok) {
+        // Every repair attempt failed -- stop cleanly instead of throwing
+        // (see generateNextAction's own comment). The caller/model still
+        // gets a normal, informative result instead of a crashed turn.
+        finalStatus = 'failed';
+        finalMarkdown = `Browser automation stopped: the controlling model kept returning an invalid response and could not be repaired (${decision.reason}). ${steps.length ? `Completed ${steps.length} step(s) before stopping.` : ''}`;
+        break;
+      }
+      const next = decision.next;
 
       if (next.done) {
         finalStatus = next.success === false ? 'failed' : 'finished';

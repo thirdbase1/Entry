@@ -539,14 +539,9 @@ function DirectChatSession({
           </div>
         </div>
       </div>
-      {pendingTurn && !turnError && (
-        <div className="max-w-[832px] mx-auto w-full px-4">
-          <div className="text-sm text-muted-foreground bg-muted/50 border border-border rounded-md px-3 py-2 flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-pulse shrink-0" />
-            Still working on this — it kept generating in the background while you were away. Catching up now…
-          </div>
-        </div>
-      )}
+      {/* 2026-07-15: banner text removed per feedback -- pendingTurn itself
+          (the actual "don't lose in-progress work" state) is untouched, this
+          just no longer announces it with copy that read as unbacked fluff. */}
       {turnError && (
         <div className="max-w-[832px] mx-auto w-full px-4">
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
