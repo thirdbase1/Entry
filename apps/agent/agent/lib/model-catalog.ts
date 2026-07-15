@@ -52,12 +52,31 @@ function bestContextWindow(model: CatalogModel): number {
   return Math.max(0, ...model.providers.map(p => p.contextWindowTokens ?? 0));
 }
 
+function hasTag(model: CatalogModel, tag: string): boolean {
+  return model.providers.some(p => p.tags?.includes(tag));
+}
+
 /**
- * Picks the strongest currently-available model for a provider family
- * (e.g. "anthropic", "openai", "google"), ranked by context window size,
- * then by slug (descending) as a tiebreaker — newer point releases with an
- * identical window (e.g. "claude-sonnet-4.6" vs "claude-sonnet-4") sort
- * after their predecessor and win.
+ * Picks the best currently-available model for a provider family (e.g.
+ * "anthropic", "openai", "google").
+ *
+ * CHANGED 2026-07-15, confirmed real cause of "the AI itself feels slow,
+ * not just streaming": this used to rank purely by context-window size
+ * (`bestContextWindow`), which is a proxy for CAPABILITY, not speed — in
+ * practice it always landed on the single heaviest, slowest model in the
+ * whole provider family for every provider, every agent (root +
+ * subagents), every single turn, regardless of whether the turn actually
+ * needed a 1M-token-context flagship model. Confirmed the live catalog
+ * genuinely exposes a `'fast'` tag on specific model entries (e.g.
+ * anthropic/claude-opus-4.7, claude-opus-4.8 as of this writing) meant
+ * exactly for this — a real, provider-declared speed-optimized tier,
+ * not a guess on our part. Now prefers any `'fast'`-tagged candidate
+ * first (still tie-broken by context window / slug among those, so we
+ * still get the newest/strongest "fast" variant), and only falls back to
+ * the old biggest-context-window ranking across ALL candidates when the
+ * provider doesn't expose a fast-tagged option at all — so this never
+ * makes a provider with no fast tier unusable, it only takes the win
+ * where the catalog actually offers one.
  */
 export async function resolveModelIdForProvider(provider: string): Promise<string> {
   const { models } = await fetchCatalog();
@@ -67,6 +86,9 @@ export async function resolveModelIdForProvider(provider: string): Promise<strin
   if (candidates.length === 0) {
     throw new Error(`No AI Gateway models found for provider "${provider}" in the live catalog.`);
   }
-  candidates.sort((a, b) => bestContextWindow(b) - bestContextWindow(a) || b.slug.localeCompare(a.slug));
-  return candidates[0].slug;
+  const rank = (a: CatalogModel, b: CatalogModel) => bestContextWindow(b) - bestContextWindow(a) || b.slug.localeCompare(a.slug);
+  const fastCandidates = candidates.filter(m => hasTag(m, 'fast'));
+  const pool = fastCandidates.length > 0 ? fastCandidates : candidates;
+  pool.sort(rank);
+  return pool[0].slug;
 }

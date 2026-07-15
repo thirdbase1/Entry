@@ -48,9 +48,25 @@ export default defineAgent({
   // already set this per-turn via AI SDK's portable `reasoning` option --
   // this brings the root agent's default path to parity with it, using
   // the same provider-agnostic level set (agent-config.md's "Reasoning
-  // effort"). "medium" is a sane default; provider/model determine which
-  // levels actually change behavior.
-  reasoning: 'medium',
+  // effort").
+  //
+  // CHANGED 2026-07-15, confirmed real cause of "the chat is slow": this
+  // is a STATIC, per-turn setting -- `model-catalog.ts`'s
+  // `resolveModelIdForProvider('anthropic')` already always picks the
+  // single LARGEST-context-window (i.e. heaviest, slowest) live Anthropic
+  // model, and "medium" extended-thinking effort was then forcing a full
+  // thinking-token pass on TOP of that model for every single default
+  // turn, including trivial ones ("hey", "what's 2+2") that never needed
+  // it -- thinking tokens are generated before any visible output starts
+  // streaming, so this sat directly in time-to-first-token for every
+  // message, not just complex ones. "low" keeps genuine extended thinking
+  // available (still meaningfully better than off for multi-step
+  // planning) at a much smaller token budget, which is the single biggest
+  // per-turn lever available here short of switching the default model
+  // itself. If a task genuinely needs deep multi-step reasoning, delegate
+  // it to `agent` (which can pick a stronger reasoning configuration for
+  // that bounded subtask) rather than paying the tax on every turn.
+  reasoning: 'low',
 
   compaction: {
     // Summarize earlier turns when context window fills past 90%.

@@ -40,3 +40,46 @@ export async function sandboxReadFile(ctx: ToolExecCtx, path: string): Promise<{
   }
   return { ok: true, content: result.stdout };
 }
+
+/**
+ * Added 2026-07-15 alongside append_file.ts -- see that file's header.
+ * Same base64-over-shell trick as sandboxWriteFile, but appends
+ * (`>>`) instead of overwriting (`>`), and takes an explicit `mode` so a
+ * chunked multi-call build-up of one new file is unambiguous: `'start'`
+ * truncates/creates first (equivalent to write_file with this chunk's
+ * content), `'append'` requires the file to already exist and adds to
+ * the end of it. Refusing to silently create-on-append is deliberate --
+ * a typo'd path with mode:'append' should fail loudly, not quietly start
+ * a brand-new file the model didn't intend to create.
+ */
+export async function sandboxAppendFile(
+  ctx: ToolExecCtx,
+  path: string,
+  content: string,
+  mode: 'start' | 'append',
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const sandbox = await ctx.getSandbox();
+  const b64 = Buffer.from(content, 'utf8').toString('base64');
+  const safePath = JSON.stringify(path);
+
+  if (mode === 'append') {
+    const exists = await sandbox.run({ command: `test -f ${safePath}` });
+    if (exists.exitCode !== 0) {
+      return {
+        ok: false,
+        error: `"${path}" doesn't exist yet -- call append_file with mode: "start" first to create it, then mode: "append" for subsequent chunks.`,
+      };
+    }
+  }
+
+  const redirect = mode === 'start' ? '>' : '>>';
+  const cmd =
+    mode === 'start'
+      ? `mkdir -p "$(dirname ${safePath})" && printf '%s' '${b64}' | base64 -d ${redirect} ${safePath}`
+      : `printf '%s' '${b64}' | base64 -d ${redirect} ${safePath}`;
+  const result = await sandbox.run({ command: cmd });
+  if (result.exitCode !== 0) {
+    return { ok: false, error: result.stderr.slice(0, 500) || `Write failed with exit code ${result.exitCode}` };
+  }
+  return { ok: true };
+}
