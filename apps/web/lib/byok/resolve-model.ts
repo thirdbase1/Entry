@@ -23,6 +23,21 @@ export interface ResolvedByokModel {
   /** Manual per-model override of the reasoning-capability heuristic —
    *  see reasoning-capability.ts + the settings page's "Thinking" toggle. */
   reasoningEnabled: boolean;
+  /** True only for OPENAI_RESPONSES-compatibility providers whose baseUrl is
+   *  NOT the real OpenAI API (e.g. Kie.ai's grok/v1/responses relay). See
+   *  direct/chat/route.ts's use of this flag for the actual bug it fixes:
+   *  these third-party relays echo back a reasoning item `id` (and, unlike
+   *  real OpenAI, no `encrypted_content`) exactly like OpenAI's own API
+   *  shape, which fools @ai-sdk/openai's responses() input converter into
+   *  emitting a stateful `item_reference`/dangling-id reasoning item on the
+   *  NEXT turn — something only real OpenAI can actually resolve server-side.
+   *  A relay that has no such server-side item store (confirmed against
+   *  Kie.ai directly: identical grok-4.5 call one turn after a successful
+   *  one comes back with finishReason 'other' and completely empty/
+   *  undefined usage, no thrown error at all) just silently produces an
+   *  empty completion instead of erroring, which read exactly like the
+   *  model "stopping instantly" after a tool call. */
+  isThirdPartyResponsesRelay: boolean;
 }
 
 /** Ownership-checked: a model row id alone is never sufficient — it must belong to userId. */
@@ -47,5 +62,15 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
     modelRow.modelId
   );
 
-  return { model, providerLabel: provider.label, modelId: modelRow.modelId, reasoningEnabled: modelRow.reasoningEnabled };
+  const isThirdPartyResponsesRelay =
+    provider.compatibility === 'OPENAI_RESPONSES' &&
+    !/(^|\.)api\.openai\.com$/.test(new URL(provider.baseUrl).hostname);
+
+  return {
+    model,
+    providerLabel: provider.label,
+    modelId: modelRow.modelId,
+    reasoningEnabled: modelRow.reasoningEnabled,
+    isThirdPartyResponsesRelay,
+  };
 }

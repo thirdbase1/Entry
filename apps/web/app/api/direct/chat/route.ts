@@ -82,6 +82,7 @@ import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
+import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
 import { compactMessagesIfNeeded } from '@/lib/direct-chat/compact-messages';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
@@ -151,6 +152,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     ? await resolveByokModel(byokModelId, userId)
     : resolveGatewayModel(requestedModel);
   const { model, providerLabel, modelId } = resolved;
+  // See strip-reasoning-parts.ts's file comment for the exact bug this
+  // fixes (only set on the BYOK path -- resolveGatewayModel's return type
+  // has no such flag, always undefined/false there).
+  const isThirdPartyResponsesRelay = 'isThirdPartyResponsesRelay' in resolved && resolved.isThirdPartyResponsesRelay;
 
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
@@ -256,7 +261,8 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // (e.g. for caching), a SystemModelMessage." Both the persona prompt and
   // the (optional) compaction summary are combined into `instructions`
   // below instead of ever being spliced into `messages`.
-  const compactionResult = compactMessagesIfNeeded(uiMessages, model, modelId);
+  const messagesForModel = isThirdPartyResponsesRelay ? stripReasoningParts(uiMessages) : uiMessages;
+  const compactionResult = compactMessagesIfNeeded(messagesForModel, model, modelId);
   const modelMessages = compactionResult.then(async ({ messages, wasCompacted }) => {
     if (wasCompacted) {
       console.log('[direct chat] compacted history before model call', { chatId, modelId, originalCount: uiMessages.length, sentCount: messages.length });
