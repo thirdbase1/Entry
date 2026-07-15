@@ -99,17 +99,24 @@ import { listSkillsTool } from '@entry/agent/tool-impls/list_skills';
 import { recallSkillTool } from '@entry/agent/tool-impls/recall_skill';
 import { getPreviewUrlTool } from '@entry/agent/tool-impls/get_preview_url';
 import { restartSandboxTool } from '@entry/agent/tool-impls/restart_sandbox';
+import { agentDelegate } from '@entry/agent/tool-impls/agent';
 import { z } from 'zod';
 
-// Direct-chat has no `agent` (sub-agent delegation) tool wired into its
-// own `tools` object below -- that's an eve-root-only capability
-// (apps/agent). Telling the model to use it anyway causes a real crash:
-// AI_NoSuchToolError kills the turn at step 0 with the tool call stuck
-// unresolved forever (see persona.ts's file comment for the full story,
-// including the sibling `todo` version of this bug that hit BOTH
-// direct-chat and eve-root and is now fixed by removing that mention
-// entirely rather than gating it).
-const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: false });
+// ENABLED (2026-07-15, user request): direct-chat now wires the real
+// `agent` (sub-agent delegation) tool into its own `tools` object below,
+// same implementation eve-root uses (@entry/agent/tool-impls/agent).
+// This used to be deliberately left out -- the persona told the model it
+// had NO delegation tool (`includeAgentDelegation: false`) specifically
+// to avoid a real crash: telling a model about a tool that doesn't
+// actually exist in its `tools` object causes AI_NoSuchToolError,
+// killing the turn at step 0 with the tool call stuck unresolved forever
+// (see persona.ts's file comment for the full incident). That workaround
+// suppressed the mention instead of fixing the actual gap. Now that the
+// tool is genuinely present below (respecting `disabledToolSet` like
+// every other tool here, and `ctx.byokModel` so BYOK turns never touch
+// the Gateway for it either -- same policy as every other sub-generation
+// tool), it's safe to tell the model about it again.
+const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: true });
 
 export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const { session } = await getUserSessionFromRequest(req);
@@ -404,6 +411,13 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       description: restartSandboxTool.description,
       inputSchema: restartSandboxTool.inputSchema,
       execute: (input: { command?: string }) => restartSandboxTool.execute(input, execCtx),
+    }),
+    // Sub-agent delegation -- see the ENABLED comment near this file's
+    // imports for why this was missing before and why it's safe now.
+    agent: tool({
+      description: agentDelegate.description,
+      inputSchema: agentDelegate.inputSchema,
+      execute: (input: { message: string; provider?: string; model?: string }) => agentDelegate.execute(input, execCtx),
     }),
   } as const;
   // Confirmed real bug (2026-07-11): this used to be sent as-is regardless

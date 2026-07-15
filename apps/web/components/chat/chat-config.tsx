@@ -104,6 +104,11 @@ export const configurableTools = [
   { label: 'Bash', value: 'bash' },
   { label: 'Browser Use', value: 'browser_use' },
   { label: 'Task Analysis', value: 'task_analysis' },
+  // Sub-agent delegation (2026-07-15) -- now wired into direct-chat's own
+  // `tools` object too (previously eve-root-only), see route.ts's
+  // "ENABLED" comment. Toggleable like everything else here in case a
+  // user wants to guarantee a turn never fans work out to another model.
+  { label: 'Agent Delegation', value: 'agent' },
   // Credential vault + self-authored skills (2026-07-11) — user-toggleable
   // like every other tool above, in case someone wants to guarantee the
   // agent never touches saved credentials for a particular chat.
