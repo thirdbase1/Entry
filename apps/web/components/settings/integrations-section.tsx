@@ -61,17 +61,18 @@ const KNOWN_SERVICES: KnownService[] = [
     name: 'Pxxl',
     hint: 'Scoped API key from Dashboard > API Keys — used to deploy to your own Pxxl workspace.',
     placeholder: 'Paste your Pxxl API key',
-    tokenUrl: 'https://pxxl.app/dashboard/api-keys',
+    tokenUrl: 'https://pxxl.app/dashboard/keys',
     icon: '/integration-logos/pxxl.png',
+    // Pxxl's wordmark is pure white — needs a dark tile or it's invisible.
+    iconBg: 'bg-[#0B0B10]',
   },
   {
     service: 'sendbyte',
     name: 'Sendbyte',
     hint: 'API key — used to send transactional email through your own Sendbyte account.',
     placeholder: 'Paste your Sendbyte API key',
-    tokenUrl: 'https://app.sendbyte.africa/emails',
+    tokenUrl: 'https://app.sendbyte.africa/keys/',
     icon: '/integration-logos/sendbyte.svg',
-    iconBg: 'bg-[#054525]',
   },
 ];
 
