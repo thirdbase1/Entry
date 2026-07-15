@@ -40,7 +40,12 @@ export default defineSandbox({
 
   // Bump this if the bootstrap steps below ever change, so eve knows to
   // rebuild the cached template instead of reusing a stale one.
-  revalidationKey: () => 'entry-browser-bootstrap-v2',
+  // Bumped v2 -> v3: bootstrap itself is unchanged, but the underlying
+  // E2B base template changed (2GB RAM custom template instead of the
+  // default ~480MB one -- see e2b-backend.ts's BASE_TEMPLATE) and the
+  // Chrome launch now needs AGENT_BROWSER_ARGS set, both of which need a
+  // fresh snapshot, not a reused stale one.
+  revalidationKey: () => 'entry-browser-bootstrap-v3',
 
   async bootstrap({ use }) {
     const sandbox = await use();
@@ -98,6 +103,34 @@ export default defineSandbox({
       // browser_use call quietly failed forever with no diagnostic trail).
       console.error('[bootstrap] agent-browser install failed:', browserInstall.stderr);
       throw new Error(`agent-browser install failed (exit ${browserInstall.exitCode}): ${browserInstall.stderr.slice(0, 2000)}`);
+    }
+
+    // FIXED (2026-07-15, confirmed live against a real E2B sandbox):
+    // launching Chrome with agent-browser's default process model never
+    // responds to CDP inside E2B's container -- Chrome's own internal
+    // setuid/user-namespace sandbox can't initialize there (same class of
+    // issue as headless-Chrome-in-Docker; Puppeteer's own troubleshooting
+    // docs recommend the identical flags). Confirmed root cause the hard
+    // way: launching the same Chrome binary manually with --no-sandbox
+    // responds to CDP immediately; without it, every single call hung
+    // until "CDP command timed out: Page.enable". `--args`/
+    // AGENT_BROWSER_ARGS is agent-browser's own documented escape hatch
+    // for exactly this (confirmed via its --help output). The real,
+    // per-call fix lives in tools/browser_use.ts's runCli(), which passes
+    // this env on every invocation; this bootstrap-time check exists so a
+    // regression (e.g. a future agent-browser version dropping the flag,
+    // or the base template losing RAM) fails loudly in build logs instead
+    // of silently poisoning the cached snapshot for every real session.
+    const browserSmokeTest = await sandbox.run({
+      command: 'agent-browser --session bootstrap-smoke-test open https://example.com --json && agent-browser --session bootstrap-smoke-test close',
+      env: { AGENT_BROWSER_ARGS: '--no-sandbox,--disable-dev-shm-usage,--disable-gpu' },
+    });
+    if (browserSmokeTest.exitCode !== 0) {
+      console.error('[bootstrap] agent-browser smoke test failed:', browserSmokeTest.stdout, browserSmokeTest.stderr);
+      throw new Error(
+        `agent-browser smoke test failed (exit ${browserSmokeTest.exitCode}) -- Chrome cannot actually launch in this ` +
+          `sandbox template. stdout: ${browserSmokeTest.stdout.slice(0, 1000)} stderr: ${browserSmokeTest.stderr.slice(0, 1000)}`,
+      );
     }
 
     // Preview-panel support (2026-07-11, see get_preview_url.ts).

@@ -6,7 +6,15 @@
  * own execute(input, ctx)) satisfy this structurally.
  */
 export interface ToolExecCtx {
-  getSandbox(): Promise<{ id: string; run(opts: { command: string }): Promise<{ exitCode: number; stdout: string; stderr: string }> }>;
+  getSandbox(): Promise<{
+    id: string;
+    // `env` was missing from this hand-written type even though the real
+    // underlying session (eve's SandboxSession, confirmed against
+    // @ai-sdk/provider-utils's SandboxProcessOptions) has always supported
+    // it -- browser_use.ts needs it to pass AGENT_BROWSER_ARGS per call
+    // (see runCli()'s 2026-07-15 fix), so widening this to match reality.
+    run(opts: { command: string; env?: Record<string, string> }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  }>;
   session: {
     id: string;
     auth: { current?: { principalId?: string } | null };

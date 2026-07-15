@@ -53,6 +53,16 @@ export interface E2BBackendOptions {
 
 const BACKEND_NAME = 'e2b';
 
+/**
+ * Custom E2B base template (2 vCPU / 2GB RAM, no extra software baked
+ * in -- see build script this was produced with) used instead of E2B's
+ * default 'base' template (~480MB, confirmed too small for headless
+ * Chrome's renderer process). Every sandbox this backend creates,
+ * bootstrapped or not, starts from this so the compute envelope is
+ * always sufficient once `sandbox.ts`'s bootstrap installs Chrome.
+ */
+const BASE_TEMPLATE = process.env.E2B_BASE_TEMPLATE ?? 'entry-agent-base';
+
 function resolveApiKey(options: E2BBackendOptions | undefined): string {
   const key = options?.apiKey ?? process.env.E2B_API_KEY;
   if (!key) {
@@ -261,7 +271,17 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
       }
 
       input.log?.(`[e2b] no cached snapshot for template "${input.templateKey}" — building fresh`);
-      const sandbox = await E2BSandbox.create({ apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000 });
+      // FIXED (2026-07-15, confirmed live): E2B's default 'base' template
+      // gives ~480MB RAM -- not enough headroom for Chrome's renderer
+      // process (reproduced the exact failure: V8 "OOM (Failed to reserve
+      // virtual memory for CodeRange)", then CDP's Page.enable hanging
+      // forever). Built a custom base template (`entry-agent-base`, 2
+      // vCPU / 2GB, e2b.dev Template.build) with nothing else baked in --
+      // snapshots taken from a sandbox inherit its parent's compute
+      // envelope, so starting bootstrap from this instead of the bare
+      // default template is what actually fixes it for every session
+      // cloned from the resulting snapshot.
+      const sandbox = await E2BSandbox.create(BASE_TEMPLATE, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000 });
       try {
         for (const seed of input.seedFiles) {
           const data = typeof seed.content === 'string' ? seed.content : toArrayBuffer(seed.content);
@@ -341,7 +361,7 @@ async function createFromTemplate(
   options: E2BBackendOptions,
 ): Promise<E2BSandbox> {
   if (!input.templateKey) {
-    return E2BSandbox.create({ apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000 });
+    return E2BSandbox.create(BASE_TEMPLATE, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000 });
   }
   const template = await prisma.sandboxTemplate.findUnique({ where: { templateKey: input.templateKey } });
   if (!template) {

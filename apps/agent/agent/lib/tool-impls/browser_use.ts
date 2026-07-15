@@ -217,8 +217,28 @@ export const browserUse = {
     let finalStatus: 'finished' | 'failed' = 'finished';
     let finalMarkdown = '';
 
+    // FIXED (2026-07-15, confirmed live against a real E2B sandbox): every
+    // single browser_use call was failing with "Auto-launch failed: CDP
+    // command timed out: Page.enable" -- 100% reproduction rate, first
+    // call onward, not something that only shows up after N calls. Root
+    // cause: agent-browser launches Chrome with its normal (sandboxed)
+    // process model by default, and Chrome's own internal setuid/user-ns
+    // sandbox cannot initialize inside E2B's container (confirmed:
+    // launching the same Chrome binary manually with --no-sandbox
+    // responds to CDP immediately; without it, CDP never comes up).
+    // agent-browser exposes exactly one documented escape hatch for this
+    // ("--args", or its env-var form) -- this is the standard
+    // headless-Chrome-in-a-container fix (same flags Puppeteer's own
+    // Docker docs recommend), not anything specific to this app.
+    const AGENT_BROWSER_ENV = {
+      AGENT_BROWSER_ARGS: '--no-sandbox,--disable-dev-shm-usage,--disable-gpu',
+    };
+
     async function runCli(args: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-      const res = await sandbox.run({ command: `agent-browser --session ${shellQuote(session)} ${args}` });
+      const res = await sandbox.run({
+        command: `agent-browser --session ${shellQuote(session)} ${args}`,
+        env: AGENT_BROWSER_ENV,
+      });
       return { ok: res.exitCode === 0, stdout: res.stdout, stderr: res.stderr };
     }
 

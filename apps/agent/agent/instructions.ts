@@ -62,12 +62,22 @@ import { buildPersonaInstructions } from './lib/persona.js';
  * further is marginal value anyway, and "never mismatched" beats "right
  * up until the last allowed depth."
  */
+// `DynamicResolveContext.session` (the type `defineDynamic`'s
+// `session.started` handler gets) only declares `{ id, auth }` -- but
+// per eve's own session-context.md, the runtime object always carries an
+// optional `parent` too (same public/runtime type gap as
+// `ctx.getSandbox()`'s `run()` missing `env`, see tool-impls/types.ts).
+// Narrow, local cast right at the read site rather than widening
+// anything upstream, since this is the only place in the app that reads
+// session lineage from an instructions resolver.
+type SessionWithParent = { parent?: { sessionId: string; callId: string; rootSessionId: string } };
+
 export default defineDynamic({
   events: {
     'session.started': (_event, ctx) =>
       defineInstructions({
         markdown: buildPersonaInstructions({
-          includeAgentDelegation: !ctx.session.parent,
+          includeAgentDelegation: !(ctx.session as unknown as SessionWithParent).parent,
         }),
       }),
   },
