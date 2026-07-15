@@ -65,7 +65,7 @@ import ByteDanceIcon from '@lobehub/icons/es/ByteDance/components/Color';
 import MinimaxIcon from '@lobehub/icons/es/Minimax/components/Color';
 import MoonshotIcon from '@lobehub/icons/es/Moonshot/components/Mono';
 import NvidiaIcon from '@lobehub/icons/es/Nvidia/components/Color';
-import StepfunIcon from '@lobehub/icons/es/Stepfun/components/Color';
+import StepfunIcon from '@lobehub/icons/es/Stepfun/components/Mono';
 import ZaiIcon from '@lobehub/icons/es/ZAI/components/Mono';
 import ArceeIcon from '@lobehub/icons/es/Arcee/components/Color';
 import InceptionIcon from '@lobehub/icons/es/Inception/components/Mono';
