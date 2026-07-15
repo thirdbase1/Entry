@@ -28,13 +28,37 @@ import { safeExecute } from './safe-execute.js';
  * starts a dev server — that's the actual mechanism behind "auto start
  * the preview", since nothing outside a real tool call can trigger it for
  * this path.
+ *
+ * FIXED 2026-07-15 (real slowness bug, part of the "tool calls make the
+ * model extremely slow" report): port probing used to be up to FIVE
+ * separate sandbox.run() calls in a loop, one full network round-trip to
+ * the remote E2B sandbox each, each with its OWN 2s timeout -- worst case
+ * (no dev server up yet, the common case right after starting one) was 5
+ * round-trips and up to ~10s just to conclude "nothing's listening yet."
+ * Now it's a single shell script, one round-trip, that checks all ports
+ * itself and reports back which one (if any) is up -- worst case is now
+ * one round-trip plus at most 5 x 0.5s of in-sandbox probing (2.5s),
+ * entirely inside the same command, no repeated network hops.
  */
+const PREVIEW_PORTS = [3000, 5173, 8080, 4173, 8000] as const;
+
+async function probeAllPorts(sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>): Promise<number | null> {
+  const script = PREVIEW_PORTS.map(p => `timeout 0.5 bash -c '</dev/tcp/127.0.0.1/${p}' 2>/dev/null && { echo UP:${p}; exit 0; }`).join('; ');
+  const result = await sandbox.run({ command: `${script}; true` });
+  const match = result.stdout.match(/UP:(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
 type TunnelProvider = 'cloudflared' | 'localtunnel';
 
 /** Idempotent: if a tunnel for this exact port+provider is already
  *  running (e.g. the model calls this tool twice in a row), reuse it
  *  instead of spawning a second one — parse its already-logged URL back
- *  out rather than trusting process liveness alone. */
+ *  out rather than trusting process liveness alone.
+ *
+ *  FIXED 2026-07-15: the existing-log-check and the pgrep liveness check
+ *  used to be two separate sandbox.run() round-trips; now one combined
+ *  command does both and reports back in a single round-trip. */
 async function startTunnel(
   sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>,
   port: number,
@@ -44,10 +68,12 @@ async function startTunnel(
   const urlPattern = provider === 'cloudflared' ? /https:\/\/[^\s]+\.trycloudflare\.com/ : /https:\/\/[^\s]+\.loca\.lt/;
   const processPattern = provider === 'cloudflared' ? `cloudflared tunnel --url http://localhost:${port}` : `localtunnel --port ${port}`;
 
-  const existingLog = await sandbox.run({ command: `cat ${logFile} 2>/dev/null || true` });
-  const existingMatch = existingLog.stdout.match(urlPattern);
-  const alreadyRunning = await sandbox.run({ command: `pgrep -f ${JSON.stringify(processPattern)} > /dev/null && echo YES || echo NO` });
-  if (existingMatch && alreadyRunning.stdout.includes('YES')) return existingMatch[0];
+  const status = await sandbox.run({
+    command: `cat ${logFile} 2>/dev/null || true; echo __SPLIT__; pgrep -f ${JSON.stringify(processPattern)} > /dev/null && echo YES || echo NO`,
+  });
+  const [existingLogOut, aliveOut] = status.stdout.split('__SPLIT__');
+  const existingMatch = (existingLogOut ?? '').match(urlPattern);
+  if (existingMatch && (aliveOut ?? '').includes('YES')) return existingMatch[0];
 
   const startCmd =
     provider === 'cloudflared'
@@ -64,8 +90,6 @@ async function startTunnel(
   return match ? match[0] : null;
 }
 
-const PREVIEW_PORTS = [3000, 5173, 8080, 4173, 8000] as const;
-
 export const getPreviewUrlTool = {
   description:
     'Check for a running dev server in your sandbox and expose it as a public preview URL the user can ' +
@@ -76,21 +100,8 @@ export const getPreviewUrlTool = {
     const chatId = ctx.session.id;
     const sandbox = await ctx.getSandbox();
 
-    for (const port of PREVIEW_PORTS) {
-      const probe = await sandbox.run({
-        command: `timeout 2 bash -c '</dev/tcp/127.0.0.1/${port}' 2>/dev/null && echo UP || echo DOWN`,
-      });
-      if (!probe.stdout.includes('UP')) continue;
-
-      // FIXED (2026-07-11, "preview tool always failed"): loca.lt (the
-      // free public relay localtunnel depends on) has no uptime guarantee
-      // and routinely just doesn't come up in time — confirmed the real
-      // failure mode was the external relay itself, not this code.
-      // cloudflared's "quick tunnel" (trycloudflare.com) is the primary
-      // path now — actively maintained by Cloudflare, no signup/token
-      // needed, materially more reliable. localtunnel is kept ONLY as a
-      // fallback for the rare case cloudflared itself isn't reachable
-      // (see sandbox.ts's bootstrap comment for why both are installed).
+    const port = await probeAllPorts(sandbox);
+    if (port != null) {
       let url = await startTunnel(sandbox, port, 'cloudflared');
       if (!url) url = await startTunnel(sandbox, port, 'localtunnel');
 
