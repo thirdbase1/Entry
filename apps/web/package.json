@@ -9,6 +9,7 @@
     "migrate:deploy": "node ../../packages/db/scripts/run-production-migrate.js"
   },
   "dependencies": {
+    "@ai-sdk/openai": "4.0.15",
     "@ai-sdk/react": "^4.0.21",
     "@babel/core": "^8.0.1",
     "@babel/plugin-proposal-decorators": "^8.0.2",

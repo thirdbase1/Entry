@@ -36,7 +36,7 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
 
 const CreateProviderSchema = z.object({
   label: z.string().min(1).max(100),
-  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE']),
+  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENAI_RESPONSES']),
   baseUrl: z.string().url(),
   apiKey: z.string().optional(),
 });

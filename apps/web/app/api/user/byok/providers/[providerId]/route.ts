@@ -31,7 +31,7 @@ const UpdateProviderSchema = z.object({
   // once at creation (AddProviderForm) and had no PATCH path at all, so
   // pointing an existing connection at a different-shaped endpoint meant
   // deleting it and starting over.
-  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE']).optional(),
+  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENAI_RESPONSES']).optional(),
   baseUrl: z.string().url().optional(),
   apiKey: z.string().optional(), // pass a new key to rotate it; omit to leave unchanged
 });

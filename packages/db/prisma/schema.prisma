@@ -441,6 +441,7 @@ enum ByokCompatibility {
   OPENAI // OpenAI-compatible chat completions API — covers the vast majority of providers (Groq, Together, Fireworks, OpenRouter, DeepInfra, Mistral, xAI, local vLLM/LM Studio/Ollama, etc.)
   ANTHROPIC // Anthropic Messages API shape
   GOOGLE // Google Generative Language API shape
+  OPENAI_RESPONSES // OpenAI *Responses* API shape (input/output items, not messages/choices) -- distinct from OPENAI's Chat Completions shape above. Covers aggregators that proxy models behind this newer OpenAI API style with a per-model-family base path, e.g. Kie.ai's `https://api.kie.ai/<family>/v1` (grok, gpt, gemini, claude, ...) each serving `POST {base}/responses`.
 }
 
 model UserModelProvider {

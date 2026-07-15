@@ -21,9 +21,15 @@
  * already expects the user to include `/v1` themselves (e.g.
  * `https://api.openai.com/v1`), and GOOGLE's real API root
  * (`generativelanguage.googleapis.com/v1beta`) varies by version, so we
- * leave those two untouched.
+ * leave those two untouched. OPENAI_RESPONSES is left untouched too —
+ * unlike the official `https://api.openai.com/v1` default, aggregators
+ * proxying the Responses API shape (e.g. Kie.ai) put a per-model-family
+ * segment before `/v1` (`/grok/v1`, `/gpt/v1`, ...) that we have no way to
+ * guess, so the user must paste the full path up to and including `/v1`
+ * themselves -- the AI SDK then appends `/responses` on top of exactly
+ * that.
  */
-export function normalizeBaseUrl(compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE', rawBaseUrl: string): string {
+export function normalizeBaseUrl(compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES', rawBaseUrl: string): string {
   const trimmed = rawBaseUrl.replace(/\/+$/, '');
   if (compatibility === 'ANTHROPIC' && !/\/v1$/.test(trimmed)) {
     return `${trimmed}/v1`;

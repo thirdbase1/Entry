@@ -13,7 +13,7 @@ import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
  * deletes existing rows on a partial/failed fetch — only adds.
  */
 async function discoverModels(
-  compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE',
+  compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES',
   baseUrl: string,
   apiKey: string | undefined
 ): Promise<{ modelId: string; label?: string }[]> {
@@ -43,6 +43,26 @@ async function discoverModels(
       const json = await res.json();
       const list = Array.isArray(json?.data) ? json.data : [];
       return list.map((m: any) => ({ modelId: m.id, label: m.display_name ?? undefined })).filter((m: any) => !!m.modelId);
+    }
+
+    if (compatibility === 'OPENAI_RESPONSES') {
+      // Same Bearer-auth + `{ data: [...] }` shape as the official OpenAI
+      // `GET /v1/models` when a Responses-API endpoint happens to expose
+      // one. Aggregators proxying single model families behind a fixed
+      // path (Kie.ai's `/grok/v1`, `/gpt/v1`, etc.) commonly don't -- that's
+      // fine, it just surfaces the usual fetchError below and the user
+      // falls back to "+ add a model id manually" (e.g. `grok-4-5`), same
+      // as any other endpoint without discovery support.
+      const res = await fetch(`${baseUrl}/models`, {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${(await res.text()).slice(0, 300)}`);
+      const json = await res.json();
+      const list = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
+      return list
+        .map((m: any) => ({ modelId: typeof m === 'string' ? m : m.id, label: m.name ?? undefined }))
+        .filter((m: any) => !!m.modelId);
     }
 
     // GOOGLE

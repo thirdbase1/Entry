@@ -17,7 +17,7 @@ import { cn } from '@/lib/utils';
 import { AutoSaveField, Toggle, safeJson } from '@/components/settings/shared';
 import { IntegrationsSection } from '@/components/settings/integrations-section';
 
-type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE';
+type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES';
 
 interface ProviderModel {
   id: string;
@@ -48,6 +48,11 @@ const COMPAT_OPTIONS: { value: Compatibility; label: string; hint: string }[] = 
   { value: 'OPENAI', label: 'OpenAI-compatible', hint: 'Groq, Together, Fireworks, OpenRouter, DeepInfra, Mistral, xAI, local vLLM/LM Studio/Ollama, most others' },
   { value: 'ANTHROPIC', label: 'Anthropic-compatible', hint: 'Endpoints that mirror the Anthropic Messages API' },
   { value: 'GOOGLE', label: 'Google-compatible', hint: 'Endpoints that mirror the Google Generative Language API' },
+  {
+    value: 'OPENAI_RESPONSES',
+    label: 'OpenAI Responses API-compatible',
+    hint: "Aggregators that proxy models behind OpenAI's newer Responses API shape (input/output, not messages/choices) — e.g. Kie.ai's per-model endpoints (Grok, GPT, Gemini, Claude). Base URL must include the model family segment + /v1, e.g. https://api.kie.ai/grok/v1",
+  },
 ];
 
 function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
