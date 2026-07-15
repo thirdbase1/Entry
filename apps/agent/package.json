@@ -41,6 +41,7 @@
   },
   "exports": {
     "./tool-impls/*": "./agent/lib/tool-impls/*.ts",
-    "./lib/persona": "./agent/lib/persona.ts"
+    "./lib/persona": "./agent/lib/persona.ts",
+    "./lib/credential-vault": "./agent/lib/credential-vault.ts"
   }
 }

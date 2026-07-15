@@ -10,114 +10,12 @@
  * /api/direct/chat at chat time (no eve/root-agent relay), with full
  * tool parity, nothing gated.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';
 import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
-
-/** Parses a fetch Response as JSON, tolerating empty/non-JSON bodies (e.g. a
- * crashed serverless function with no body) instead of throwing a raw
- * "Unexpected end of JSON input" at the user. */
-async function safeJson(res: Response): Promise<any> {
-  const text = await res.text();
-  if (!text) return { error: `Server returned an empty response (status ${res.status}).` };
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { error: `Server returned an unexpected response (status ${res.status}).` };
-  }
-}
-
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
-
-/** Tiny inline-edit input that autosaves itself on blur AND ~800ms after the
- * user stops typing — no separate "Save" button, no state that only lives
- * in memory. `onSave` is expected to PATCH the backend and throw on
- * failure; a failed save reverts to the last-known-good value so the UI
- * never silently claims something persisted when it didn't. */
-function AutoSaveField({
-  value,
-  onSave,
-  placeholder,
-  type = 'text',
-  mono = true,
-  mask = false,
-}: {
-  value: string;
-  onSave: (next: string) => Promise<void>;
-  placeholder?: string;
-  type?: string;
-  mono?: boolean;
-  mask?: boolean;
-}) {
-  const [draft, setDraft] = useState(value);
-  const [state, setState] = useState<SaveState>('idle');
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastSavedRef = useRef(value);
-
-  useEffect(() => {
-    // Reflect external updates (e.g. a fresh GET on mount) without
-    // clobbering in-flight edits.
-    if (state === 'idle') {
-      setDraft(value);
-      lastSavedRef.current = value;
-    }
-  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const commit = useCallback(
-    async (next: string) => {
-      if (next === lastSavedRef.current) return;
-      setState('saving');
-      try {
-        await onSave(next);
-        lastSavedRef.current = next;
-        setState('saved');
-        setTimeout(() => setState(s => (s === 'saved' ? 'idle' : s)), 1500);
-      } catch {
-        setDraft(lastSavedRef.current); // revert — don't pretend it saved
-        setState('error');
-        setTimeout(() => setState(s => (s === 'error' ? 'idle' : s)), 2500);
-      }
-    },
-    [onSave]
-  );
-
-  const handleChange = (next: string) => {
-    setDraft(next);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => commit(next), 800);
-  };
-
-  const handleBlur = () => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    commit(draft);
-  };
-
-  return (
-    <div className="relative flex-1">
-      <input
-        type={type}
-        value={draft}
-        onChange={e => handleChange(e.target.value)}
-        onBlur={handleBlur}
-        placeholder={placeholder}
-        className={cn(
-          'h-9 px-3 pr-14 rounded-md border bg-background text-foreground text-sm outline-none focus:border-primary w-full',
-          mono && 'font-mono'
-        )}
-      />
-      <span
-        className={cn(
-          'absolute right-2 top-1/2 -translate-y-1/2 text-[11px] pointer-events-none transition-opacity',
-          state === 'idle' ? 'opacity-0' : 'opacity-100',
-          state === 'error' ? 'text-destructive' : 'text-muted-foreground'
-        )}
-      >
-        {state === 'saving' ? 'Saving…' : state === 'saved' ? 'Saved ✓' : state === 'error' ? 'Failed' : ''}
-      </span>
-    </div>
-  );
-}
+import { AutoSaveField, Toggle, safeJson } from '@/components/settings/shared';
+import { IntegrationsSection } from '@/components/settings/integrations-section';
 
 type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE';
 
@@ -151,26 +49,6 @@ const COMPAT_OPTIONS: { value: Compatibility; label: string; hint: string }[] = 
   { value: 'ANTHROPIC', label: 'Anthropic-compatible', hint: 'Endpoints that mirror the Anthropic Messages API' },
   { value: 'GOOGLE', label: 'Google-compatible', hint: 'Endpoints that mirror the Google Generative Language API' },
 ];
-
-function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: () => void; disabled?: boolean }) {
-  return (
-    <button
-      onClick={onChange}
-      disabled={disabled}
-      className={cn(
-        'w-8 h-4.5 rounded-full relative transition-colors shrink-0 disabled:opacity-50',
-        checked ? 'bg-primary' : 'bg-muted'
-      )}
-    >
-      <span
-        className={cn(
-          'absolute top-0.5 w-3.5 h-3.5 rounded-full bg-background transition-transform',
-          checked ? 'translate-x-[18px]' : 'translate-x-0.5'
-        )}
-      />
-    </button>
-  );
-}
 
 function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
   const [open, setOpen] = useState(false);
@@ -552,7 +430,7 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
   );
 }
 
-export default function SettingsPage() {
+function ModelProvidersSection() {
   const [providers, setProviders] = useState<Provider[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -580,6 +458,42 @@ export default function SettingsPage() {
   }, []);
 
   return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <div className="text-base font-medium text-foreground">BYOK model providers</div>
+        <div className="text-sm text-muted-foreground mt-1">
+          Add your own provider (base URL + optional API key), fetch its available models, and
+          toggle which ones show up in the chat model selector. BYOK models get the exact same
+          tools (web search, browser, python, docs) as the built-in models — nothing is gated.
+        </div>
+      </div>
+
+      {loadError && (
+        <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
+          {loadError}
+        </div>
+      )}
+
+      {providers === null ? (
+        <div className="text-sm text-muted-foreground">Loading…</div>
+      ) : (
+        <>
+          {providers.map(p => (
+            <ProviderCard key={p.id} provider={p} onUpdate={updateProvider} onDelete={() => deleteProvider(p.id)} />
+          ))}
+          <AddProviderForm onCreated={p => setProviders(prev => (prev ? [...prev, p] : [p]))} />
+        </>
+      )}
+    </div>
+  );
+}
+
+type SettingsTab = 'providers' | 'integrations';
+
+export default function SettingsPage() {
+  const [tab, setTab] = useState<SettingsTab>('providers');
+
+  return (
     <div className="flex-1 overflow-y-auto h-full flex flex-col">
       <header className="h-15 border-b px-4 flex items-center gap-4 shrink-0">
         <AutoSidebarPadding className="transition-all h-full flex items-center">
@@ -587,32 +501,31 @@ export default function SettingsPage() {
         </AutoSidebarPadding>
       </header>
 
-      <div className="max-w-2xl w-full mx-auto px-4 py-6 flex flex-col gap-4">
-        <div>
-          <div className="text-base font-medium text-foreground">BYOK model providers</div>
-          <div className="text-sm text-muted-foreground mt-1">
-            Add your own provider (base URL + optional API key), fetch its available models, and
-            toggle which ones show up in the chat model selector. BYOK models get the exact same
-            tools (web search, browser, python, docs) as the built-in models — nothing is gated.
-          </div>
+      <div className="max-w-2xl w-full mx-auto px-4 pt-4 shrink-0">
+        <div className="flex items-center gap-1 border-b">
+          <button
+            onClick={() => setTab('providers')}
+            className={cn(
+              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
+              tab === 'providers' ? 'border-primary text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            Model providers
+          </button>
+          <button
+            onClick={() => setTab('integrations')}
+            className={cn(
+              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
+              tab === 'integrations' ? 'border-primary text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            Integrations
+          </button>
         </div>
+      </div>
 
-        {loadError && (
-          <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
-            {loadError}
-          </div>
-        )}
-
-        {providers === null ? (
-          <div className="text-sm text-muted-foreground">Loading…</div>
-        ) : (
-          <>
-            {providers.map(p => (
-              <ProviderCard key={p.id} provider={p} onUpdate={updateProvider} onDelete={() => deleteProvider(p.id)} />
-            ))}
-            <AddProviderForm onCreated={p => setProviders(prev => (prev ? [...prev, p] : [p]))} />
-          </>
-        )}
+      <div className="max-w-2xl w-full mx-auto px-4 py-6 flex flex-col gap-4">
+        {tab === 'providers' ? <ModelProvidersSection /> : <IntegrationsSection />}
       </div>
     </div>
   );
