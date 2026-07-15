@@ -16,7 +16,6 @@ import { saveCredential, listCredentials } from '@entry/agent/lib/credential-vau
  * table — this route is not the only writer.
  */
 
-export const KNOWN_SERVICES = ['vercel', 'github', 'supabase', 'pxxl', 'sendbyte'] as const;
 
 /**
  * GET /api/user/integrations
