@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { resolveContextForSend, type AttachedContext } from './chat-context';
-import { buildConfigContext, DEFAULT_MODEL_ID, useModelOptions, useReasoningEffort } from './chat-config';
+import { buildConfigContext, DEFAULT_MODEL_ID, useReasoningEffort } from './chat-config';
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
@@ -171,59 +171,23 @@ export function ChatInterface({
   const [reasoningEffort, setReasoningEffort] = useReasoningEffort();
   const modelInitializedRef = useRef(false);
 
-  // Self-healing guard against a stuck-invalid model value (2026-07-15
-  // incident: a production turn was sent with requestedModel: 'auto' --
-  // not a real Gateway catalog entry, not producible by any click path in
-  // chat-config.tsx, almost certainly a stale leftover value from
-  // somewhere earlier -- yet it kept getting resent turn after turn
-  // because nothing ever validated the stored/seeded model against the
-  // REAL catalog once it loaded). Once the live model list is in, if the
-  // current non-default model doesn't match any real option, clear it
-  // back to Default instead of silently sending a bogus slug forever.
-  // REGRESSION (2026-07-15, minutes after shipping this guard):
-  // "started a new chat, after one tool call the entire page auto-reloads
-  // and the AI stops working" -- this check used to also run for a
-  // RESUMED session (sessionId set), racing the seeding effect below and
-  // the crossedBucket redirect further down. A resumed chat's model is
-  // DB-authoritative (initial.byokModelId/requestedModel) -- it must
-  // NEVER be second-guessed against a freshly fetched catalog, because
-  // that catalog can legitimately NOT contain it for reasons that have
-  // nothing to do with it being invalid: the BYOK connection got
-  // disabled after the chat started (useModelOptions filters BYOK models
-  // by `isEnabled`), a Gateway model got deprecated/renamed, or the
-  // catalog fetch is just plain slower than the chat's first tool call.
-  // When that happened, this effect force-reset `model` to
-  // DEFAULT_MODEL_ID, which flipped `liveIsDirect` to false, which made
-  // `crossedBucket` true against the still-direct `rowIsDirect` --
-  // and the crossedBucket effect further down treats that combination as
-  // "user tried to switch buckets," toasts, and `router.push`es to a
-  // brand-new /chats page, abandoning the live conversation entirely.
-  // That's the exact reported "auto reload, AI stops working": a real
-  // navigation away, not a crash. Scoping this to brand-new chats only
-  // (no sessionId) keeps the original fix -- clearing a truly bogus
-  // never-clickable leftover value like literal "auto" seen in
-  // production logs -- without ever touching an already-resumed thread's
-  // locked-in model.
-  const modelOptions = useModelOptions();
-  const modelSanityCheckedRef = useRef(false);
-  useEffect(() => {
-    if (sessionId) return; // resumed chat: model is DB-authoritative, never second-guess it
-    if (modelSanityCheckedRef.current) return;
-    if (modelOptions.length === 0) return; // catalog still loading
-    if (model === DEFAULT_MODEL_ID || !model) return;
-    modelSanityCheckedRef.current = true;
-    const isKnown = modelOptions.some(o => o.value === model);
-    if (isKnown) return;
-    console.warn('[model picker] clearing stale/invalid model value', model);
-    setModelState(DEFAULT_MODEL_ID);
-    if (typeof window !== 'undefined') {
-      try {
-        window.localStorage.removeItem(LAST_MODEL_STORAGE_KEY);
-      } catch {
-        // best-effort only
-      }
-    }
-  }, [sessionId, modelOptions, model]);
+  // REMOVED (2026-07-15, user confirmed): there used to be a "self-heal"
+  // guard here that force-reset `model` back to DEFAULT_MODEL_ID whenever
+  // it didn't match an entry in the live `useModelOptions()` catalog,
+  // built on a bad assumption that a bare value like literal "auto" was
+  // always a stale/bogus leftover. It is not -- the user confirmed "auto"
+  // is a real, working model on their own BYOK provider. The catalog can
+  // legitimately lag or omit a model for reasons that have nothing to do
+  // with validity (BYOK connection briefly disabled, fetch slower than
+  // the first tool call, provider-side rename), and this guard already
+  // caused one real regression on top of the misdiagnosis: clearing the
+  // model flipped `liveIsDirect`, which the crossedBucket effect further
+  // down reads as "user switched buckets," forcing a `router.push` to a
+  // brand-new /chats page mid-conversation. Removed outright rather than
+  // re-scoped again -- the backend (resolveByokModel /
+  // apps/web/app/api/direct/chat/route.ts) already owns real invalid-model
+  // handling; the frontend has no business silently second-guessing a
+  // user's own model choice.
 
   useEffect(() => {
     if (!sessionId) return;
