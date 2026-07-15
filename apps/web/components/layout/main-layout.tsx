@@ -5,7 +5,7 @@ import { ChatIcon } from '@/components/icons/chat-icon';
 import { AnimatePresence, motion } from 'framer-motion';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import AppSidebar from '@/components/ui/sidebar/sidebar';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { UserInfo } from '@/components/sidebar/user-info';
@@ -165,7 +165,20 @@ function SidebarContent() {
 }
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
-  const { open: sidebarOpen, toggleSidebar, width } = useSidebarStore();
+  const { open: sidebarOpen, toggleSidebar, setOpen: setSidebarOpen, width } = useSidebarStore();
+
+  // Tap-anywhere-to-close (2026-07-15, explicit user request: "if the
+  // side bar is open if I touch any where on the chat screen it should
+  // close the side bar"). Only closes -- never opens -- and only fires
+  // while the sidebar is actually open, so it doesn't interfere with
+  // normal interaction with the chat once the sidebar is already closed.
+  // Deliberately a plain bubbling onClick (no stopPropagation/preventDefault
+  // anywhere), so whatever the user actually tapped -- a button, a link,
+  // the composer -- still gets its own click too; this just additionally
+  // closes the sidebar in the same gesture.
+  const closeSidebarIfOpen = useCallback(() => {
+    if (sidebarOpen) setSidebarOpen(false);
+  }, [sidebarOpen, setSidebarOpen]);
 
   return (
     <div className="relative flex size-full justify-end h-dvh">
@@ -181,7 +194,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       </AppSidebar>
 
       {/* main content area */}
-      <main className="w-0 flex-1 h-full flex gap-2">
+      <main className="w-0 flex-1 h-full flex gap-2" onClick={closeSidebarIfOpen}>
         {children}
       </main>
 
