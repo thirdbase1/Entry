@@ -74,8 +74,7 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   return (
-    <div className="h-15 border-b border-border px-4 flex items-center justify-between">
-      <div className="text-sm font-medium text-foreground truncate">{chat?.title ?? 'New Chat'}</div>
+    <div className="h-15 border-b border-border px-4 flex items-center justify-end">
       <div className="flex items-center gap-2">
         <button
           onClick={share}
