@@ -24,13 +24,21 @@ export const DELETE = withApiErrorHandling(async (req: NextRequest, { params }: 
 
 const UpdateProviderSchema = z.object({
   label: z.string().min(1).max(100).optional(),
+  // Lets a user switch an existing connection's API shape at any time
+  // (2026-07-15, explicit user request: "in the byok do it so u can
+  // change API compatible anytime to the one we support, so I don't
+  // always create new byok") -- previously compatibility was only set
+  // once at creation (AddProviderForm) and had no PATCH path at all, so
+  // pointing an existing connection at a different-shaped endpoint meant
+  // deleting it and starting over.
+  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE']).optional(),
   baseUrl: z.string().url().optional(),
   apiKey: z.string().optional(), // pass a new key to rotate it; omit to leave unchanged
 });
 
 /**
  * PATCH /api/user/byok/providers/:providerId
- * Update label / base URL / rotate the API key.
+ * Update label / compatibility / base URL / rotate the API key.
  */
 export const PATCH = withApiErrorHandling(async (req: NextRequest, { params }: { params: Promise<{ providerId: string }> }) => {
   const { session } = await getUserSessionFromRequest(req);
@@ -43,13 +51,33 @@ export const PATCH = withApiErrorHandling(async (req: NextRequest, { params }: {
   const body = UpdateProviderSchema.safeParse(await req.json());
   if (!body.success) return NextResponse.json({ error: body.error.flatten() }, { status: 400 });
 
-  const { label, baseUrl, apiKey } = body.data;
+  const { label, compatibility, baseUrl, apiKey } = body.data;
+
+  // Re-normalize the base URL against whichever compatibility ends up
+  // effective (new one if provided, otherwise the existing one) so
+  // switching to ANTHROPIC auto-appends /v1 the same way the "add
+  // provider" form already does, even if baseUrl itself wasn't touched
+  // in this PATCH.
+  const effectiveCompatibility = compatibility ?? owned.compatibility;
+  const shouldRenormalizeBaseUrl = baseUrl !== undefined || compatibility !== undefined;
+  const effectiveRawBaseUrl = baseUrl ?? owned.baseUrl;
+
   const updated = await prisma.userModelProvider.update({
     where: { id: providerId },
     data: {
       ...(label !== undefined ? { label } : {}),
-      ...(baseUrl !== undefined ? { baseUrl: normalizeBaseUrl(owned.compatibility, baseUrl) } : {}),
+      ...(compatibility !== undefined ? { compatibility } : {}),
+      ...(shouldRenormalizeBaseUrl
+        ? { baseUrl: normalizeBaseUrl(effectiveCompatibility, effectiveRawBaseUrl) }
+        : {}),
       ...(apiKey !== undefined ? { encryptedApiKey: apiKey ? encryptApiKey(apiKey) : null } : {}),
+      // Switching compatibility invalidates whatever the previous "fetch
+      // models" probe found (different discovery endpoint/response shape
+      // entirely) -- clear the stale fetch status so the UI doesn't show a
+      // now-meaningless "last fetched"/error from the old mode. Existing
+      // model rows are left alone (still valid modelId strings a user may
+      // want to keep), just the fetch bookkeeping resets.
+      ...(compatibility !== undefined ? { lastFetchedAt: null, lastError: null } : {}),
     },
   });
 
@@ -59,5 +87,7 @@ export const PATCH = withApiErrorHandling(async (req: NextRequest, { params }: {
     compatibility: updated.compatibility,
     baseUrl: updated.baseUrl,
     hasApiKey: !!updated.encryptedApiKey,
+    lastFetchedAt: updated.lastFetchedAt,
+    lastError: updated.lastError,
   });
 });

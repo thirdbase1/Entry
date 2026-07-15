@@ -28,7 +28,23 @@ export async function safeJson(res: Response): Promise<any> {
  * user stops typing — no separate "Save" button, no state that only lives
  * in memory. `onSave` is expected to PATCH the backend and throw on
  * failure; a failed save reverts to the last-known-good value so the UI
- * never silently claims something persisted when it didn't. */
+ * never silently claims something persisted when it didn't.
+ *
+ * Fixed (2026-07-15, explicit user request: "the stuff doesn't allow me
+ * to like delete everything like my key it will automatically fill it
+ * back because of that auto save. Do it so the auto save, save whatever
+ * is there even if empty") -- the old `commit` bailed out early whenever
+ * `next === lastSavedRef.current`, as a "nothing changed, skip the save"
+ * optimization. That's exactly wrong for password-style fields (the BYOK
+ * API key / integration token inputs) which always start from `value=""`
+ * by design (they never render the real secret back) -- so clearing a
+ * freshly-typed key back down to empty made `next` ("") equal
+ * `lastSavedRef.current` ("", the seed), the save was skipped entirely,
+ * and the field looked like it "auto-filled back" once you clicked away
+ * (nothing was ever sent, so nothing was ever cleared server-side).
+ * Now gated on whether the user actually touched the field at all, not on
+ * whether the final value differs from the seed -- so typing then fully
+ * deleting a key, then blurring, genuinely saves/clears it. */
 export function AutoSaveField({
   value,
   onSave,
@@ -46,25 +62,33 @@ export function AutoSaveField({
   const [state, setState] = useState<SaveState>('idle');
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedRef = useRef(value);
+  const touchedRef = useRef(false);
 
   useEffect(() => {
     if (state === 'idle') {
       setDraft(value);
       lastSavedRef.current = value;
+      touchedRef.current = false;
     }
   }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const commit = useCallback(
     async (next: string) => {
-      if (next === lastSavedRef.current) return;
+      // Only skip if the user never actually interacted with the field —
+      // NOT based on whether `next` happens to match the last-saved value,
+      // since for always-blank password fields that comparison is
+      // meaningless (see comment above).
+      if (!touchedRef.current) return;
       setState('saving');
       try {
         await onSave(next);
         lastSavedRef.current = next;
+        touchedRef.current = false;
         setState('saved');
         setTimeout(() => setState(s => (s === 'saved' ? 'idle' : s)), 1500);
       } catch {
         setDraft(lastSavedRef.current);
+        touchedRef.current = false;
         setState('error');
         setTimeout(() => setState(s => (s === 'error' ? 'idle' : s)), 2500);
       }
@@ -73,6 +97,7 @@ export function AutoSaveField({
   );
 
   const handleChange = (next: string) => {
+    touchedRef.current = true;
     setDraft(next);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => commit(next), 800);
