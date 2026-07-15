@@ -347,6 +347,29 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(provider.lastError ?? null);
   const [editingKey, setEditingKey] = useState(false);
+  const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
+
+  // Copy-the-key-I-already-added (2026-07-15, explicit request) — the key
+  // is AES-256-GCM at rest (packages/db/src/crypto/byok.ts), always
+  // reversible server-side; this just exposes that on an explicit click via
+  // GET /reveal-key instead of never at all. Never stored in component
+  // state longer than the copy itself takes -- fetched, written straight to
+  // the clipboard, and discarded, so it never lingers in memory or gets
+  // rendered as plaintext anywhere.
+  const copyApiKey = useCallback(async () => {
+    setCopyState('copying');
+    try {
+      const res = await fetch(`/api/user/byok/providers/${provider.id}/reveal-key`);
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json.error ?? 'Failed to reveal key');
+      await navigator.clipboard.writeText(json.apiKey);
+      setCopyState('copied');
+      setTimeout(() => setCopyState('idle'), 1500);
+    } catch {
+      setCopyState('error');
+      setTimeout(() => setCopyState('idle'), 1500);
+    }
+  }, [provider.id]);
 
   /** PATCHes the provider connection itself (label / base URL / API key) —
    * used by the AutoSaveField instances below. Throws on a non-OK response
@@ -436,12 +459,23 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
           <div className="text-xs text-muted-foreground">{compatLabel}</div>
 
           {!editingKey ? (
-            <button
-              onClick={() => setEditingKey(true)}
-              className="self-start text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-            >
-              {provider.hasApiKey ? 'Change API key' : 'Add API key'}
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setEditingKey(true)}
+                className="self-start text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+              >
+                {provider.hasApiKey ? 'Change API key' : 'Add API key'}
+              </button>
+              {provider.hasApiKey && (
+                <button
+                  onClick={copyApiKey}
+                  disabled={copyState === 'copying'}
+                  className="self-start text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 disabled:opacity-50"
+                >
+                  {copyState === 'copied' ? 'Copied ✓' : copyState === 'error' ? 'Copy failed' : copyState === 'copying' ? 'Copying…' : 'Copy API key'}
+                </button>
+              )}
+            </div>
           ) : (
             <div className="flex items-center gap-2">
               <AutoSaveField

@@ -46,7 +46,6 @@ import { MarkdownText } from '@/components/ui/markdown';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import type { AttachedContext } from './chat-context';
-import type { ReasoningEffort } from './chat-config';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 import { AutoFixSendProvider } from './chat-auto-fix-context';
 import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
@@ -59,8 +58,6 @@ interface DirectChatInterfaceProps {
   requestedModel?: string;
   model: string;
   setModel: (model: string) => void;
-  reasoningEffort?: ReasoningEffort;
-  setReasoningEffort?: (level: ReasoningEffort) => void;
   placeholder?: string;
   placeholderTitle?: string;
   className?: string;
@@ -144,8 +141,6 @@ function DirectChatSession({
   requestedModel,
   model,
   setModel,
-  reasoningEffort,
-  setReasoningEffort,
   placeholder = 'What are your thoughts?',
   placeholderTitle = 'What can I help you with?',
   className = '',
@@ -162,9 +157,9 @@ function DirectChatSession({
     () =>
       new DefaultChatTransport({
         api: '/api/direct/chat',
-        body: byokModelId ? { byokModelId, reasoningEffort } : { requestedModel, reasoningEffort },
+        body: byokModelId ? { byokModelId } : { requestedModel },
       }),
-    [byokModelId, requestedModel, reasoningEffort]
+    [byokModelId, requestedModel]
   );
 
   // (2026-07-11) Removed the "Running: <model>" label per explicit user
@@ -383,8 +378,8 @@ function DirectChatSession({
     // collected here (opts.disabledTools) but never actually sent to the
     // server — every turn got every tool regardless of what was toggled
     // off in the UI. `sendMessage`'s second-arg `body` gets shallow-merged
-    // on top of the transport's static body (byokModelId/requestedModel/
-    // reasoningEffort), so this is additive, not a replacement.
+    // on top of the transport's static body (byokModelId/requestedModel),
+    // so this is additive, not a replacement.
     //
     // Retries the SEND itself (not the model's answer) up to twice with
     // backoff on a genuine network-level failure -- a `sendMessage` promise
@@ -415,7 +410,7 @@ function DirectChatSession({
     return (
       <div className="flex flex-col justify-center h-full p-4 gap-4 max-w-[800px] mx-auto">
         <div className="text-[26px] font-medium text-center mb-9 text-foreground">{placeholderTitle}</div>
-        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} model={model} onModelChange={setModel} reasoningEffort={reasoningEffort} onReasoningEffortChange={setReasoningEffort} />
+        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} model={model} onModelChange={setModel} />
         {turnError && (
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 text-center">
             {turnError}
@@ -568,8 +563,6 @@ function DirectChatSession({
           placeholder={placeholder}
           model={model}
           onModelChange={setModel}
-          reasoningEffort={reasoningEffort}
-          onReasoningEffortChange={setReasoningEffort}
         />
       </div>
     </div>

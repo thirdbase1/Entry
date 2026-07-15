@@ -32,7 +32,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
-import { ChatConfigMenu, ModelPickerMenu, ReasoningEffortMenu, DEFAULT_MODEL_ID, DEFAULT_REASONING_EFFORT, REASONING_EFFORT_LABELS, useModelOptions, type ReasoningEffort } from './chat-config';
+import { ChatConfigMenu, ModelPickerMenu, DEFAULT_MODEL_ID, useModelOptions } from './chat-config';
 import { ContextSelectorMenu, ContextPreview, type AttachedContext } from './chat-context';
 
 const TRANSITION = { type: 'spring' as const, stiffness: 380, damping: 34 };
@@ -141,8 +141,6 @@ export function ChatInput({
   initialAttached,
   model: controlledModel,
   onModelChange,
-  reasoningEffort,
-  onReasoningEffortChange,
 }: {
   onSend: (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string; images?: ChatImageAttachment[] }) => void;
   onAbort?: () => void;
@@ -152,8 +150,6 @@ export function ChatInput({
   initialAttached?: AttachedContext[];
   model?: string;
   onModelChange?: (model: string) => void;
-  reasoningEffort?: ReasoningEffort;
-  onReasoningEffortChange?: (level: ReasoningEffort) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState('');
@@ -382,7 +378,7 @@ export function ChatInput({
             className="flex translate-y-px items-center gap-5 px-5 pt-2 pb-3"
             onClick={e => e.stopPropagation()}
           >
-            <ModelPickerMenu model={model} setModel={setModel} reasoningEffort={reasoningEffort} setReasoningEffort={onReasoningEffortChange}>
+            <ModelPickerMenu model={model} setModel={setModel}>
               <button
                 type="button"
                 className="flex items-center gap-2 rounded-full py-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -392,33 +388,6 @@ export function ChatInput({
                 <span className="text-sm font-medium text-foreground/50">{currentModel?.label ?? 'Default'}</span>
               </button>
             </ModelPickerMenu>
-
-            {reasoningEffort && onReasoningEffortChange && (
-              <ReasoningEffortMenu model={model} reasoningEffort={reasoningEffort} setReasoningEffort={onReasoningEffortChange}>
-                <button
-                  type="button"
-                  className={cn(
-                    'flex items-center gap-1.5 rounded-full py-1 transition-colors',
-                    reasoningEffort !== DEFAULT_REASONING_EFFORT
-                      ? 'text-emerald-500 hover:text-emerald-600'
-                      : 'text-foreground/50 hover:text-foreground'
-                  )}
-                  aria-label="Reasoning effort for this turn"
-                >
-                  {/* Fixed (2026-07-11, explicit user request round 2):
-                      dropped `<BarsIcon />` entirely -- it's 3 ascending
-                      bars that read as a network/signal-strength icon next
-                      to a thinking-effort label, not related to reasoning
-                      at all. Label already shows the real selected level
-                      (Auto/None/Minimal/Low/Medium/High/Max) from the
-                      earlier fix; sized down further from text-xs (12px)
-                      to 10px per this same follow-up request -- every
-                      other label in this toolbar (model name, tool count)
-                      stays text-sm/unaffected. */}
-                  <span className="text-[10px] font-medium">{REASONING_EFFORT_LABELS[reasoningEffort]}</span>
-                </button>
-              </ReasoningEffortMenu>
-            )}
 
             <ChatConfigMenu model={model} setModel={setModel} disabledTools={disabledTools} setDisabledTools={setDisabledTools}>
               <button

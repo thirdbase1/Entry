@@ -75,7 +75,6 @@ import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
-import { isGatewayModelReasoningCapable, isByokModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { compactMessagesIfNeeded } from '@/lib/direct-chat/compact-messages';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
@@ -88,6 +87,8 @@ import { webSearch } from '@entry/agent/tool-impls/web_search';
 import { taskAnalysis } from '@entry/agent/tool-impls/task_analysis';
 import { codeArtifact } from '@entry/agent/tool-impls/code_artifact';
 import { pythonCoding } from '@entry/agent/tool-impls/python_coding';
+import { writeFileTool } from '@entry/agent/tool-impls/write_file';
+import { editFileTool } from '@entry/agent/tool-impls/edit_file';
 import { browserUse } from '@entry/agent/tool-impls/browser_use';
 import { listFilesTool } from '@entry/agent/tool-impls/list_files';
 import { bash } from '@entry/agent/tool-impls/bash';
@@ -124,26 +125,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const userId = session.user.id;
 
   const body = await req.json().catch(() => ({}));
-  const { id, messages, byokModelId, requestedModel, reasoningEffort, disabledTools } = body ?? {};
+  const { id, messages, byokModelId, requestedModel, disabledTools } = body ?? {};
   if (!byokModelId && !requestedModel) {
     return Response.json({ error: 'byokModelId or requestedModel is required' }, { status: 400 });
   }
-  // Portable AI SDK v7 top-level `reasoning` control (see
-  // ai-sdk.dev/docs/ai-sdk-core/reasoning) — safe to pass for any model:
-  // providers that don't support reasoning just ignore it with a warning.
-  // Only ever trust one of the 5 known levels from the client; anything
-  // else (missing, stale localStorage value, tampering) falls back to
-  // 'provider-default' rather than erroring the whole turn.
-  // Full portable set per ai-sdk.dev/docs/ai-sdk-core/reasoning (AI SDK 7):
-  // 'provider-default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'.
-  // Previously only 4 of these 7 were recognized (missing 'minimal' and
-  // 'xhigh'), silently downgrading either to 'provider-default'.
-  const REASONING_LEVELS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'provider-default']);
-  const resolvedReasoningEffort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'provider-default' = REASONING_LEVELS.has(
-    reasoningEffort
-  )
-    ? reasoningEffort
-    : 'provider-default';
   if (!Array.isArray(messages) || messages.length === 0) {
     return Response.json({ error: 'messages is required' }, { status: 400 });
   }
@@ -162,44 +147,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     ? await resolveByokModel(byokModelId, userId)
     : resolveGatewayModel(requestedModel);
   const { model, providerLabel, modelId } = resolved;
-  // Manual per-model override (2026-07-11) — only ever present on the BYOK
-  // branch (resolveGatewayModel's return shape has no such field, Gateway
-  // models are always heuristic-free via the real catalog tag instead).
-  // See reasoning-capability.ts's file comment for why the BYOK heuristic
-  // needs an escape hatch at all: it's a naming-pattern guess with real
-  // false negatives, and this is the user explicitly telling us better.
-  const manualReasoningOverride = byokModelId ? (resolved as { reasoningEnabled?: boolean }).reasoningEnabled === true : false;
-
-  // Gate the reasoning param on whether this SPECIFIC resolved model
-  // actually supports it — never trust the client alone here. Confirmed
-  // real bug (2026-07-11): forwarding a `reasoning` value unconditionally
-  // to every model, including plain non-reasoning ones, made turns fail
-  // outright for some providers (OpenAI-compatible endpoints reject any
-  // `reasoning_effort` at all on a non-reasoning model with a hard 400 —
-  // see reasoning-capability.ts's file comment for the confirmed source).
-  // 'provider-default' never needed gating (it was already a no-op), so
-  // this only changes behavior for an explicit non-default pick against a
-  // model that doesn't support it — from "the whole turn errors" to "runs
-  // fine at the model's own default reasoning behavior".
-  //
-  // Confirmed real bug (2026-07-11, found investigating "tool calls are
-  // slow"): this was a hard `await` sitting here, BEFORE preSave and
-  // BEFORE streamText even started. Both branches ultimately call
-  // getReasoningCapableGatewaySlugs(), which on any cache miss/expiry (its
-  // TTL is 5 minutes) does a real external fetch to
-  // ai-gateway.vercel.sh/v1/models/catalog — so roughly every 5 minutes,
-  // literally every single turn (BYOK or Gateway, reasoning-capable model
-  // or not) paid that entire external round trip serially in front of the
-  // actual model call, on top of whatever the provider itself took. Same
-  // shape of bug as the preSave fix below (a network call sitting in the
-  // critical path that the model call never actually depended on) —
-  // fixed the same way: kick it off now, only await the result at the
-  // one place it's actually consumed (right before streamText).
-  const reasoningCapablePromise = manualReasoningOverride
-    ? Promise.resolve(true)
-    : byokModelId
-      ? isByokModelReasoningCapable(modelId)
-      : isGatewayModelReasoningCapable(modelId);
 
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
@@ -353,6 +300,16 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       inputSchema: pythonCoding.inputSchema,
       execute: (input: { requirements: string }) => pythonCoding.execute(input, execCtx),
     }),
+    write_file: tool({
+      description: writeFileTool.description,
+      inputSchema: writeFileTool.inputSchema,
+      execute: (input: { path: string; content: string }) => writeFileTool.execute(input, execCtx),
+    }),
+    edit_file: tool({
+      description: editFileTool.description,
+      inputSchema: editFileTool.inputSchema,
+      execute: (input: { path: string; old_text: string; new_text: string; replace_all?: boolean }) => editFileTool.execute(input, execCtx),
+    }),
     bash: tool({
       description: bash.description,
       inputSchema: bash.inputSchema,
@@ -438,28 +395,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // providerOptions/cache_control attachment.
     instructions: await instructions,
     messages: await modelMessages,
-    // Anthropic-family models need extended thinking explicitly turned on
-    // to produce reasoning tokens at all (unlike e.g. DeepSeek-R1/o-series,
-    // which stream reasoning by default) — best-effort, ignored by any
-    // model/provider that doesn't recognize it.
-    // Portable across OpenAI, Anthropic, Google, xAI, Groq, DeepSeek,
-    // Fireworks and Bedrock — strictly better than the old Anthropic-only
-    // hardcoded `providerOptions.anthropic.thinking` budget hack it
-    // replaced, and it actually honors the user's selected effort level
-    // instead of a fixed, non-configurable 8000-token budget for Claude
-    // only. See REASONING_LEVELS above for how the value is sourced.
-    // Gated by `reasoningCapable` (see above) — never sent to a model that
-    // doesn't actually support it, which used to hard-fail the whole turn
-    // for some providers instead of just running at the model's default.
-    reasoning: (await (async () => {
-      const capable = await reasoningCapablePromise;
-      // Temporary, cheap diagnostic — confirms which branch a real turn
-      // actually took without needing to re-derive this from a debugger.
-      // Safe to leave in permanently: one line, no PII beyond the model id
-      // the user themselves picked.
-      console.log('[direct chat] reasoning gate', { modelId, reasoningCapable: capable, effort: resolvedReasoningEffort });
-      return capable;
-    })()) ? resolvedReasoningEffort : 'provider-default',
+    // No client-side reasoning-effort control anymore (2026-07-15,
+    // explicit removal request) -- every model just runs at its own
+    // provider default reasoning behavior. `'provider-default'` is always
+    // a safe no-op to pass regardless of whether the resolved model
+    // actually supports extended reasoning at all (confirmed in this same
+    // file's earlier investigation), so no per-model capability check is
+    // needed here anymore either.
+    reasoning: 'provider-default',
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
       logError({ source: 'direct-chat-streamtext', error, userId, chatId, context: { providerLabel, modelId } });

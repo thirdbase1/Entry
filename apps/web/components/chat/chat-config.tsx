@@ -28,79 +28,14 @@ export interface ModelOption {
   provider: string;
   Icon: React.FC<React.SVGProps<SVGSVGElement>>;
   group: 'Gateway' | 'Your providers';
-  /** Whether this model supports the AI SDK's portable `reasoning` effort control. */
-  supportsReasoning: boolean;
-}
-
-/** Levels accepted by AI SDK's top-level `reasoning` streamText/generateText
- *  parameter — see ai-sdk.dev/docs/ai-sdk-core/reasoning. Portable across
- *  every reasoning-capable provider (OpenAI, Anthropic, Google, xAI, Groq,
- *  DeepSeek, Fireworks, Bedrock); a provider that doesn't support it just
- *  ignores it with a warning, so it's always safe to send. */
-// Full portable set per ai-sdk.dev/docs/ai-sdk-core/reasoning (AI SDK 7) —
-// this previously only listed 4 of the 7 real levels (missing 'minimal'
-// and 'xhigh'), silently coercing either pick down to 'provider-default'
-// server-side. 'provider-default' itself is included too, as an explicit
-// "Auto" choice (see AUTO_LABEL below) rather than only being reachable
-// by omission.
-export const REASONING_EFFORT_LEVELS = ['provider-default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
-export type ReasoningEffort = (typeof REASONING_EFFORT_LEVELS)[number];
-// Confirmed real latency cause (2026-07-11, user-reported "slow after tool
-// calling"): the chosen `reasoning` level applies to the WHOLE agentic
-// loop (stepCountIs(120) in route.ts), not just the final user-facing
-// reply -- every single intermediate step (deciding to call a tool,
-// then again after each tool result) pays the full reasoning-token tax
-// for a model that supports it. AI SDK's streamText has no portable
-// per-step reasoning override (checked PrepareStepResult's real type in
-// node_modules/ai/dist/index.d.ts -- only providerOptions, which would
-// mean reintroducing the exact non-portable per-provider special-casing
-// `reasoning` was added specifically to replace). 'medium' by default
-// compounded across a typical multi-tool-call turn was the single
-// biggest, most direct lever available without a much bigger redesign.
-// 'low' is still meaningfully better than 'none' for tricky requests,
-// while nowhere near as expensive per step -- a user who wants deep
-// thinking for one specific hard question can still pick 'high' from
-// the picker.
-export const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'low';
-export const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = {
-  'provider-default': 'Auto',
-  none: 'None',
-  minimal: 'Minimal',
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Max',
-};
-const REASONING_EFFORT_STORAGE_KEY = 'entry:lastReasoningEffort';
-
-export function useReasoningEffort() {
-  const [reasoningEffort, setReasoningEffortState] = useState<ReasoningEffort>(() => {
-    if (typeof window === 'undefined') return DEFAULT_REASONING_EFFORT;
-    try {
-      const stored = window.localStorage.getItem(REASONING_EFFORT_STORAGE_KEY);
-      return (REASONING_EFFORT_LEVELS as readonly string[]).includes(stored || '')
-        ? (stored as ReasoningEffort)
-        : DEFAULT_REASONING_EFFORT;
-    } catch {
-      return DEFAULT_REASONING_EFFORT;
-    }
-  });
-  const setReasoningEffort = (level: ReasoningEffort) => {
-    setReasoningEffortState(level);
-    if (typeof window === 'undefined') return;
-    try {
-      window.localStorage.setItem(REASONING_EFFORT_STORAGE_KEY, level);
-    } catch {
-      // best-effort persistence only
-    }
-  };
-  return [reasoningEffort, setReasoningEffort] as const;
 }
 
 export const configurableTools = [
   { label: 'Code Artifact', value: 'code_artifact' },
   { label: 'Web Search', value: 'web_search' },
   { label: 'Python', value: 'python_coding' },
+  { label: 'Write File', value: 'write_file' },
+  { label: 'Edit File', value: 'edit_file' },
   { label: 'Bash', value: 'bash' },
   { label: 'Browser Use', value: 'browser_use' },
   { label: 'Task Analysis', value: 'task_analysis' },
@@ -146,7 +81,6 @@ export function useModelOptions() {
               provider: m.provider,
               Icon: getProviderIcon(m.provider),
               group: 'Gateway' as const,
-              supportsReasoning: !!m.reasoning,
             }))
           : [];
 
@@ -170,41 +104,12 @@ export function useModelOptions() {
                   // transport/compatibility mode — a Llama model served over an
                   // OpenAI-compatible endpoint should still show the Meta logo.
                   const family = inferModelFamily(m.label || m.modelId);
-                  // BYOK models don't come with Gateway catalog tags — the
-                  // user can point a BYOK connection at literally any base
-                  // URL, so there's no catalog to look their model up in.
-                  // Best-effort instead: fingerprint-match the model's OWN
-                  // id/label against every Gateway model id already confirmed
-                  // reasoning-capable (fast, no extra request — reuses
-                  // gatewayReasoningIds above), with a static well-known
-                  // naming-pattern fallback (o1/o3/r1/thinking/etc.) for
-                  // models the Gateway catalog doesn't carry at all. See
-                  // lib/reasoning-detection.ts for the full matching logic.
-                  //
-                  // Confirmed real bug (2026-07-11, user-reported "reasoning
-                  // still doesn't show despite enabling it"): this used to
-                  // be ONLY the heuristic guess above, completely ignoring
-                  // `m.reasoningEnabled` — the exact manual per-model
-                  // override the Settings page's "Thinking" toggle writes,
-                  // and the SAME field /api/direct/chat's route.ts already
-                  // trusts server-side (`manualReasoningOverride`) specifically
-                  // BECAUSE the heuristic has real false negatives. Net
-                  // effect: a user who manually enabled reasoning for a
-                  // model the heuristic didn't recognize (that's the whole
-                  // reason the toggle exists) got `supportsReasoning: false`
-                  // here regardless — hiding the ReasoningEffortMenu control
-                  // AND (see chat-input.tsx) never sending a reasoningEffort
-                  // at all, even though the server was fully ready to honor
-                  // it and stream back real reasoning parts. The manual
-                  // override must win outright, same as server-side.
-                  const supportsReasoning = m.reasoningEnabled === true || looksLikeReasoningModel(m.modelId || m.label || '', gatewayReasoningIds);
                   return {
                     label: `${p.label} · ${m.label || m.modelId}`,
                     value: `byok:${m.id}`,
                     provider: family,
                     Icon: getProviderIcon(family),
                     group: 'Your providers' as const,
-                    supportsReasoning,
                   };
                 })
             )
@@ -241,15 +146,10 @@ function parseModelValue(value: string): { requestedModel?: string; byokModelId?
 export function ModelPickerMenu({
   model,
   setModel,
-  reasoningEffort,
-  setReasoningEffort,
   children,
 }: {
   model: string;
   setModel: (model: string) => void;
-  /** Omit both if this surface doesn't support reasoning effort selection. */
-  reasoningEffort?: ReasoningEffort;
-  setReasoningEffort?: (level: ReasoningEffort) => void;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -337,82 +237,6 @@ export function ModelPickerMenu({
                 <div className="text-xs text-muted-foreground px-2 py-3 text-center">No models match "{query}"</div>
               )}
             </div>
-        </div>
-      </FloatingPanel>
-    </div>
-  );
-}
-
-/**
- * Standalone reasoning-effort toolbar control — split out of
- * ModelPickerMenu (2026-07-11) so it lives next to the Tools toggle in
- * chat-input.tsx's own toolbar instead of being buried inside the model
- * dropdown, where it was easy to miss and disconnected from the
- * "supports reasoning" gating a user actually cares about in the moment.
- * Self-hides (renders null) when the current model doesn't support
- * reasoning at all — same `supportsReasoning` flag ModelPickerMenu uses,
- * sourced from the real Gateway catalog's reasoning tags for Gateway
- * models, and the best-effort fingerprint heuristic (lib/reasoning-
- * detection.ts) for BYOK models, since there's no capability-discovery
- * API for an arbitrary BYOK base URL to check against.
- */
-export function ReasoningEffortMenu({
-  model,
-  reasoningEffort,
-  setReasoningEffort,
-  children,
-}: {
-  model: string;
-  reasoningEffort: ReasoningEffort;
-  setReasoningEffort: (level: ReasoningEffort) => void;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  const options = useModelOptions();
-  const selectedOption = useMemo(() => options.find(o => o.value === model), [options, model]);
-  const anchorRef = useRef<HTMLDivElement>(null);
-
-  // FIXED (2026-07-15, explicit user report: "I don't see the param of
-  // deepseek"): this used to hide the whole control on ANY unmatched
-  // lookup (`!selectedOption?.supportsReasoning` is true whenever
-  // `selectedOption` itself is undefined, not just when it's found and
-  // genuinely unsupported) -- and `selectedOption` is a live `.find()`
-  // against `useModelOptions()`'s freshly-fetched BYOK/Gateway list, which
-  // can legitimately miss for reasons that have nothing to do with actual
-  // capability: the options fetch hasn't resolved yet on a fresh mount, or
-  // a BYOK provider row got reconnected/recreated (new row id) while a
-  // resumed chat's `byokModelId` or the localStorage last-used value still
-  // points at the old one. A real reasoning-capable BYOK DeepSeek model
-  // picked exactly that unlucky timing would silently lose this entire
-  // control with zero explanation. Now only hides on a POSITIVE match
-  // that's confirmed unsupported; an unmatched lookup shows it rather than
-  // guessing it away -- consistent with this same file's own stated
-  // philosophy that sending `reasoning` to a provider that doesn't support
-  // it is always safe (ignored with a warning), so erring toward showing
-  // it costs nothing but hiding a real one silently costs a lot.
-  if (selectedOption && !selectedOption.supportsReasoning) return null;
-  if (!selectedOption && !model) return null;
-
-  return (
-    <div ref={anchorRef} className="relative inline-block">
-      <div onClick={() => setOpen(o => !o)}>{children}</div>
-      <FloatingPanel open={open} onClose={() => setOpen(false)} anchorRef={anchorRef} align="left">
-        <div className="w-40 rounded-lg border bg-popover text-popover-foreground shadow-lg overflow-hidden p-1">
-          {REASONING_EFFORT_LEVELS.map(level => (
-            <button
-              key={level}
-              onClick={() => {
-                setReasoningEffort(level);
-                setOpen(false);
-              }}
-              className={cn(
-                'flex items-center justify-between w-full px-2 py-1.5 rounded-md text-sm text-left hover:bg-accent',
-                reasoningEffort === level ? 'text-primary font-medium' : 'text-foreground'
-              )}
-            >
-              {REASONING_EFFORT_LABELS[level]}
-            </button>
-          ))}
         </div>
       </FloatingPanel>
     </div>
@@ -593,30 +417,7 @@ export function ChatConfigMenu({
  * Builds the structured routing signal for eve's `clientContext`, matching
  * apps/agent/agent/instructions.ts's <model_routing> hard rule.
  */
-// Reasoning-effort hint for the "Default" (eve root) chat path (2026-07-11,
-// follow-up to the reasoning-effort selector fix -- that selector only
-// ever rendered for an explicit Gateway/BYOK model pick, where
-// `reasoningEffort` is a real structured request-body param the direct
-// chat route applies via the AI SDK's `reasoning` option. Default/eve
-// chats have no equivalent structured passthrough (eve's own
-// `SendTurnPayload` has no `reasoning` field, and root's fixed model
-// isn't swapped per-turn -- see instructions.ts's file comment for why
-// that indirection was deliberately removed). Same best-effort pattern
-// already used for `disabledTools` just below (a plain-English
-// instruction folded into `clientContext`, not a hard API guarantee) --
-// weaker than the direct path's real enforcement, but still real
-// signal the model sees and generally follows, instead of the control
-// silently doing nothing at all for Default chats.
-const REASONING_EFFORT_HINTS: Partial<Record<ReasoningEffort, string>> = {
-  none: 'Answer this turn with no extended reasoning/thinking -- respond directly and quickly.',
-  minimal: 'Use minimal extended reasoning for this turn -- keep any thinking very brief.',
-  low: 'Use low extended reasoning effort for this turn.',
-  medium: 'Use medium extended reasoning effort for this turn -- think it through properly.',
-  high: 'Use high extended reasoning effort for this turn -- think carefully and thoroughly before answering.',
-  xhigh: 'Use maximum extended reasoning effort for this turn -- think as deeply and thoroughly as possible before answering.',
-};
-
-export function buildConfigContext(model: string, disabledTools: string[], reasoningEffort?: ReasoningEffort): string | undefined {
+export function buildConfigContext(model: string, disabledTools: string[]): string | undefined {
   const parts: string[] = [];
   if (model && model !== DEFAULT_MODEL_ID) {
     const parsed = parseModelValue(model);
@@ -624,9 +425,5 @@ export function buildConfigContext(model: string, disabledTools: string[], reaso
   }
   const toolLabels = configurableTools.filter(t => disabledTools.includes(t.value)).map(t => t.label);
   if (toolLabels.length) parts.push(`Avoid using these tools for this turn: ${toolLabels.join(', ')}.`);
-  if (reasoningEffort && reasoningEffort !== DEFAULT_REASONING_EFFORT) {
-    const hint = REASONING_EFFORT_HINTS[reasoningEffort];
-    if (hint) parts.push(hint);
-  }
   return parts.length ? parts.join('\n') : undefined;
 }

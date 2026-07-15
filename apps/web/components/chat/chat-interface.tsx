@@ -7,7 +7,7 @@ import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { resolveContextForSend, type AttachedContext } from './chat-context';
-import { buildConfigContext, DEFAULT_MODEL_ID, useReasoningEffort } from './chat-config';
+import { buildConfigContext, DEFAULT_MODEL_ID } from './chat-config';
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
@@ -168,7 +168,6 @@ export function ChatInterface({
       // persistence is a nice-to-have, never worth crashing the chat over.
     }
   }, []);
-  const [reasoningEffort, setReasoningEffort] = useReasoningEffort();
   const modelInitializedRef = useRef(false);
 
   // REMOVED (2026-07-15, user confirmed): there used to be a "self-heal"
@@ -434,8 +433,6 @@ export function ChatInterface({
         requestedModel={requestedModel}
         model={model}
         setModel={setModel}
-        reasoningEffort={reasoningEffort}
-        setReasoningEffort={setReasoningEffort}
         placeholder={placeholder}
         placeholderTitle={placeholderTitle}
         className={className}
@@ -462,8 +459,6 @@ export function ChatInterface({
       router={router}
       model={model}
       setModel={setModel}
-      reasoningEffort={reasoningEffort}
-      setReasoningEffort={setReasoningEffort}
       onSessionIdKnown={setLiveSessionId}
       isOnline={isOnline}
       isRecovering={isRecovering}
@@ -487,15 +482,11 @@ function ChatInterfaceInner({
   router,
   model,
   setModel,
-  reasoningEffort,
-  setReasoningEffort,
   onSessionIdKnown,
   isOnline,
   isRecovering,
   onTurnStateChange,
 }: ChatInterfaceProps & {
-  reasoningEffort: import('./chat-config').ReasoningEffort;
-  setReasoningEffort: (level: import('./chat-config').ReasoningEffort) => void;
   initialEvents?: any;
   initialSession?: any;
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -668,7 +659,7 @@ function ChatInterfaceInner({
       void (async () => {
         const [attachedContext, configHint] = await Promise.all([
           resolveContextForSend(opts?.attached ?? []),
-          Promise.resolve(buildConfigContext(opts?.model ?? '', opts?.disabledTools ?? [], reasoningEffort)),
+          Promise.resolve(buildConfigContext(opts?.model ?? '', opts?.disabledTools ?? [])),
         ]);
         const clientContext = [attachedContext, configHint].filter(Boolean).join('\n\n') || undefined;
         // Images (2026-07-11, photo-attach feature): eve's `send` accepts
@@ -698,14 +689,14 @@ function ChatInterfaceInner({
         });
       })();
     },
-    [agent, reasoningEffort]
+    [agent]
   );
 
   if (messages.length === 0 && !isBusy) {
     return (
       <div className="flex flex-col justify-center h-full p-4 gap-4 max-w-[800px] mx-auto">
         <div className="text-[26px] font-medium text-center mb-9 text-foreground">{placeholderTitle}</div>
-        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} reasoningEffort={reasoningEffort} onReasoningEffortChange={setReasoningEffort} />
+        <ChatInput onSend={onSend} placeholder={placeholder} sending={isBusy} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} />
         {turnError && (
           <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 text-center">
             {turnError}
@@ -766,7 +757,7 @@ function ChatInterfaceInner({
           </div>
         )}
         <div className="sticky bottom-0 z-10 w-full bg-background max-w-[832px] px-4 mx-auto py-4">
-          <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} reasoningEffort={reasoningEffort} onReasoningEffortChange={setReasoningEffort} />
+          <ChatInput onSend={onSend} sending={isBusy} streaming={agent.status === 'streaming'} onAbort={agent.stop} placeholder={placeholder} initialAttached={initialAttachedContext} model={model} onModelChange={setModel} />
         </div>
       </div>
     </AutoFixSendProvider>

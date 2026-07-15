@@ -1,31 +1,68 @@
-import { generateObject } from 'ai';
+import { generateText } from 'ai';
 import { z } from 'zod';
 import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 
-const PythonCodingResultSchema = z.object({
-  code: z.string().describe('The generated Python code'),
-  explanation: z.string().optional().describe('Brief explanation of the approach'),
-});
+function stripCodeFence(raw: string): string {
+  let stripped = raw.trim();
+  if (stripped.startsWith('```')) {
+    const firstNewline = stripped.indexOf('\n');
+    if (firstNewline !== -1) stripped = stripped.slice(firstNewline + 1);
+    if (stripped.endsWith('```')) stripped = stripped.slice(0, -3);
+  }
+  return stripped;
+}
 
 export const pythonCoding = {
   description: 'Generate Python code that satisfies a natural-language requirements description.',
   inputSchema: z.object({
     requirements: z.string().describe('The requirements to generate python code for'),
   }),
-  outputSchema: PythonCodingResultSchema,
   async execute({ requirements }: { requirements: string }, ctx?: ToolExecCtx) {
-    const { object } = await generateObject({
+    // FIXED (2026-07-15, real bug: "AI just stays stuck working on a long
+    // file, nothing happens") — this used to be `generateObject` against a
+    // `{ code: string, explanation?: string }` zod schema. Structured
+    // output forces the model to emit the code as a JSON STRING (every
+    // newline/quote backslash-escaped, burning extra output tokens per
+    // line versus plain text) inside one JSON object that is only valid
+    // once its closing brace/quote actually arrives. The moment "code"
+    // needed to hold anything long (e.g. requirements that describe
+    // reproducing/editing a large existing file inline), it reliably hit
+    // the model's own output-token ceiling mid-string: the JSON never
+    // closes, `generateObject` cannot parse a partial object at all, so
+    // the whole call rejects with NoObjectGeneratedError — no code, no
+    // file write, no visible progress, exactly the reported "stuck,
+    // nothing happened" symptom (repeated silent failures look that way
+    // to a user watching the chat, even though each individual call does
+    // reject rather than literally hang).
+    // `generateText` + a plain fenced code block (same proven pattern as
+    // this file's sibling tool-impl, code_artifact.ts) has no such
+    // failure mode: plain text has zero escaping overhead (more actual
+    // code fits before the same output-token ceiling), and even a
+    // response that DOES get cut off by the ceiling is still a usable,
+    // inspectable partial script instead of an unparseable, thrown-away
+    // JSON fragment. `maxOutputTokens` is also raised explicitly here
+    // (previously unset, so silently whatever the SDK/provider default
+    // happened to be for whichever fast model `model()` resolves to) --
+    // real headroom instead of an undocumented ceiling.
+    const { text } = await generateText({
       model: await model(undefined, ctx?.byokModel),
-      schema: PythonCodingResultSchema,
+      maxOutputTokens: 8192,
       // See task_analysis.ts's comment -- top-level `system`, not an
       // embedded `role: 'system'` message, is what actually survives
       // translation into Responses-API-style providers.
-      system: 'Write complete, runnable Python code that satisfies the given requirements.',
+      system:
+        'Write complete, runnable Python code that satisfies the given requirements. ' +
+        'Respond with ONLY the code in a single fenced ```python code block, no explanation ' +
+        'before or after it. For editing an existing long file, write a short, targeted script ' +
+        '(read the file, make precise string/regex replacements, write it back) rather than ' +
+        'reproducing the whole file as one inline string literal.',
       messages: [{ role: 'user', content: requirements }],
     });
-    return object;
+
+    const code = stripCodeFence(text);
+    return { code };
   },
 };
 
