@@ -1,4 +1,4 @@
-import { defineInstructions } from 'eve/instructions';
+import { defineDynamic, defineInstructions } from 'eve/instructions';
 import { buildPersonaInstructions } from './lib/persona.js';
 
 /**
@@ -29,7 +29,46 @@ import { buildPersonaInstructions } from './lib/persona.js';
  * model-catalog.ts) now only ever handles a turn when nothing was
  * explicitly picked (the "Default" option) — a real default, not a
  * required first hop for every turn.
+ *
+ * BUG (2026-07-15, user-reported and reproduced with a live trace):
+ * "AI_NoSuchToolError: Model tried to call unavailable tool 'agent'.
+ * Available tools: choose, web_crawl, web_search, task_analysis,
+ * code_artifact, python_coding, bash, browser_use, list_files,
+ * save_credential, list_credentials, inject_credential, create_skill,
+ * list_skills, recall_skill, get_preview_url, restart_sandbox" — no
+ * `agent` in that list. This was a STATIC `defineInstructions({ markdown:
+ * buildPersonaInstructions() })`, i.e. `includeAgentDelegation` defaulted
+ * true unconditionally for every session — root AND every subagent copy
+ * spawned via the built-in `agent` tool alike, since per eve's own
+ * subagents.mdx a built-in-tool child "inherits" the parent's
+ * instructions verbatim (a copy of the same agent). But per that same
+ * doc: "Subagent delegation is capped by default... At the configured
+ * depth, eve stops advertising subagent tools, including... the built-in
+ * `agent` tool" — so a child session that's at/past that depth cap
+ * genuinely has no `agent` tool anymore, while its (inherited, static)
+ * instructions still confidently told it to use one. That mismatch is
+ * exactly what the trace shows: a delegated "Claude" child tried to
+ * delegate again, got told the tool flat-out doesn't exist for it, and
+ * the turn died there.
+ *
+ * Fix: switched to `defineDynamic` so this resolves per-session instead
+ * of once at build time. `ctx.session.parent` is present only for a
+ * child subagent session (per eve's session-context.md), absent for the
+ * true root. Only the root is ever told about `agent` delegation now —
+ * every child, at any depth, gets the non-delegation phrasing. This is
+ * deliberately conservative (a depth-1 child technically still has
+ * `agent` available today) rather than trying to thread the exact
+ * configured depth cap through here: a child recursively delegating
+ * further is marginal value anyway, and "never mismatched" beats "right
+ * up until the last allowed depth."
  */
-export default defineInstructions({
-  markdown: buildPersonaInstructions(),
+export default defineDynamic({
+  events: {
+    'session.started': (_event, ctx) =>
+      defineInstructions({
+        markdown: buildPersonaInstructions({
+          includeAgentDelegation: !ctx.session.parent,
+        }),
+      }),
+  },
 });
