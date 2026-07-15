@@ -23,6 +23,12 @@ interface KnownService {
   hint: string;
   placeholder: string;
   tokenUrl: string;
+  /** Real brand logo, served from /public/integration-logos — pulled
+   *  straight from each provider's own site/docs (not AI-generated). */
+  icon: string;
+  /** Some marks (e.g. Pxxl's raster wordmark) look better on a subtle
+   *  tinted tile than bare on the card background. */
+  iconBg?: string;
 }
 
 const KNOWN_SERVICES: KnownService[] = [
@@ -32,6 +38,7 @@ const KNOWN_SERVICES: KnownService[] = [
     hint: 'Personal Access Token — used to deploy this project to your own Vercel account.',
     placeholder: 'Paste your Vercel token',
     tokenUrl: 'https://vercel.com/account/tokens',
+    icon: '/integration-logos/vercel.svg',
   },
   {
     service: 'github',
@@ -39,6 +46,7 @@ const KNOWN_SERVICES: KnownService[] = [
     hint: 'Fine-grained personal access token (repo scope) — used to push code to your own repos.',
     placeholder: 'Paste your GitHub token',
     tokenUrl: 'https://github.com/settings/tokens',
+    icon: '/integration-logos/github.svg',
   },
   {
     service: 'supabase',
@@ -46,20 +54,24 @@ const KNOWN_SERVICES: KnownService[] = [
     hint: 'Personal access token — used to provision/manage your own Supabase projects.',
     placeholder: 'Paste your Supabase token',
     tokenUrl: 'https://supabase.com/dashboard/account/tokens',
+    icon: '/integration-logos/supabase.svg',
   },
   {
     service: 'pxxl',
     name: 'Pxxl',
     hint: 'Scoped API key from Dashboard > API Keys — used to deploy to your own Pxxl workspace.',
     placeholder: 'Paste your Pxxl API key',
-    tokenUrl: 'https://pxxl.app',
+    tokenUrl: 'https://pxxl.app/dashboard/api-keys',
+    icon: '/integration-logos/pxxl.png',
   },
   {
     service: 'sendbyte',
     name: 'Sendbyte',
     hint: 'API key — used to send transactional email through your own Sendbyte account.',
     placeholder: 'Paste your Sendbyte API key',
-    tokenUrl: 'https://docs.sendbyte.africa',
+    tokenUrl: 'https://app.sendbyte.africa/emails',
+    icon: '/integration-logos/sendbyte.svg',
+    iconBg: 'bg-[#054525]',
   },
 ];
 
@@ -112,7 +124,17 @@ function IntegrationCard({
   return (
     <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
       <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 flex flex-col gap-1">
+        <div className="flex-1 flex items-start gap-3">
+          <div
+            className={
+              'w-9 h-9 rounded-md border shrink-0 flex items-center justify-center overflow-hidden ' +
+              (def.iconBg ?? 'bg-background')
+            }
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element -- tiny static brand marks from /public, not worth next/image's remote-pattern config */}
+            <img src={def.icon} alt={`${def.name} logo`} className="w-6 h-6 object-contain" />
+          </div>
+          <div className="flex-1 flex flex-col gap-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-foreground">{def.name}</span>
             <span
@@ -126,6 +148,7 @@ function IntegrationCard({
             </span>
           </div>
           <div className="text-xs text-muted-foreground">{def.hint}</div>
+          </div>
         </div>
         {connected && (
           <button
