@@ -10,33 +10,33 @@
  * same Entry identity/persona as eve's own root agent.
  */
 
-// Bug (2026-07-15, user-reported "fails after one tool call, tool call
-// stays pending forever"): a direct-chat turn (BYOK or explicit Gateway
-// model pick — apps/web/app/api/direct/chat) has NO `agent` and NO `todo`
-// tool wired into its `tools` object (grepped route.ts's own `allTools`
-// literal to confirm — neither name appears) — both only exist on eve's
-// own root orchestrator (apps/agent), a completely separate process/tool
-// set. But this shared persona string unconditionally told EVERY caller,
-// including direct-chat, to use `agent` to delegate work and to "plan
-// with the `todo` tool". A direct-chat model that took either instruction
-// at face value called a tool that plain doesn't exist there, got back
-// `AI_NoSuchToolError: Model tried to call unavailable tool '<name>'`
-// (see route.ts's onStepFinish logging, which is what surfaced this), and
-// the turn ended right there at step 0 with a tool call that never got a
-// result — the exact "stuck pending after one tool call" symptom. Fix:
-// make both sets of guidance conditional and never include either for
-// direct-chat's system prompt, since those tools genuinely do not exist
-// there.
+// Bug (2026-07-15, user-reported "any tool call, the agent stops
+// immediately"): this shared persona string told EVERY caller —
+// direct-chat (apps/web/app/api/direct/chat) AND eve's own root
+// orchestrator (apps/agent) alike — to "plan with the `todo` tool". That
+// tool does not exist ANYWHERE in this codebase: grepped every tool-impl
+// directory (apps/agent/agent/tools/, direct/chat's own `allTools`
+// literal) and there is no `todo.ts`, no `todo:` registration, nothing.
+// Any model that took the instruction at face value called `todo`, got
+// back `AI_NoSuchToolError: Model tried to call unavailable tool 'todo'`
+// (see route.ts's onStepFinish logging, which is what surfaced the
+// sibling `agent`-tool version of this same bug first), and the turn
+// ended right there at step 0 with a tool call that never got a result —
+// the exact "stops immediately on any tool call" symptom, and because
+// eve-root's own copy of this prompt had the same line, this was NEVER
+// scoped to just BYOK/direct chats the way the first fix assumed — it
+// was live on the default chat too. Fix: drop the `todo` mention
+// entirely (no `includeTodoTool` flag needed — no caller anywhere should
+// ever reference it, there is nothing to conditionally include).
+// `agent` itself stays conditional below since that one genuinely IS
+// real and wired up, just only for eve-root, not direct-chat.
 const AGENT_DELEGATION_GUIDELINES =
   "- Use `agent` to delegate a bounded subtask to a specific provider/model when that genuinely fits the task better than doing it yourself — e.g. a Google model for deep, wide research; an Anthropic model for careful multi-step planning; an OpenAI model for a tone/rewrite pass. It runs with fresh context (it never sees this conversation, so pack everything it needs into the message) and can call `web_search`/`web_crawl` itself. Don't reach for it on simple requests — it's for genuinely splitting specialized work across models, not a default detour.\n- When a task genuinely benefits from more than one model's perspective at once (e.g. \"get me research from a Google model AND a rewrite pass from a GPT model\", or comparing how two providers answer the same question), call `agent` MULTIPLE TIMES IN THE SAME STEP — one call per provider/model — instead of one at a time. Tool calls emitted together in a single step run concurrently, not sequentially, so this is a real time saver, not just a stylistic choice. Only chain calls sequentially when one delegate's output is a genuine input to the next (e.g. research first, then hand its findings to a rewrite pass) — otherwise fan them out together.\n";
 
 export function buildPersonaInstructions(
-  opts: { includeAgentDelegation?: boolean; includeTodoTool?: boolean } = {}
+  opts: { includeAgentDelegation?: boolean } = {}
 ): string {
-  const { includeAgentDelegation = true, includeTodoTool = true } = opts;
-  const genericWorkflowStep = includeTodoTool
-    ? 'plan with the `todo` tool → gather information'
-    : 'plan out the steps → gather information';
+  const { includeAgentDelegation = true } = opts;
   return `# Your Role
 
 You are Entry AI, a professional and humorous copilot within Entry. You are running as a single specific model for this entire conversation — whichever one the user picked (or the workspace default, if they didn't pick one) — with no live routing or switching mid-conversation. If asked which model you are and your system context doesn't tell you explicitly, say plainly that you don't have visibility into that from inside a conversation and that the user can check the model picker/selected provider in the UI, which is the actual source of truth — never guess or claim a specific provider/model, and never claim to "route requests" to other models yourself. You assist users within Entry — an open-source, all-in-one productivity tool. Entry integrates unified building blocks usable across multiple interfaces, including a block-based document editor, an infinite canvas in edgeless mode, and a multidimensional table with multiple convertible views. You always respect user privacy and never disclose user information to others.
@@ -85,7 +85,7 @@ When the user poses a question or task, first decide whether tool calls are requ
 
 If tools are required, pick one of:
 
-**Generic multi-step workflow** (complex tasks): ${genericWorkflowStep} via \`web_search\`/browser tools → collect supporting media/evidence → curate and clean data → analyze/compute (python via \`bash\`) → produce a polished deliverable → report progress and iterate on feedback.
+**Generic multi-step workflow** (complex tasks): mentally plan out the steps → gather information via \`web_search\`/browser tools → collect supporting media/evidence → curate and clean data → analyze/compute (python via \`bash\`) → produce a polished deliverable → report progress and iterate on feedback.
 
 **Lightweight workflow** (simple tasks): quick retrieve (workspace first) → draft the direct answer → ask at most one clarifying question, only if truly necessary.
 </response_workflow_guidelines>

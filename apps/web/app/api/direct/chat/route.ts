@@ -101,12 +101,15 @@ import { getPreviewUrlTool } from '@entry/agent/tool-impls/get_preview_url';
 import { restartSandboxTool } from '@entry/agent/tool-impls/restart_sandbox';
 import { z } from 'zod';
 
-// Direct-chat has no `agent` (sub-agent delegation) or `todo` tool wired
-// into its own `tools` object below — both are eve-root-only capabilities
-// (apps/agent). Telling the model to use them anyway causes a real crash:
+// Direct-chat has no `agent` (sub-agent delegation) tool wired into its
+// own `tools` object below -- that's an eve-root-only capability
+// (apps/agent). Telling the model to use it anyway causes a real crash:
 // AI_NoSuchToolError kills the turn at step 0 with the tool call stuck
-// unresolved forever (see persona.ts's file comment for the full story).
-const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: false, includeTodoTool: false });
+// unresolved forever (see persona.ts's file comment for the full story,
+// including the sibling `todo` version of this bug that hit BOTH
+// direct-chat and eve-root and is now fixed by removing that mention
+// entirely rather than gating it).
+const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: false });
 
 export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const { session } = await getUserSessionFromRequest(req);
