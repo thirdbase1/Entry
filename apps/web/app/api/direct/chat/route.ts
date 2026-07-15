@@ -123,8 +123,6 @@ import { z } from 'zod';
 // every other tool here, and `ctx.byokModel` so BYOK turns never touch
 // the Gateway for it either -- same policy as every other sub-generation
 // tool), it's safe to tell the model about it again.
-const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: true });
-
 export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -268,6 +266,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // gets longer -- see prompt-cache.ts's file comment for the full "why".
     const converted = await convertToModelMessages(messages);
     return applyConversationCacheControl(converted);
+  });
+  // Built PER-REQUEST (not module-level) now that it includes the
+  // actual resolved model identity (providerLabel/modelId) -- see
+  // persona.ts's `runningAs` comment for why: this is what lets the
+  // model answer "what model are you" correctly instead of guessing.
+  const SYSTEM_PROMPT = buildPersonaInstructions({
+    includeAgentDelegation: true,
+    runningAs: `${providerLabel} · ${modelId}`,
   });
   const instructions = compactionResult.then(({ summaryText }) => {
     const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
