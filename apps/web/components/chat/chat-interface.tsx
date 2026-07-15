@@ -180,9 +180,34 @@ export function ChatInterface({
   // REAL catalog once it loaded). Once the live model list is in, if the
   // current non-default model doesn't match any real option, clear it
   // back to Default instead of silently sending a bogus slug forever.
+  // REGRESSION (2026-07-15, minutes after shipping this guard):
+  // "started a new chat, after one tool call the entire page auto-reloads
+  // and the AI stops working" -- this check used to also run for a
+  // RESUMED session (sessionId set), racing the seeding effect below and
+  // the crossedBucket redirect further down. A resumed chat's model is
+  // DB-authoritative (initial.byokModelId/requestedModel) -- it must
+  // NEVER be second-guessed against a freshly fetched catalog, because
+  // that catalog can legitimately NOT contain it for reasons that have
+  // nothing to do with it being invalid: the BYOK connection got
+  // disabled after the chat started (useModelOptions filters BYOK models
+  // by `isEnabled`), a Gateway model got deprecated/renamed, or the
+  // catalog fetch is just plain slower than the chat's first tool call.
+  // When that happened, this effect force-reset `model` to
+  // DEFAULT_MODEL_ID, which flipped `liveIsDirect` to false, which made
+  // `crossedBucket` true against the still-direct `rowIsDirect` --
+  // and the crossedBucket effect further down treats that combination as
+  // "user tried to switch buckets," toasts, and `router.push`es to a
+  // brand-new /chats page, abandoning the live conversation entirely.
+  // That's the exact reported "auto reload, AI stops working": a real
+  // navigation away, not a crash. Scoping this to brand-new chats only
+  // (no sessionId) keeps the original fix -- clearing a truly bogus
+  // never-clickable leftover value like literal "auto" seen in
+  // production logs -- without ever touching an already-resumed thread's
+  // locked-in model.
   const modelOptions = useModelOptions();
   const modelSanityCheckedRef = useRef(false);
   useEffect(() => {
+    if (sessionId) return; // resumed chat: model is DB-authoritative, never second-guess it
     if (modelSanityCheckedRef.current) return;
     if (modelOptions.length === 0) return; // catalog still loading
     if (model === DEFAULT_MODEL_ID || !model) return;
@@ -198,7 +223,7 @@ export function ChatInterface({
         // best-effort only
       }
     }
-  }, [modelOptions, model]);
+  }, [sessionId, modelOptions, model]);
 
   useEffect(() => {
     if (!sessionId) return;
