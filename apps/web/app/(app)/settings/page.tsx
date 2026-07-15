@@ -31,6 +31,11 @@ interface ProviderModel {
    *  reasoning-capable model the heuristic doesn't recognize can still
    *  show "thinking". Off by default; purely additive. */
   reasoningEnabled: boolean;
+  /** "Test connection" result (settings page, 2026-07-15) — null status
+   *  means never tested. Persisted server-side so this survives a reload. */
+  lastTestedAt?: string | null;
+  lastTestStatus?: 'success' | 'error' | null;
+  lastTestError?: string | null;
 }
 
 interface Provider {
@@ -344,6 +349,56 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
     [provider, onUpdate]
   );
 
+  // "Test connection" (2026-07-15, explicit request): pick a model from a
+  // dropdown (useful once a provider has several) and fire one real,
+  // minimal completion at it so a user can confirm the connection actually
+  // works before relying on it in chat — green on success, red + the
+  // upstream error on failure. Result persists via the model row's own
+  // lastTestStatus/lastTestError (see the PATCH-like update in the /test
+  // route), so onUpdate here just mirrors what the server already saved.
+  const [testModelId, setTestModelId] = useState<string>(provider.models[0]?.id ?? '');
+  const [testing, setTesting] = useState(false);
+
+  useEffect(() => {
+    if (!provider.models.some(m => m.id === testModelId)) {
+      setTestModelId(provider.models[0]?.id ?? '');
+    }
+    // Only re-derive when the set of models actually changes, not on every
+    // keystroke elsewhere on the card.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider.models]);
+
+  const testConnection = useCallback(async () => {
+    if (!testModelId) return;
+    setTesting(true);
+    try {
+      const res = await fetch(`/api/user/byok/providers/${provider.id}/models/${testModelId}/test`, { method: 'POST' });
+      const json = await safeJson(res);
+      const success = res.ok && json.success;
+      onUpdate({
+        ...provider,
+        models: provider.models.map(m =>
+          m.id === testModelId
+            ? { ...m, lastTestedAt: new Date().toISOString(), lastTestStatus: success ? 'success' : 'error', lastTestError: success ? null : (json.error ?? 'Test failed') }
+            : m
+        ),
+      });
+    } catch (e: any) {
+      onUpdate({
+        ...provider,
+        models: provider.models.map(m =>
+          m.id === testModelId
+            ? { ...m, lastTestedAt: new Date().toISOString(), lastTestStatus: 'error', lastTestError: e.message ?? 'Request failed' }
+            : m
+        ),
+      });
+    } finally {
+      setTesting(false);
+    }
+  }, [testModelId, provider, onUpdate]);
+
+  const testedModel = provider.models.find(m => m.id === testModelId);
+
   return (
     <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
       <div className="flex items-start justify-between gap-2">
@@ -445,6 +500,21 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
         <div className="flex flex-col gap-1 border-t pt-2">
           {provider.models.map(m => (
             <div key={m.id} className="flex items-center gap-2 py-1">
+              <span
+                title={
+                  m.lastTestStatus === 'success'
+                    ? `Connection OK${m.lastTestedAt ? ' — ' + new Date(m.lastTestedAt).toLocaleString() : ''}`
+                    : m.lastTestStatus === 'error'
+                      ? (m.lastTestError ?? 'Test failed')
+                      : 'Not tested yet'
+                }
+                className={cn(
+                  'w-2 h-2 rounded-full shrink-0',
+                  m.lastTestStatus === 'success' && 'bg-green-500',
+                  m.lastTestStatus === 'error' && 'bg-destructive',
+                  !m.lastTestStatus && 'bg-muted-foreground/30'
+                )}
+              />
               <span className="flex-1 truncate text-sm text-foreground font-mono">{m.label || m.modelId}</span>
               <div className="flex items-center gap-1.5">
                 <span className="text-xs text-muted-foreground">Thinking</span>
@@ -463,6 +533,38 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
         providerId={provider.id}
         onAdded={m => onUpdate({ ...provider, models: [...provider.models.filter(x => x.modelId !== m.modelId), m] })}
       />
+
+      {provider.models.length > 0 && (
+        <div className="flex items-center gap-2 border-t pt-2 flex-wrap">
+          <span className="text-xs text-muted-foreground shrink-0">Test connection</span>
+          <select
+            value={testModelId}
+            onChange={e => setTestModelId(e.target.value)}
+            className="h-7 px-2 rounded-md border bg-background text-foreground text-xs outline-none focus:border-primary max-w-[180px]"
+          >
+            {provider.models.map(m => (
+              <option key={m.id} value={m.id}>{m.label || m.modelId}</option>
+            ))}
+          </select>
+          <button
+            onClick={testConnection}
+            disabled={testing || !testModelId}
+            className="h-7 px-2.5 rounded-md border text-xs hover:bg-accent transition-colors disabled:opacity-50 text-foreground shrink-0"
+          >
+            {testing ? 'Testing…' : 'Test'}
+          </button>
+          {testedModel?.lastTestStatus === 'success' && (
+            <span className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-500">
+              <span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> Connected ✓
+            </span>
+          )}
+          {testedModel?.lastTestStatus === 'error' && (
+            <span className="flex items-center gap-1.5 text-xs text-destructive truncate max-w-[240px]" title={testedModel.lastTestError ?? undefined}>
+              <span className="w-2 h-2 rounded-full bg-destructive inline-block shrink-0" /> {testedModel.lastTestError ?? 'Failed'}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

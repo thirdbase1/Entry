@@ -32,5 +32,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { 
     update: { label: body.data.label },
   });
 
-  return NextResponse.json({ id: model.id, modelId: model.modelId, label: model.label, isEnabled: model.isEnabled, reasoningEnabled: model.reasoningEnabled });
+  return NextResponse.json({
+    id: model.id,
+    modelId: model.modelId,
+    label: model.label,
+    isEnabled: model.isEnabled,
+    reasoningEnabled: model.reasoningEnabled,
+    lastTestedAt: model.lastTestedAt,
+    lastTestStatus: model.lastTestStatus,
+    lastTestError: model.lastTestError,
+  });
 });

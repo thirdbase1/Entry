@@ -13,12 +13,8 @@
  * for a BYOK turn is to never hand the turn to eve in the first place).
  */
 import type { LanguageModel } from 'ai';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { createOpenAI } from '@ai-sdk/openai';
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { prisma, decryptApiKey } from '@entry/db';
-import { createGatewayRetryFetch } from './gateway-retry-fetch';
+import { buildModelClient } from './build-model-client';
 
 export interface ResolvedByokModel {
   model: LanguageModel;
@@ -42,45 +38,14 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
   const { provider } = modelRow;
   const apiKey = provider.encryptedApiKey ? decryptApiKey(provider.encryptedApiKey) : undefined;
 
-  let model: LanguageModel;
-  switch (provider.compatibility) {
-    case 'ANTHROPIC':
-      model = createAnthropic({ baseURL: provider.baseUrl, apiKey })(modelRow.modelId);
-      break;
-    case 'GOOGLE':
-      model = createGoogleGenerativeAI({ baseURL: provider.baseUrl, apiKey })(modelRow.modelId);
-      break;
-    case 'OPENAI_RESPONSES':
-      // OpenAI *Responses* API shape (input/output items, streamed as
-      // `response.*` SSE events) -- NOT the Chat Completions shape the
-      // OPENAI case below speaks. This is what aggregators proxying
-      // Kie.ai-style per-model-family endpoints actually implement (e.g.
-      // `POST https://api.kie.ai/grok/v1/responses` for their Grok 4.5).
-      // `.responses(modelId)` on the official OpenAI provider appends
-      // exactly `/responses` to whatever baseURL is configured, so the
-      // user's saved baseUrl must already include the family segment +
-      // `/v1` (`https://api.kie.ai/grok/v1`) -- see normalize-base-url.ts.
-      // `apiKey ?? ''` (never leave it `undefined`) -- @ai-sdk/openai's
-      // `loadApiKey()` silently falls back to reading `process.env.OPENAI_API_KEY`
-      // whenever `apiKey` is `undefined`. This connection is a per-user BYOK
-      // row that may legitimately have no key saved; it must never fall
-      // through to any ambient/shared key the deployment happens to have set
-      // for something else. An empty string still hits `typeof apiKey ===
-      // 'string'` in loadApiKey and is returned as-is (matching this
-      // connection's actual saved state), so a truly keyless upstream just
-      // 401s on `Authorization: Bearer ` like it should.
-      model = createOpenAI({ baseURL: provider.baseUrl, apiKey: apiKey ?? '' }).responses(modelRow.modelId);
-      break;
-    case 'OPENAI':
-    default:
-      // `fetch` override retries a confirmed transient gateway bug seen on
-      // at least one real OpenAI-compatible relay (2026-07-11 user report,
-      // "Function id ... is not found" 404) -- see that file's comment for
-      // why this is safe (only retries an exact known-transient pattern,
-      // every other 404 passes through untouched).
-      model = createOpenAICompatible({ name: provider.label, baseURL: provider.baseUrl, apiKey, fetch: createGatewayRetryFetch() })(modelRow.modelId);
-      break;
-  }
+  // Shared with the settings page's "Test connection" route
+  // (build-model-client.ts) -- identical construction either way, just
+  // extracted so testing a model doesn't require it to already be
+  // isEnabled / looked up the way this function's signature demands.
+  const model: LanguageModel = buildModelClient(
+    { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl, apiKey },
+    modelRow.modelId
+  );
 
   return { model, providerLabel: provider.label, modelId: modelRow.modelId, reasoningEnabled: modelRow.reasoningEnabled };
 }

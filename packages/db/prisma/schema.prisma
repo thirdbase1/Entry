@@ -483,6 +483,14 @@ model UserModelProviderModel {
   // works via the heuristic, purely an opt-in escape hatch.
   reasoningEnabled Boolean @default(false) @map("reasoning_enabled")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  // "Test connection" result (2026-07-15, settings page BYOK feature):
+  // lets a user verify a saved model actually answers before relying on
+  // it in chat, from a small model-picker + button on the provider card.
+  // Persisted (not just component state) so the green/red result survives
+  // a settings page reload instead of resetting to "untested" every visit.
+  lastTestedAt  DateTime? @map("last_tested_at") @db.Timestamptz(3)
+  lastTestStatus String?  @map("last_test_status") @db.VarChar // 'success' | 'error', null = never tested
+  lastTestError  String?  @map("last_test_error") @db.Text
 
   provider UserModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
 
