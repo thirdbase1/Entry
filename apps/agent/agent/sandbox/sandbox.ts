@@ -1,11 +1,19 @@
 /**
- * Overrides eve's default sandbox purely to pin the `vercel()` backend
- * explicitly (so local `eve dev` behaves identically to the hosted Vercel
- * deployment instead of falling back to Docker/microsandbox/just-bash —
- * confirmed via eve's own docs that `defaultBackend()` only picks Vercel
- * Sandbox automatically when `process.env.VERCEL` is set) and to bake the
- * agent-browser + Chrome-for-Testing install into the template's
- * `bootstrap` hook.
+ * Overrides eve's default sandbox to use a custom E2B-backed
+ * SandboxBackend (see ./e2b-backend.ts) instead of `vercel()`.
+ *
+ * WHY: production hit Vercel Sandbox's Hobby-plan usage cap (402
+ * payment_required, resets 2026-08-01, would otherwise require a Pro
+ * plan upgrade). E2B (github.com/e2b-dev/e2b, Apache-2.0) is a
+ * genuinely open-source sandbox provider reachable over plain HTTPS —
+ * no local Docker daemon or KVM needed, so it actually works inside a
+ * Vercel serverless function (confirmed via eve's own docs that
+ * docker()/microsandbox() both require host-level daemons unavailable
+ * there). Falls back to vercel() automatically when E2B_API_KEY isn't
+ * configured yet, so nothing breaks mid-migration.
+ *
+ * Also bakes the agent-browser + Chrome-for-Testing install into the
+ * template's `bootstrap` hook.
  *
  * This REPLACES packages/ai/src/kernel/browser-kernel.ts entirely — eve's
  * sandbox already gives us the persistent-session-with-resume, template
@@ -25,9 +33,10 @@
  */
 import { defineSandbox } from 'eve/sandbox';
 import { vercel } from 'eve/sandbox/vercel';
+import { e2b } from './e2b-backend.js';
 
 export default defineSandbox({
-  backend: vercel({ resources: { vcpus: 2 } }),
+  backend: process.env.E2B_API_KEY ? e2b() : vercel({ resources: { vcpus: 2 } }),
 
   // Bump this if the bootstrap steps below ever change, so eve knows to
   // rebuild the cached template instead of reusing a stale one.

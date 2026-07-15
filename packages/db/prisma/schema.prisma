@@ -677,3 +677,22 @@ model ChatFileTree {
 
   @@map("chat_file_trees")
 }
+
+// Persists the E2B snapshot ID captured by the custom eve sandbox backend
+// (apps/agent/agent/sandbox/e2b-backend.ts) during `prewarm()`. E2B has no
+// "build a reusable image from a Dockerfile" concept that maps onto eve's
+// arbitrary-JS `bootstrap()` hook the way Docker/Vercel Sandbox templates
+// do — the closest primitive is `sandbox.createSnapshot()` (one-to-many:
+// a single snapshot can spawn many new independent sandboxes). `prewarm()`
+// runs in the Vercel BUILD container; `create()` runs later in the
+// deployed serverless function — different processes entirely, so the
+// resulting snapshotId has to be persisted somewhere both sides can reach.
+// Postgres (already wired up everywhere else in this app) is the simplest
+// option, rather than inventing a second storage mechanism just for this.
+model SandboxTemplate {
+  templateKey String   @id @map("template_key") @db.VarChar
+  snapshotId  String   @map("snapshot_id") @db.VarChar
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("sandbox_templates")
+}
