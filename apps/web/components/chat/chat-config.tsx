@@ -372,7 +372,26 @@ export function ReasoningEffortMenu({
   const selectedOption = useMemo(() => options.find(o => o.value === model), [options, model]);
   const anchorRef = useRef<HTMLDivElement>(null);
 
-  if (!selectedOption?.supportsReasoning) return null;
+  // FIXED (2026-07-15, explicit user report: "I don't see the param of
+  // deepseek"): this used to hide the whole control on ANY unmatched
+  // lookup (`!selectedOption?.supportsReasoning` is true whenever
+  // `selectedOption` itself is undefined, not just when it's found and
+  // genuinely unsupported) -- and `selectedOption` is a live `.find()`
+  // against `useModelOptions()`'s freshly-fetched BYOK/Gateway list, which
+  // can legitimately miss for reasons that have nothing to do with actual
+  // capability: the options fetch hasn't resolved yet on a fresh mount, or
+  // a BYOK provider row got reconnected/recreated (new row id) while a
+  // resumed chat's `byokModelId` or the localStorage last-used value still
+  // points at the old one. A real reasoning-capable BYOK DeepSeek model
+  // picked exactly that unlucky timing would silently lose this entire
+  // control with zero explanation. Now only hides on a POSITIVE match
+  // that's confirmed unsupported; an unmatched lookup shows it rather than
+  // guessing it away -- consistent with this same file's own stated
+  // philosophy that sending `reasoning` to a provider that doesn't support
+  // it is always safe (ignored with a warning), so erring toward showing
+  // it costs nothing but hiding a real one silently costs a lot.
+  if (selectedOption && !selectedOption.supportsReasoning) return null;
+  if (!selectedOption && !model) return null;
 
   return (
     <div ref={anchorRef} className="relative inline-block">

@@ -25,6 +25,7 @@ import { useState } from 'react';
 import type { PreviewStatus } from './use-preview-autofix';
 import { ChatFilesTab } from './chat-files-tab';
 import { ChatTerminalTab } from './chat-terminal-tab';
+import { ChatDeploymentsTab } from './chat-deployments-tab';
 
 export function ChatPreviewPanel({
   sessionId,
@@ -43,7 +44,7 @@ export function ChatPreviewPanel({
 }) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [tab, setTab] = useState<'preview' | 'files' | 'terminal'>('preview');
+  const [tab, setTab] = useState<'preview' | 'files' | 'terminal' | 'history'>('preview');
 
   const restart = async () => {
     setRestarting(true);
@@ -77,6 +78,13 @@ export function ChatPreviewPanel({
           >
             Terminal
           </button>
+          <button
+            onClick={() => setTab('history')}
+            className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'history' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
+            title="Deployment history — revert to any past Vercel deployment"
+          >
+            History
+          </button>
         </div>
         <div className="flex items-center gap-2">
           {tab === 'preview' && state?.available && (
@@ -106,6 +114,7 @@ export function ChatPreviewPanel({
       <div className="flex-1 min-h-0 relative bg-background">
         {tab === 'files' && <ChatFilesTab sessionId={sessionId} />}
         {tab === 'terminal' && <ChatTerminalTab sessionId={sessionId} />}
+        {tab === 'history' && <ChatDeploymentsTab />}
 
         {tab === 'preview' && !state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
 

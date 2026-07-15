@@ -15,24 +15,25 @@
  * path stays read-only -- same reason it was already read-only for
  * viewing before this change.
  *
- * FIXED (2026-07-15, real confirmed bug -- "the file tree is not
- * properly connected to show the sandbox files"): this only ever fetched
- * once, on mount. The sandbox itself was always the right one (same
- * `direct-chat-${chatId}` handle the bash/browser_use tools use --
- * verified in lib/direct-chat/sandbox.ts), the tab was just showing a
- * frozen snapshot from whenever it happened to first open -- any file the
- * agent created or edited afterward while this tab stayed open was
- * invisible until the user remembered to click Refresh by hand. Now
- * polls on the same cadence as the preview status (while the tree view is
+ * Polls on the same cadence as the preview status (while the tree view is
  * showing, not the file-content editor -- no point refetching the whole
  * tree while someone's actively reading/editing one open file), so it
- * actually tracks the live sandbox instead of a snapshot of it.
+ * tracks the live sandbox instead of a frozen snapshot of it.
+ *
+ * REDESIGNED (2026-07-15, explicit user report: "file tree showing me
+ * file size too large" + "improve the file tree to look more better and
+ * advanced"): paired with the API route no longer hard-blocking on size,
+ * the tree itself now looks like a real IDE explorer instead of a plain
+ * emoji list -- extension-aware icons, per-row file size, rotating
+ * chevrons instead of swapping folder emoji, vertical indent guides for
+ * nesting depth, and a visible (not silently-failing) truncation banner
+ * when a file got capped instead of a flat "too large" refusal.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { CodeEditor } from './code-editor';
 
 type Entry = { path: string; type: 'file' | 'dir'; size?: number };
-type TreeNode = { name: string; path: string; type: 'file' | 'dir'; children: Map<string, TreeNode> };
+type TreeNode = { name: string; path: string; type: 'file' | 'dir'; size?: number; children: Map<string, TreeNode> };
 
 function buildTree(entries: Entry[]): TreeNode {
   const root: TreeNode = { name: '', path: '', type: 'dir', children: new Map() };
@@ -47,6 +48,7 @@ function buildTree(entries: Entry[]): TreeNode {
           name: part,
           path: parts.slice(0, idx + 1).join('/'),
           type: isLast ? entry.type : 'dir',
+          size: isLast ? entry.size : undefined,
           children: new Map(),
         });
       }
@@ -54,6 +56,87 @@ function buildTree(entries: Entry[]): TreeNode {
     });
   }
   return root;
+}
+
+// Folders sort before files, then alphabetical -- standard IDE ordering,
+// nicer to scan than the flat path-sort the raw entries come in as.
+function sortedChildren(node: TreeNode): TreeNode[] {
+  return Array.from(node.children.values()).sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function formatSize(bytes?: number): string {
+  if (bytes == null) return '';
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+// Small, dependency-free extension -> {icon, color} map. Not trying to
+// cover every possible extension, just enough that a real project's tree
+// visibly differentiates code / config / docs / images / data instead of
+// one flat file icon for everything.
+const EXT_STYLE: Record<string, { icon: string; color: string }> = {
+  ts: { icon: 'TS', color: '#3b82f6' },
+  tsx: { icon: 'TX', color: '#3b82f6' },
+  js: { icon: 'JS', color: '#eab308' },
+  jsx: { icon: 'JX', color: '#eab308' },
+  mjs: { icon: 'JS', color: '#eab308' },
+  json: { icon: '{}', color: '#f97316' },
+  jsonc: { icon: '{}', color: '#f97316' },
+  md: { icon: '#', color: '#94a3b8' },
+  mdx: { icon: '#', color: '#94a3b8' },
+  css: { icon: '#', color: '#a855f7' },
+  scss: { icon: '#', color: '#a855f7' },
+  html: { icon: '<>', color: '#f97316' },
+  py: { icon: 'PY', color: '#22c55e' },
+  rs: { icon: 'RS', color: '#f97316' },
+  go: { icon: 'GO', color: '#38bdf8' },
+  sql: { icon: 'DB', color: '#38bdf8' },
+  prisma: { icon: 'DB', color: '#38bdf8' },
+  env: { icon: 'ENV', color: '#22c55e' },
+  yml: { icon: 'YML', color: '#94a3b8' },
+  yaml: { icon: 'YML', color: '#94a3b8' },
+  toml: { icon: 'TOML', color: '#94a3b8' },
+  lock: { icon: 'LOCK', color: '#64748b' },
+  sh: { icon: '$_', color: '#22c55e' },
+  png: { icon: 'IMG', color: '#ec4899' },
+  jpg: { icon: 'IMG', color: '#ec4899' },
+  jpeg: { icon: 'IMG', color: '#ec4899' },
+  svg: { icon: 'IMG', color: '#ec4899' },
+  gif: { icon: 'IMG', color: '#ec4899' },
+  ico: { icon: 'IMG', color: '#ec4899' },
+};
+
+function FileIcon({ name }: { name: string }) {
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  const style = EXT_STYLE[ext];
+  if (!style) {
+    return <span className="inline-flex items-center justify-center w-4 h-4 shrink-0 text-[8px] font-bold rounded-sm text-muted-foreground/70 border border-current/20">•</span>;
+  }
+  return (
+    <span
+      className="inline-flex items-center justify-center w-4 h-4 shrink-0 text-[7px] font-bold rounded-sm leading-none"
+      style={{ color: style.color, backgroundColor: `${style.color}1a` }}
+    >
+      {style.icon.length > 2 ? style.icon.slice(0, 2) : style.icon}
+    </span>
+  );
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="w-3 h-3 shrink-0 text-muted-foreground/60 transition-transform duration-150"
+      style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+      fill="none"
+    >
+      <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
 function TreeRow({
@@ -68,18 +151,23 @@ function TreeRow({
   // Root-level dirs start open; deeper ones start collapsed so a real
   // project doesn't dump hundreds of expanded rows on first render.
   const [open, setOpen] = useState(depth < 1);
-  const children = Array.from(node.children.values());
+  const children = sortedChildren(node);
+  const indentGuides = Array.from({ length: depth });
 
   if (node.type === 'file') {
     return (
       <button
         onClick={() => onOpenFile(node.path)}
-        className="w-full text-left text-xs px-2 py-1 rounded hover:bg-accent flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
-        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        className="group relative w-full text-left text-[12.5px] pr-2 py-[3px] flex items-center gap-1.5 text-muted-foreground hover:text-foreground hover:bg-accent/60 rounded-sm"
+        style={{ paddingLeft: `${depth * 14 + 20}px` }}
         title={node.path}
       >
-        <span className="opacity-60">📄</span>
-        <span className="truncate">{node.name}</span>
+        {indentGuides.map((_, i) => (
+          <span key={i} className="absolute top-0 bottom-0 w-px bg-border/60" style={{ left: `${i * 14 + 14}px` }} />
+        ))}
+        <FileIcon name={node.name} />
+        <span className="truncate flex-1">{node.name}</span>
+        {node.size != null && <span className="text-[10px] tabular-nums text-muted-foreground/50 opacity-0 group-hover:opacity-100 shrink-0">{formatSize(node.size)}</span>}
       </button>
     );
   }
@@ -88,13 +176,22 @@ function TreeRow({
     <div>
       <button
         onClick={() => setOpen(o => !o)}
-        className="w-full text-left text-xs px-2 py-1 rounded hover:bg-accent flex items-center gap-1.5 font-medium"
-        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        className="group relative w-full text-left text-[12.5px] pr-2 py-[3px] flex items-center gap-1 font-medium hover:bg-accent/60 rounded-sm"
+        style={{ paddingLeft: `${depth * 14 + 6}px` }}
       >
-        <span className="opacity-70">{open ? '📂' : '📁'}</span>
+        {indentGuides.map((_, i) => (
+          <span key={i} className="absolute top-0 bottom-0 w-px bg-border/60" style={{ left: `${i * 14 + 14}px` }} />
+        ))}
+        <ChevronIcon open={open} />
         <span className="truncate">{node.name || '/'}</span>
       </button>
-      {open && children.map(child => <TreeRow key={child.path} node={child} depth={depth + 1} onOpenFile={onOpenFile} />)}
+      {open && (
+        <div className="animate-in fade-in slide-in-from-top-0.5 duration-100">
+          {children.map(child => (
+            <TreeRow key={child.path} node={child} depth={depth + 1} onOpenFile={onOpenFile} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -104,7 +201,7 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [isDirect, setIsDirect] = useState(false);
-  const [openFile, setOpenFile] = useState<{ path: string; content?: string; error?: string; loading: boolean } | null>(null);
+  const [openFile, setOpenFile] = useState<{ path: string; content?: string; error?: string; loading: boolean; truncatedNotice?: string } | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -142,7 +239,7 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
         const res = await fetch(`/api/chats/${sessionId}/files?content=${encodeURIComponent(path)}`);
         const data = await res.json();
         if (data.error) setOpenFile({ path, loading: false, error: data.error });
-        else setOpenFile({ path, loading: false, content: data.content });
+        else setOpenFile({ path, loading: false, content: data.content, truncatedNotice: data.truncatedNotice });
       } catch {
         setOpenFile({ path, loading: false, error: 'Could not load this file.' });
       }
@@ -168,11 +265,19 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
     return (
       <div className="flex flex-col h-full">
         <div className="h-9 border-b border-border px-3 flex items-center justify-between shrink-0">
-          <span className="text-xs font-mono truncate">{openFile.path}</span>
-          <button onClick={() => setOpenFile(null)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <FileIcon name={openFile.path.split('/').pop() || openFile.path} />
+            <span className="text-xs font-mono truncate">{openFile.path}</span>
+          </div>
+          <button onClick={() => setOpenFile(null)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent shrink-0">
             Back
           </button>
         </div>
+        {openFile.truncatedNotice && (
+          <div className="px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-500/10 border-b border-amber-500/20 shrink-0">
+            {openFile.truncatedNotice}
+          </div>
+        )}
         <div className="flex-1 min-h-0 relative">
           {openFile.loading && <div className="text-xs text-muted-foreground p-3">Loading…</div>}
           {openFile.error && <div className="text-xs text-muted-foreground p-3">{openFile.error}</div>}
@@ -180,7 +285,7 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
             <CodeEditor
               path={openFile.path}
               content={openFile.content}
-              readOnly={!isDirect}
+              readOnly={!isDirect || Boolean(openFile.truncatedNotice)}
               onSave={content => saveFile(openFile.path, content)}
             />
           )}
@@ -199,13 +304,13 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
           {loading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
-      <div className="flex-1 overflow-auto py-1">
+      <div className="flex-1 overflow-auto py-1.5 px-1">
         {!entries && !notice && <div className="text-xs text-muted-foreground px-3 py-2">Loading…</div>}
         {entries && entries.length === 0 && !notice && (
           <div className="text-xs text-muted-foreground px-3 py-2">No files yet.</div>
         )}
         {notice && <div className="text-xs text-muted-foreground px-3 py-2">{notice}</div>}
-        {tree && Array.from(tree.children.values()).map(child => <TreeRow key={child.path} node={child} depth={0} onOpenFile={openFileContent} />)}
+        {tree && sortedChildren(tree).map(child => <TreeRow key={child.path} node={child} depth={0} onOpenFile={openFileContent} />)}
       </div>
     </div>
   );

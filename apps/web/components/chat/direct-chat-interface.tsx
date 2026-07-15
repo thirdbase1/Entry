@@ -236,7 +236,37 @@ function DirectChatSession({
         // `chat.status` (re-)initialized to.
         const lastMsg = chat.messages[chat.messages.length - 1];
         const looksIncomplete = !lastMsg || lastMsg.role === 'user';
-        if (chat.status !== 'streaming' && chat.status !== 'submitted' && chat.status !== 'error' && !looksIncomplete) return;
+        // FOUND AND FIXED (2026-07-15, real bug hunt off actual production
+        // logs -- confirmed via `vercel logs`: this endpoint was being
+        // polled every 3s nonstop, and separately, the user's repeated
+        // "agent stops instantly right after a tool call" report was
+        // traced to THIS exact line, not the AI SDK/patch-package theory
+        // from earlier). The old condition treated `chat.status ===
+        // 'streaming'` (and 'submitted') as reasons to proceed into the
+        // recovery fetch+overwrite below -- i.e. it ran this poll's
+        // `chat.setMessages(persisted)` clobber path during a perfectly
+        // healthy, actively-streaming turn, INCLUDING mid-tool-call, every
+        // single 3s tick. A tool-call's result gets persisted server-side
+        // the moment it completes, which routinely makes
+        // `persisted.length >= chat.messages.length` true for an instant
+        // right at that exact boundary -- a totally healthy turn, not a
+        // dropped one. That was enough to trigger
+        // `chat.setMessages(persisted)`, forcibly replacing the AI SDK
+        // Chat instance's own live, actively-updating message array with a
+        // static persisted snapshot mid-stream. Overwriting `messages` out
+        // from under an in-flight stream reader like that desyncs the
+        // hook's internal state from the actual network stream -- which is
+        // exactly what "stops responding right after a tool call, no
+        // error shown" looks like from the outside: not a crash, just this
+        // component silently replacing the live turn with a frozen
+        // snapshot the instant a tool call handed off to the next step.
+        // Recovery should only ever act on a turn that's ACTUALLY stuck --
+        // a real terminal 'error', or the reload-mid-turn case
+        // (`looksIncomplete`) the 2026-07-11 fix above already covers --
+        // never on 'streaming'/'submitted', which mean the live connection
+        // itself already believes it's fine.
+        if (chat.status === 'streaming' || chat.status === 'submitted') return;
+        if (chat.status !== 'error' && !looksIncomplete) return;
         try {
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) return;

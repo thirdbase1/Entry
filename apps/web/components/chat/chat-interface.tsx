@@ -237,9 +237,35 @@ export function ChatInterface({
         try {
           const snap = await fetchSnapshot(activeId);
           const persistedEvents = Array.isArray(snap?.events) ? (snap!.events as unknown[]) : null;
-          const currentEvents = Array.isArray(initial?.events) ? (initial!.events as unknown[]) : [];
+          // FIXED (2026-07-15, explicit user report: "chat automatically
+          // reloaded" with no real disconnect -- confirmed NOT a
+          // navigation, a same-page remount): this used to compare against
+          // `initial.events`, a snapshot fetched exactly ONCE at mount and
+          // never touched again during a normal live conversation (the
+          // only two writers of `initial` are that one mount-time fetch
+          // and this very recovery branch). After even a single exchange,
+          // the true persisted count on the server is always bigger than
+          // that stale mount-time snapshot, so `persistedEvents.length >
+          // currentEvents.length` was true almost every time this ran --
+          // and `tryRecover` runs on every `visibilitychange`-to-visible,
+          // an ordinary, frequent, totally benign event (alt-tab, clicking
+          // another window, a notification shade opening on mobile). The
+          // one thing actually gating a false trip was `looksStuck()`,
+          // which reads true for a brief, completely normal instant on
+          // EVERY turn (right after sending a message, before the
+          // assistant's first token arrives) -- so switching tabs during
+          // that ordinary latency window and back was enough to force a
+          // full remount of the live session with zero real outage.
+          // `turnStateRef.current.messageCount` is the live, currently-
+          // rendered count (kept accurate in real time by
+          // handleTurnStateChange), so comparing against that instead of
+          // the frozen mount-time snapshot means this only ever trips when
+          // the server genuinely has events the live view hasn't rendered
+          // -- an actual dropped/stalled connection, not routine tab
+          // switching.
+          const currentCount = turnStateRef.current.messageCount;
           if (!persistedEvents) return;
-          if (persistedEvents.length > currentEvents.length) {
+          if (persistedEvents.length > currentCount) {
             setInitial(snap ?? {});
             setRecoveryKey(k => k + 1);
             hasEverDroppedRef.current = true;
@@ -289,8 +315,36 @@ export function ChatInterface({
     // overwrite the user's "last used model" localStorage default just
     // from opening an old chat, and (b) as of this fix, would incorrectly
     // flip userChangedModelRef and defeat its entire purpose above.
-    if (initial.byokModelId) setModelState(`byok:${initial.byokModelId}`);
-    else if (initial.requestedModel) setModelState(`gateway:${initial.requestedModel}`);
+    //
+    // FIXED (2026-07-15, explicit user report: "model I choose doesn't
+    // save even if I reload"): this only ever seeded from the chat's
+    // SERVER-persisted byokModelId/requestedModel, which only gets written
+    // once a turn actually completes on that chat. An existing-but-empty
+    // chat (sessionId already assigned, e.g. right after creation, or one
+    // where the user picked a model but hasn't sent a message with it
+    // yet) has neither field set — and this component's very own model
+    // initializer above (`useState`) deliberately returns DEFAULT_MODEL_ID
+    // whenever `sessionId` is truthy, skipping localStorage entirely on
+    // the assumption THIS effect would always settle the real value. For
+    // that specific "existing chat, no model recorded yet" case it never
+    // did, so the picker silently reset to Default on every reload
+    // regardless of what was saved in localStorage. Now falls back to the
+    // same last-used-model localStorage read the brand-new-chat path
+    // already uses, instead of leaving it stuck on Default.
+    if (initial.byokModelId) {
+      setModelState(`byok:${initial.byokModelId}`);
+    } else if (initial.requestedModel) {
+      setModelState(`gateway:${initial.requestedModel}`);
+    } else if (typeof window !== 'undefined') {
+      try {
+        const saved = window.localStorage.getItem(LAST_MODEL_STORAGE_KEY);
+        if (saved) setModelState(saved);
+      } catch {
+        // localStorage can throw in private-browsing/quota-exceeded cases —
+        // falling through to whatever `model` already is (DEFAULT_MODEL_ID)
+        // is a fine degrade, never worth crashing the chat over.
+      }
+    }
   }, [initial]);
 
   // FIXED (2026-07-11): this used to lock a resumed chat's routing to

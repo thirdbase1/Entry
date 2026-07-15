@@ -9,6 +9,22 @@
  * GET ?content=<relative path> returns that one file's text content
  * instead of the tree — only supported on the direct/BYOK path, since
  * that's the only path with a live sandbox handle outside a tool call.
+ *
+ * FIXED (2026-07-15, explicit user report: "file tree showing me file
+ * size too large for just a 272kb file" + "no max file size to
+ * display"): the old single 200KB cap blocked previewing (and saving)
+ * perfectly ordinary source files outright with a 413 — 200KB is smaller
+ * than plenty of real lockfiles/generated files/bundles a user would
+ * legitimately want to just look at. There is no longer any preview
+ * block at all: anything up to PREVIEW_TRUNCATE_BYTES (a generous 8MB —
+ * far beyond any real source file, only pathological cases like an
+ * accidentally-opened binary/media file hit it) is returned in full, and
+ * anything bigger is truncated with a clear "truncated" notice instead of
+ * refusing to show it. Saving keeps a separate, still-generous cap
+ * (SAVE_LIMIT_BYTES) since that content round-trips through a shell
+ * heredoc and gets held in the browser's editor state — 8MB there too,
+ * just as a sanity backstop against pasting something absurd, not a
+ * realistic ceiling anyone should ever actually hit.
  */
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getChatSession } from '@entry/copilot';
@@ -16,7 +32,8 @@ import { prisma } from '@entry/db';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 
 const EXCLUDED = ['node_modules', '.git', '.next', 'dist', 'build', '.eve', '.vercel', '.turbo', '__pycache__', '.cache'];
-const MAX_CONTENT_BYTES = 200 * 1024;
+const PREVIEW_TRUNCATE_BYTES = 8 * 1024 * 1024;
+const SAVE_LIMIT_BYTES = 8 * 1024 * 1024;
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -72,8 +89,8 @@ export async function PUT(req: Request, { params }: { params: Promise<{ sessionI
   if (typeof content !== 'string') {
     return Response.json({ error: 'content must be a string' }, { status: 400 });
   }
-  if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_BYTES) {
-    return Response.json({ error: `File is too large to save (limit ${MAX_CONTENT_BYTES / 1024}KB).` }, { status: 413 });
+  if (Buffer.byteLength(content, 'utf8') > SAVE_LIMIT_BYTES) {
+    return Response.json({ error: `File is too large to save (${Math.round(Buffer.byteLength(content, 'utf8') / 1024 / 1024)}MB, limit ${SAVE_LIMIT_BYTES / 1024 / 1024}MB).` }, { status: 413 });
   }
 
   try {
@@ -121,12 +138,20 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
         const sizeCheck = await sandbox.run({ command: `stat -c%s ${shellQuote(contentPath)} 2>/dev/null || echo -1` });
         const size = Number(sizeCheck.stdout.trim());
         if (size < 0) return Response.json({ error: 'File not found' }, { status: 404 });
-        if (size > MAX_CONTENT_BYTES) {
-          return Response.json({ error: `File is too large to preview (${Math.round(size / 1024)}KB, limit ${MAX_CONTENT_BYTES / 1024}KB).` }, { status: 413 });
-        }
-        const read = await sandbox.run({ command: `cat ${shellQuote(contentPath)}` });
+        // No hard block on size anymore (see file header) — truncate only
+        // the pathologically huge cases and say so, never refuse outright.
+        const truncated = size > PREVIEW_TRUNCATE_BYTES;
+        const read = truncated
+          ? await sandbox.run({ command: `head -c ${PREVIEW_TRUNCATE_BYTES} ${shellQuote(contentPath)}` })
+          : await sandbox.run({ command: `cat ${shellQuote(contentPath)}` });
         if (read.exitCode !== 0) return Response.json({ error: read.stderr.slice(0, 300) || 'Could not read file' }, { status: 500 });
-        return Response.json({ path: contentPath, content: read.stdout });
+        return Response.json({
+          path: contentPath,
+          content: read.stdout,
+          size,
+          truncated,
+          ...(truncated ? { truncatedNotice: `Showing first ${Math.round(PREVIEW_TRUNCATE_BYTES / 1024 / 1024)}MB of ${Math.round(size / 1024 / 1024)}MB — file too large to load in full.` } : {}),
+        });
       }
 
       const entries = await listLive(sandbox);
