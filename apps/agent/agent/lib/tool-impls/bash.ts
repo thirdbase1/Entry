@@ -21,16 +21,16 @@ export const bash = {
     command: z.string().describe('The shell command to execute'),
   }),
   async execute({ command }: { command: string }, ctx: ToolExecCtx) {
+    // SECURITY (2026-07-15): this used to auto-`source ~/.entry_env`
+    // before every command, because inject_credential used to write
+    // decrypted secrets there for later commands like this one to pick
+    // up. That file is never written anymore — inject_credential now
+    // runs its one authenticated command itself with the secret scoped
+    // to that single process only (see inject_credential.ts), so there
+    // is no longer any credential-bearing dotfile for a plain `bash`
+    // call to source, intentionally. Do not reintroduce this pattern.
     const sandbox = await ctx.getSandbox();
-    // Auto-source ~/.entry_env (see inject_credential.ts) before every
-    // command, transparently — `2>/dev/null` makes this a silent no-op
-    // before any credential has ever been injected (file doesn't exist
-    // yet) or on sandboxes that never use one at all. This is what makes
-    // injected credentials actually usable on THIS path without the model
-    // needing to remember to source it itself every time (eve's own
-    // native default-path bash tool can't be patched the same way from
-    // here — see inject_credential.ts's file comment).
-    const result = await sandbox.run({ command: `source ~/.entry_env 2>/dev/null; ${command}` });
+    const result = await sandbox.run({ command });
     return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
   },
 };

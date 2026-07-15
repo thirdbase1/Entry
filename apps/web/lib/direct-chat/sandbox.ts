@@ -41,7 +41,7 @@ import { Sandbox } from '@vercel/sandbox';
 
 export interface DirectChatSandbox {
   id: string;
-  run(opts: { command: string }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  run(opts: { command: string; env?: Record<string, string> }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
 
 async function bootstrap(sandbox: Sandbox): Promise<void> {
@@ -79,8 +79,14 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
 
   return {
     id: sandbox.name ?? chatId,
-    async run({ command }) {
-      const result = await sandbox.runCommand('bash', ['-c', command], { timeoutMs: 5 * 60 * 1000 });
+    async run({ command, env }) {
+      // `env` here is passed straight through to @vercel/sandbox's own
+      // per-call `runCommand` option — scoped to this one spawned
+      // process only, never persisted to the sandbox's ambient env or
+      // any file (see inject_credential.ts for why that distinction
+      // matters: it's what makes a credential unreadable by any later,
+      // separate command).
+      const result = await sandbox.runCommand({ cmd: 'bash', args: ['-c', command], timeoutMs: 5 * 60 * 1000, env });
       const [stdout, stderr] = await Promise.all([result.stdout(), result.stderr()]);
       return { exitCode: result.exitCode ?? 1, stdout, stderr };
     },

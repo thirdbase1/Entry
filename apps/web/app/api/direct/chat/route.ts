@@ -354,7 +354,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     inject_credential: tool({
       description: injectCredentialTool.description,
       inputSchema: injectCredentialTool.inputSchema,
-      execute: (input: { service: string; label?: string; envVarName: string }) => injectCredentialTool.execute(input, execCtx),
+      execute: (input: { service: string; label?: string; envVarName: string; command: string }) => injectCredentialTool.execute(input, execCtx),
     }),
     create_skill: tool({
       description: createSkillTool.description,
