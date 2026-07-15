@@ -267,14 +267,15 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     const converted = await convertToModelMessages(messages);
     return applyConversationCacheControl(converted);
   });
-  // Built PER-REQUEST (not module-level) now that it includes the
-  // actual resolved model identity (providerLabel/modelId) -- see
-  // persona.ts's `runningAs` comment for why: this is what lets the
-  // model answer "what model are you" correctly instead of guessing.
-  const SYSTEM_PROMPT = buildPersonaInstructions({
-    includeAgentDelegation: true,
-    runningAs: `${providerLabel} · ${modelId}`,
-  });
+  // REMOVED (2026-07-15, explicit user request): this used to pass
+  // `runningAs: \`${providerLabel} · ${modelId}\`` here so the persona
+  // prompt would tell the model exactly what it's running as. The user
+  // does not want the model name/provider injected into the system
+  // prompt at all -- identity questions should get whatever answer the
+  // model naturally gives, with no steering either way. `providerLabel`/
+  // `modelId` are still resolved above and still used for logging/
+  // response headers, just no longer threaded into the prompt.
+  const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: true });
   const instructions = compactionResult.then(({ summaryText }) => {
     const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
     if (!summaryText) return systemMessage;

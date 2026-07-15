@@ -1,6 +1,5 @@
 import { defineDynamic, defineInstructions } from 'eve/instructions';
 import { buildPersonaInstructions } from './lib/persona.js';
-import { resolveModelIdForProvider } from './lib/model-catalog.js';
 
 /**
  * Root = shared persona only.
@@ -73,28 +72,18 @@ import { resolveModelIdForProvider } from './lib/model-catalog.js';
 // session lineage from an instructions resolver.
 type SessionWithParent = { parent?: { sessionId: string; callId: string; rootSessionId: string } };
 
-// Resolved once at module load (same call agent.ts's own `primaryModelId`
-// makes, and the Gateway catalog result it hits is effectively static
-// per deployment) so the root agent can truthfully answer "what model
-// are you" instead of persona.ts falling back to omitting the identity
-// line entirely for lack of a known answer -- see persona.ts's
-// `runningAs` comment for the full "why" (2026-07-15 user report).
-const rootModelId = await resolveModelIdForProvider('anthropic');
-
+// REMOVED (2026-07-15, explicit user request): this used to resolve
+// `rootModelId` here and thread it into persona.ts as `runningAs` so the
+// root agent could recite its exact provider/model when asked. The user
+// does not want the model's name/provider injected via system prompt at
+// all -- identity questions get whatever answer the model would give on
+// its own, no steering either way. See persona.ts's own comment.
 export default defineDynamic({
   events: {
     'session.started': (_event, ctx) => {
       const isChild = !!(ctx.session as unknown as SessionWithParent).parent;
       return defineInstructions({
-        markdown: buildPersonaInstructions({
-          includeAgentDelegation: !isChild,
-          // Child sessions omit this too: today they're very likely
-          // unreachable (see the file comment above), and if one ever
-          // does run, defaulting to the same root identity here would be
-          // an outright lie the moment a genuinely different model is
-          // ever wired into that path.
-          runningAs: isChild ? undefined : rootModelId,
-        }),
+        markdown: buildPersonaInstructions({ includeAgentDelegation: !isChild }),
       });
     },
   },

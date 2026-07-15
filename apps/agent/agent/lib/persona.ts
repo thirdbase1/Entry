@@ -34,51 +34,23 @@ const AGENT_DELEGATION_GUIDELINES =
   "- Use `agent` to delegate a bounded subtask to a specific provider/model when that genuinely fits the task better than doing it yourself — e.g. a Google model for deep, wide research; an Anthropic model for careful multi-step planning; an OpenAI model for a tone/rewrite pass. It runs with fresh context (it never sees this conversation, so pack everything it needs into the message) and can call `web_search`/`web_crawl` itself. Don't reach for it on simple requests — it's for genuinely splitting specialized work across models, not a default detour.\n- When a task genuinely benefits from more than one model's perspective at once (e.g. \"get me research from a Google model AND a rewrite pass from a GPT model\", or comparing how two providers answer the same question), call `agent` MULTIPLE TIMES IN THE SAME STEP — one call per provider/model — instead of one at a time. Tool calls emitted together in a single step run concurrently, not sequentially, so this is a real time saver, not just a stylistic choice. Only chain calls sequentially when one delegate's output is a genuine input to the next (e.g. research first, then hand its findings to a rewrite pass) — otherwise fan them out together.\n";
 
 export function buildPersonaInstructions(
-  opts: { includeAgentDelegation?: boolean; runningAs?: string } = {}
+  opts: { includeAgentDelegation?: boolean } = {}
 ): string {
-  const { includeAgentDelegation = true, runningAs } = opts;
-  // FIXED (2026-07-15, explicit user report + confirmed via production
-  // logs: "I switched to Claude Sonnet 5 mid-chat but it told me it's
-  // Opus 4.8"): server logs proved the backend genuinely called
-  // claude-sonnet-5 for that turn (route.ts's own `x-direct-chat-model`
-  // header + step-finished logging both confirmed it) — there was NO
-  // routing bug. The actual cause: this prompt used to instruct EVERY
-  // model to deflect ("say you don't have visibility... never guess or
-  // claim a specific provider/model") instead of just being told the
-  // truth, because at the time this was written the caller genuinely
-  // had no reliable way to know. That's no longer true for direct-chat
-  // (BYOK/Gateway explicit picks) — route.ts already resolves the exact
-  // providerLabel/modelId being called BEFORE streamText runs, it was
-  // just never threaded into the prompt. Models are well known to be
-  // unreliable at self-identifying from training alone (more so for
-  // forward-dated model names that don't exist in any real training
-  // corpus, like this workspace's), so guessing was always going to
-  // misfire — the fix is to just tell it, not to ask it to intuit or
-  // deflect. Falls back to the old honest-deflection instruction only
-  // when the caller genuinely doesn't know (e.g. eve's root default
-  // path, where the underlying model is fixed by deployment config, not
-  // resolved per turn the same way).
-  // 2026-07-15 (explicit user request): the old fallback branch here
-  // used to instruct the model to REFUSE/deflect identity questions
-  // ("say you don't have visibility... never guess or claim a specific
-  // provider/model") whenever `runningAs` wasn't supplied. Dropped
-  // entirely, not just for the direct-chat case above -- no caller
-  // should be telling a model to refuse an honest question it might
-  // actually be able to answer. When `runningAs` genuinely isn't known
-  // (only the child-subagent-session branch below, which today is very
-  // likely unreachable dead code -- see instructions.ts's file comment:
-  // the custom `agent` tool wins over eve's built-in one on slug and
-  // never spawns a nested eve session, it does one plain `generateText`
-  // call with its own separate system prompt in tool-impls/agent.ts, not
-  // this one), the identity line is simply omitted -- no instruction to
-  // lie, guess, or deflect either way; the model just answers however it
-  // naturally would with no extra steering.
-  const identityLine = runningAs
-    ? `You are currently running as ${runningAs} for this conversation — if asked which model you are, say exactly that, plainly and confidently, instead of guessing or describing yourself as any other model/version.`
-    : '';
+  const { includeAgentDelegation = true } = opts;
+  // REMOVED (2026-07-15, explicit user request): this used to accept a
+  // `runningAs` option and splice a `"You are currently running as
+  // {provider} · {model} ... say exactly that"` line into the prompt, so
+  // the model would recite a fed answer instead of identifying itself on
+  // its own. The user explicitly does not want the model's name/provider
+  // injected via system prompt at all, in either direction (neither
+  // telling it the truth nor telling it to deflect) — if asked "what
+  // model are you", it should answer however it naturally would with
+  // zero steering either way. Every caller (route.ts, instructions.ts)
+  // has had its `runningAs` plumbing removed to match — see those files'
+  // own comments.
   return `# Your Role
 
-You are Entry AI, a professional and humorous copilot within Entry. ${identityLine ? identityLine + ' ' : ''}You assist users within Entry — an open-source, all-in-one productivity tool. Entry integrates unified building blocks usable across multiple interfaces, including a block-based document editor, an infinite canvas in edgeless mode, and a multidimensional table with multiple convertible views. You always respect user privacy and never disclose user information to others.
+You are Entry AI, a professional and humorous copilot within Entry. You assist users within Entry — an open-source, all-in-one productivity tool. Entry integrates unified building blocks usable across multiple interfaces, including a block-based document editor, an infinite canvas in edgeless mode, and a multidimensional table with multiple convertible views. You always respect user privacy and never disclose user information to others.
 
 <content_analysis>
 - Analyze all document and file fragments provided with the user's query
