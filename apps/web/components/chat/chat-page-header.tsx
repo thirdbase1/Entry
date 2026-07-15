@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useLibraryStore, useAllItems, type Chat } from '@/store/library';
 import { cn } from '@/lib/utils';
@@ -19,15 +19,28 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
 
   const [copied, setCopied] = useState(false);
   const [sharing, setSharing] = useState(false);
-  // Reverted (2026-07-14, explicit user request: "that preview panel
-  // should only open when I touch it") -- the 2026-07-11 change above
-  // made it default open on every chat load, which the user has now
-  // explicitly asked to undo: it should stay closed until they actually
-  // click "Preview" themselves. The auto-fix behavior (usePreviewAutoFix
-  // below) is unaffected either way -- it already runs regardless of
-  // whether this panel is open, so a broken preview still gets noticed
-  // and escalated to the agent even while this stays closed by default.
   const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Simplified header (2026-07-15, user feedback: "the header looks too
+  // full"). It used to show 4 separate buttons in a row (favorite star,
+  // replay, share, preview) at all times. Share and Preview are the two
+  // actions people actually reach for regularly, so those stay as
+  // top-level buttons; Favorite and Replay are less frequent, so they
+  // move into a small "more" (⋯) menu instead of taking up permanent
+  // header real estate. No functionality removed, just tucked away.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setMoreOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, [moreOpen]);
 
   // Always running (2026-07-11, explicit user request: "not when I click
   // preview should it be stating [the error]") -- mounted here rather than
@@ -66,43 +79,6 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
       <div className="text-sm font-medium text-foreground truncate">{chat?.title ?? 'New Chat'}</div>
       <div className="flex items-center gap-2">
         <button
-          onClick={toggle}
-          className={cn(
-            'w-8 h-8 rounded-md flex items-center justify-center hover:bg-accent transition-colors',
-            isFav && 'text-primary'
-          )}
-          title={isFav ? 'Remove from favorites' : 'Add to favorites'}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill={isFav ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2">
-            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-          </svg>
-        </button>
-        {/*
-          The original renders a second icon button here using blocksuite's
-          CommentIcon with NO onClick handler at all (verified in the real
-          source, pages/chats/chat.tsx's ChatPageHeader) — a shipped but
-          non-functional placeholder for a comments feature that was never
-          wired up. Rather than ship a dead button, this repurposes the
-          exact same icon shape (real SVG path lifted from
-          @blocksuite/icons/rc's CommentIcon, not approximated) for the
-          "open chat replay" action — same visual weight/position as the
-          original, but it actually does something.
-        */}
-        <Link
-          href={`/chats/${sessionId}/playback`}
-          title="Replay this chat"
-          className="w-8 h-8 rounded-md flex items-center justify-center hover:bg-accent transition-colors text-muted-foreground"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-            <path
-              fill="currentColor"
-              fillRule="evenodd"
-              d="M12.5 3.75a7.75 7.75 0 0 0-7.022 11.033.85.85 0 0 1 .068.5l-.634 3.805 3.804-.634a.85.85 0 0 1 .5.068A7.75 7.75 0 1 0 12.5 3.75M3.25 11.5a9.25 9.25 0 1 1 5.517 8.466l-4.506.75a.85.85 0 0 1-.978-.977l.751-4.506A9.2 9.2 0 0 1 3.25 11.5"
-              clipRule="evenodd"
-            />
-          </svg>
-        </Link>
-        <button
           onClick={share}
           disabled={sharing}
           title="Create a public, view-only link anyone can open without signing in"
@@ -124,6 +100,56 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
             <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" aria-hidden="true" />
           )}
         </button>
+        <div className="relative" ref={moreRef}>
+          <button
+            onClick={() => setMoreOpen(v => !v)}
+            title="More actions"
+            className={cn(
+              'w-8 h-8 rounded-md flex items-center justify-center hover:bg-accent transition-colors',
+              moreOpen && 'bg-accent'
+            )}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="5" cy="12" r="2" />
+              <circle cx="12" cy="12" r="2" />
+              <circle cx="19" cy="12" r="2" />
+            </svg>
+          </button>
+          {moreOpen && (
+            <div className="absolute right-0 top-9 z-20 w-44 rounded-md border border-border bg-card shadow-lg py-1">
+              <button
+                onClick={() => {
+                  toggle();
+                  setMoreOpen(false);
+                }}
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-accent transition-colors',
+                  isFav && 'text-primary'
+                )}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill={isFav ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2">
+                  <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                </svg>
+                {isFav ? 'Remove from favorites' : 'Add to favorites'}
+              </button>
+              <Link
+                href={`/chats/${sessionId}/playback`}
+                onClick={() => setMoreOpen(false)}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-accent transition-colors text-foreground"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                  <path
+                    fill="currentColor"
+                    fillRule="evenodd"
+                    d="M12.5 3.75a7.75 7.75 0 0 0-7.022 11.033.85.85 0 0 1 .068.5l-.634 3.805 3.804-.634a.85.85 0 0 1 .5.068A7.75 7.75 0 1 0 12.5 3.75M3.25 11.5a9.25 9.25 0 1 1 5.517 8.466l-4.506.75a.85.85 0 0 1-.978-.977l.751-4.506A9.2 9.2 0 0 1 3.25 11.5"
+                    clipRule="evenodd"
+                  />
+                </svg>
+                Replay this chat
+              </Link>
+            </div>
+          )}
+        </div>
       </div>
       {previewOpen && (
         <ChatPreviewPanel
