@@ -204,6 +204,39 @@ Notes:
 2. Visit `https://<your-domain>/sign-in` — should show the login page.
 3. Try signing in with email/password or OAuth.
 4. Start a chat at `/chats` — eve agent should respond via `/eve/v1/*` routes.
+5. **Record a Version** (see Step 6) — this is not optional, it's how the
+   product's own "revert if I did something wrong" feature stays usable.
+
+## Step 6 — Record a Version (do this after EVERY production deploy)
+
+The chat UI's "History" tab (`ChatDeploymentsTab`, backed by
+`/api/admin/versions`) is a custom, app-native checkpoint system — plain-
+language labels, no git/GitHub/Vercel jargon shown to the user — that lets
+the user instantly self-service revert production if a change breaks
+something, with zero rebuild wait (it rides Vercel's Instant Rollback
+under the hood, repointing production at the already-built artifact from
+that version). It only works if a version row actually exists for every
+build that goes live, so:
+
+**Immediately after every successful `vercel deploy --prebuilt --prod`**,
+record what shipped:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $ADMIN_DEBUG_TOKEN" \
+  -H "Content-Type: application/json" \
+  https://<your-domain>/api/admin/versions \
+  -d '{"label":"<one plain-language sentence describing what changed>"}'
+```
+
+- The label is what the USER sees in the History tab — write it for them,
+  not for a git log (e.g. "Fixed the browser tool crashing after 2
+  messages", not "fix: ToolLoopAgent smoothStream handler").
+- This call reads whatever Vercel deployment is *currently* live and
+  stamps the new version to it — so it must run right after the deploy
+  actually finishes, not before.
+- Skipping this step means that deploy's changes are invisible to the
+  user's revert UI — they'd have no way to get back to it if a *later*
+  change breaks something.
 
 ## Architecture Notes
 

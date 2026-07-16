@@ -726,3 +726,27 @@ model ChatSandbox {
 
   @@map("chat_sandboxes")
 }
+
+// Custom, app-native version history (2026-07-16, explicit user request:
+// "not GitHub versioning... our own custom versioning, so when agent do
+// something wrong I can revert to another version"). Deliberately NOT a
+// git-log/commit browser (no shas, no commit messages, no GitHub links
+// in the product) -- each row is a plain-language checkpoint the agent
+// writes after shipping a change, and "revert" is meant to be instant
+// and fully self-service from the UI with zero agent involvement at
+// click time.
+//
+// Under the hood each version still maps to an already-built, immutable
+// Vercel deployment artifact (vercelDeploymentId) purely because that's
+// the only mechanism that makes "click revert -> live in seconds, no
+// rebuild" actually true; that's an implementation detail the product
+// never surfaces.
+model AppVersion {
+  id                 String   @id @default(cuid())
+  label              String   @db.VarChar(500)
+  vercelDeploymentId String   @map("vercel_deployment_id") @db.VarChar
+  vercelUrl          String?  @map("vercel_url") @db.VarChar
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@map("app_versions")
+}
