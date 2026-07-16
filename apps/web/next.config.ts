@@ -98,13 +98,7 @@ const nextConfig: NextConfig = {
   // direct-chat sandbox (lib/direct-chat/sandbox.ts) no longer uses it at
   // all (migrated to E2B, see that file's comment), and nothing else in
   // apps/web imports it anymore.
-  // `e2b` added 2026-07-16: webpack throws "Critical dependency: the
-  // request of a dependency is an expression" for it (a dynamic require
-  // deep in its dependency tree, same class of issue @vercel/sandbox used
-  // to have) when bundled directly — externalizing it avoids that warning
-  // and matches how eve's own e2b-backend.ts consumes the same package
-  // (unbundled, plain Node require at runtime) in apps/agent.
-  serverExternalPackages: ['@prisma/client', 'xdg-app-paths', 'xdg-portable', 'e2b'],
+  serverExternalPackages: ['@prisma/client', 'xdg-app-paths', 'xdg-portable'],
   // Our internal packages' raw-TS source uses NodeNext-style relative
   // imports ending in `.js` that point at sibling `.ts` files (e.g.
   // `./adapter.js` -> `./adapter.ts`). Turbopack doesn't resolve that
@@ -117,6 +111,25 @@ const nextConfig: NextConfig = {
     config.resolve.extensionAlias = {
       '.js': ['.ts', '.tsx', '.js'],
     };
+
+    // `e2b`'s CJS dist has a dynamic `require(expr)` deep in its own
+    // dependency tree, which webpack can't statically analyze and warns
+    // about ("Critical dependency: the request of a dependency is an
+    // expression"). Tried externalizing it via serverExternalPackages
+    // (2026-07-16) to silence this the same way `xdg-app-paths` is
+    // handled above — that broke production at runtime instead: e2b's
+    // CJS dist does `require('chalk')`, and chalk v5+ is pure ESM, so an
+    // unbundled e2b crashes every request with `ERR_REQUIRE_ESM` the
+    // moment Node's own `require()` (not webpack's) hits it. Bundling it
+    // (i.e. NOT externalizing) is what actually works at runtime — the
+    // warning itself is genuinely harmless in that case (the dynamic
+    // require path it's warning about is never reached by any code this
+    // app actually calls), so it's suppressed here by message pattern
+    // instead of by externalizing the package.
+    config.ignoreWarnings = [
+      ...(config.ignoreWarnings || []),
+      { module: /node_modules\/e2b\//, message: /Critical dependency: the request of a dependency is an expression/ },
+    ];
 
     // Explicit webpack alias for '@/ — Vercel's Next.js 16 build adapter
     // ("Applying modifyConfig from Vercel") breaks JsConfigPathsPlugin
