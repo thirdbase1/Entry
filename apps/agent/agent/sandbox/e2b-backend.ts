@@ -177,9 +177,36 @@ async function collectStream(stream: ReadableStream<Uint8Array>): Promise<Uint8A
  * `writeFile`, `writeBinaryFile`, `writeTextFile`) directly against one
  * live E2B sandbox instance.
  */
-function buildSession(sandbox: E2BSandbox) {
+function buildSession(sandbox: E2BSandbox, refreshTimeoutMs: number) {
+  // FIXED (2026-07-16, real bug confirmed live via E2B's own API: exactly
+  // 20/20 concurrent sandboxes stuck "running" -- E2B's hard account cap
+  // -- blocking every new sandbox creation for every user). Root cause:
+  // `timeoutMs` passed to `E2BSandbox.create`/`.connect` is a ONE-SHOT
+  // wall-clock TTL from creation time (confirmed in e2b's own
+  // `sandbox.setTimeout` doc comment: "can extend or reduce the sandbox
+  // timeout set when creating the sandbox or from the last call to
+  // .setTimeout" -- i.e. it is NEVER extended on its own). This backend
+  // deliberately reuses the SAME sandbox across an entire chat session
+  // (existingSandboxId) so bash/browser_use share state -- but nothing
+  // ever refreshed that TTL, so any session older than the original
+  // window (5 min default) got hard-killed by E2B mid-task regardless of
+  // whether it was actively in use. That mid-task kill is exactly what
+  // surfaced as "browser tool still failing", "agent timing out waiting
+  // on a tool call", AND browser_use's screenshot silently not
+  // rendering (takeScreenshot()'s own try/catch swallows the resulting
+  // command failure into a null screenshotUrl with no visible error at
+  // all). Refreshing the timeout on every real command keeps genuinely
+  // active sessions alive indefinitely while still letting truly
+  // abandoned ones expire and free their concurrency slot shortly after
+  // the last real activity, same as any normal session/idle-timeout.
+  function refreshTimeout() {
+    void sandbox.setTimeout(refreshTimeoutMs).catch(() => {
+      /* best-effort keep-alive -- a failed refresh shouldn't fail the command itself */
+    });
+  }
   return {
     async run(opts: { command: string; workingDirectory?: string; env?: Record<string, string>; abortSignal?: AbortSignal }) {
+      refreshTimeout();
       const result = await withRetry('commands.run', () =>
         sandbox.commands.run(opts.command, {
           cwd: opts.workingDirectory ?? '/workspace',
@@ -193,6 +220,7 @@ function buildSession(sandbox: E2BSandbox) {
     },
 
     async spawn(opts: { command: string; workingDirectory?: string; env?: Record<string, string>; abortSignal?: AbortSignal }) {
+      refreshTimeout();
       let stdoutController!: ReadableStreamDefaultController<Uint8Array>;
       let stderrController!: ReadableStreamDefaultController<Uint8Array>;
       const stdout = new ReadableStream<Uint8Array>({
@@ -347,7 +375,7 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
           await withRetry('files.write (seed)', () => sandbox.files.write(resolvePath(seed.path), data));
         }
         if (input.bootstrap) {
-          const session = buildSession(sandbox);
+          const session = buildSession(sandbox, options.timeoutMs ?? 5 * 60 * 1000);
           await input.bootstrap({ use: async () => session as never });
         }
         const snapshot = await withRetry('createSnapshot', () => sandbox.createSnapshot());
@@ -381,7 +409,9 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
         sandbox = await createFromTemplate(input, apiKey, options);
       }
 
-      const session = buildSession(sandbox);
+      const refreshTimeoutMs = options.timeoutMs ?? 5 * 60 * 1000;
+      await sandbox.setTimeout(refreshTimeoutMs).catch(() => {});
+      const session = buildSession(sandbox, refreshTimeoutMs);
       const id = sandbox.sandboxId;
 
       return {
