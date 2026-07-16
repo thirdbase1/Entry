@@ -41,12 +41,24 @@ import { featureService } from '@entry/features';
  * replaced — this is meant to stay in the codebase permanently as the
  * standing way to ship future migrations to production.
  */
-export async function POST(req: NextRequest) {
-  const { session } = await getUserSessionFromRequest(req);
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+async function isAuthorized(req: NextRequest): Promise<boolean> {
+  // Same dual-auth pattern as admin/errors.ts and admin/diag-toolcall.ts:
+  // either a real logged-in admin session (browser use) OR a bearer token
+  // matching ADMIN_DEBUG_TOKEN (out-of-band/CLI use, e.g. right after a
+  // hand-assembled prebuilt deploy with no browser session handy -- see
+  // DEPLOY.md Step 4's "deploy first, then call this route once", which
+  // previously had no non-interactive way to actually satisfy that call).
+  const authHeader = req.headers.get('authorization') || '';
+  const bearerOk = Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`;
+  if (bearerOk) return true;
 
-  const isAdmin = await featureService.isAdmin(session.user.id);
-  if (!isAdmin) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  const { session } = await getUserSessionFromRequest(req);
+  if (!session) return false;
+  return featureService.isAdmin(session.user.id);
+}
+
+export async function POST(req: NextRequest) {
+  if (!(await isAuthorized(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const migrationsDir = join(process.cwd(), '..', '..', 'packages', 'db', 'prisma', 'migrations');
 
@@ -120,11 +132,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const { session } = await getUserSessionFromRequest(req);
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  const isAdmin = await featureService.isAdmin(session.user.id);
-  if (!isAdmin) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  if (!(await isAuthorized(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const migrationsDir = join(process.cwd(), '..', '..', 'packages', 'db', 'prisma', 'migrations');
   const entries = (await readdir(migrationsDir, { withFileTypes: true }))

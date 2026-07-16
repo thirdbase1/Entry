@@ -42,12 +42,13 @@
  * Tool parity: full parity with eve's root agent's 10 tools, including
  * bash and browser_use (2026-07-11) — both need a real sandbox, which
  * used to only exist inside an authored eve runtime execution. Fixed by
- * lib/direct-chat/sandbox.ts, a standalone `@vercel/sandbox` wrapper
- * (same underlying SDK eve's own `vercel()` backend uses) keyed by
- * chatId instead of an eve session id — see that file's comment for why
- * this was a real, confirmed gap (BYOK/Gateway-direct users truthfully
- * being told "no live browser" for a feature the default chat path has
- * always had). Every tool execute is wrapped with safeExecute at the source
+ * lib/direct-chat/sandbox.ts, a standalone E2B-backed wrapper (REWRITTEN
+ * 2026-07-16 off its original `@vercel/sandbox` implementation — see that
+ * file's comment for the confirmed real bug this fixed: this path had
+ * silently never gotten eve's own Vercel-Sandbox-quota-driven E2B
+ * migration, so BYOK/direct chats were still hitting Vercel's Hobby-plan
+ * sandbox limits and a doubly-broken browser_use bootstrap) keyed by
+ * chatId instead of an eve session id. Every tool execute is wrapped with safeExecute at the source
  * (lib/tool-impls/*.ts) so a thrown error (bad key, upstream outage, etc.)
  * always resolves to a normal `{ error }` tool result the model can see
  * and explain, instead of an uncaught rejection that can tear down the

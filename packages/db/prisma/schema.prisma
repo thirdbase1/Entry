@@ -705,3 +705,24 @@ model SandboxTemplate {
 
   @@map("sandbox_templates")
 }
+
+// Added 2026-07-16 as part of migrating the direct-chat path
+// (/api/direct/chat -- every BYOK and Gateway-direct-model-pick chat) off
+// a standalone, never-updated `@vercel/sandbox` implementation and onto
+// E2B, matching eve's own root-agent path (see
+// apps/agent/agent/sandbox/e2b-backend.ts). That old Vercel-Sandbox path
+// had no "get by id" persistence of its own -- @vercel/sandbox's
+// `getOrCreate({ name })` resolves reuse by NAME against Vercel's own
+// account-scoped index, a mechanism E2B has no equivalent for (E2B only
+// supports reconnecting by an explicit sandbox id via `Sandbox.connect`).
+// This table is that missing persistence layer: one row per chat, holding
+// the live E2B sandboxId so the next tool call in the same chat resumes
+// the SAME sandbox (same filesystem, same running dev server) instead of
+// spinning up a fresh one every turn.
+model ChatSandbox {
+  chatId    String   @id @map("chat_id") @db.VarChar
+  sandboxId String   @map("sandbox_id") @db.VarChar
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("chat_sandboxes")
+}

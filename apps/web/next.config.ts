@@ -88,18 +88,23 @@ const nextConfig: NextConfig = {
     '@entry/queue',
     '@entry/ws',
   ],
-  // `xdg-app-paths` (transitively pulled in by prisma/@vercel/sandbox
-  // tooling) auto-derives an app name from the CALLING module's real
-  // Node `.filename` when webpack bundles it, `module.filename` doesn't
-  // exist on webpack's module wrapper, so `path.parse(undefined)` throws
-  // a real ERR_INVALID_ARG_TYPE — reproduced directly by diffing: `node -e
-  // "require('@vercel/sandbox')"` succeeds standalone (real Node
-  // `require`, real `.filename`), but the exact same code crashed only
-  // inside a real `next build`'s webpack-bundled "collect page data"
-  // step. Fix: keep this whole chain un-bundled (externalized) so it's
-  // loaded via real Node `require` at runtime, matching the working
-  // standalone case.
-  serverExternalPackages: ['@prisma/client', '@vercel/sandbox', 'xdg-app-paths', 'xdg-portable'],
+  // `xdg-app-paths` (transitively pulled in by prisma tooling)
+  // auto-derives an app name from the CALLING module's real Node
+  // `.filename` when webpack bundles it, `module.filename` doesn't exist
+  // on webpack's module wrapper, so `path.parse(undefined)` throws a real
+  // ERR_INVALID_ARG_TYPE. Fix: keep this whole chain un-bundled
+  // (externalized) so it's loaded via real Node `require` at runtime.
+  // `@vercel/sandbox` itself was removed from this list 2026-07-16 — the
+  // direct-chat sandbox (lib/direct-chat/sandbox.ts) no longer uses it at
+  // all (migrated to E2B, see that file's comment), and nothing else in
+  // apps/web imports it anymore.
+  // `e2b` added 2026-07-16: webpack throws "Critical dependency: the
+  // request of a dependency is an expression" for it (a dynamic require
+  // deep in its dependency tree, same class of issue @vercel/sandbox used
+  // to have) when bundled directly — externalizing it avoids that warning
+  // and matches how eve's own e2b-backend.ts consumes the same package
+  // (unbundled, plain Node require at runtime) in apps/agent.
+  serverExternalPackages: ['@prisma/client', 'xdg-app-paths', 'xdg-portable', 'e2b'],
   // Our internal packages' raw-TS source uses NodeNext-style relative
   // imports ending in `.js` that point at sibling `.ts` files (e.g.
   // `./adapter.js` -> `./adapter.ts`). Turbopack doesn't resolve that

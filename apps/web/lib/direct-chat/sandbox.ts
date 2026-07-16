@@ -1,94 +1,181 @@
 /**
- * Real, standalone Vercel Sandbox for the direct-model chat path
- * (/api/direct/chat), used by that route's `bash` and `browser_use` tools.
+ * Real, standalone sandbox for the direct-model chat path (/api/direct/chat),
+ * used by that route's `bash` and `browser_use` tools — i.e. every BYOK chat
+ * and every Gateway-direct-model-pick chat.
  *
- * Why this exists as its own thing instead of reusing eve's sandbox
- * (apps/agent/agent/sandbox/sandbox.ts): eve's `defineSandbox` /
- * `SandboxSession` machinery is entirely bound to eve's own session/agent
- * runtime lifecycle (see eve/sandbox's exports — there is no standalone
- * "just hand me a sandbox" API outside of an eve agent turn). The
- * direct-chat route is a deliberately separate, bare `streamText` call
- * with its own hand-rolled tool set (see that route's file comment for
- * why it bypasses eve entirely) — it never runs inside eve's runtime, so
- * it cannot reach eve's sandbox either. This was the actual reason
- * `execCtx.getSandbox` in that route used to just throw
- * "Sandbox tools are not available in direct-model chats yet." — bash and
- * browser_use silently had ZERO tool parity with the default (non-BYOK/
- * non-direct-pick) chat path, for every single BYOK and Gateway-direct
- * user, not because it's technically impossible but because no one had
- * wired a real sandbox in for this path yet. Confirmed (2026-07-11): a
- * BYOK user asking for "a live browser" got a truthful but wrong-feeling
- * "I don't have that" — truthful for THIS path as it stood, wrong because
- * the feature is fully available on the default path and there's no
- * product reason BYOK shouldn't have it too.
+ * REWRITTEN (2026-07-16, real bug: "browser_use still doesn't work" +
+ * "get_preview_url always fails" + "agent stops itself when a tool call is
+ * killed by the platform", all reported against BYOK chats specifically).
+ * Root cause, confirmed by reading this file's previous version end to end:
+ * the whole-app migration off Vercel Sandbox onto E2B (see
+ * apps/agent/agent/sandbox/e2b-backend.ts's file comment for why that
+ * migration happened at all — Vercel Hobby-plan sandbox quota) only ever
+ * touched eve's OWN root-agent path. This file is a second, fully
+ * independent sandbox implementation that direct/BYOK chats use instead
+ * (see this route's own comment history for why it exists standalone), and
+ * it was never migrated — still talking to raw `@vercel/sandbox` this whole
+ * time. That means every BYOK/direct chat has been hitting the exact same
+ * Vercel quota/instability issues the E2B migration was supposed to have
+ * fixed app-wide, PLUS its own bootstrap script here was missing the
+ * apt-get shared-library install (libnss3/libatk-bridge2.0-0/libgbm1/
+ * libasound2/...) that eve's sandbox.ts had to add to make headless Chrome
+ * launch at all in a bare Debian container — so browser_use was doubly
+ * broken on this path even before quota entered into it.
  *
- * Talks to the raw `@vercel/sandbox` SDK directly (the same package eve's
- * own `vercel()` backend wraps). `Sandbox.getOrCreate({ name })` gives us
- * the same "resume by id across turns, create once" semantics eve's
- * session-bound sandboxes have, keyed by chatId instead of an eve session
- * id. Bootstrap (agent-browser + Chrome for Testing + the python
- * packages python_coding's sibling tools expect) only runs once per named
- * sandbox via `onCreate`, mirroring apps/agent/agent/sandbox/sandbox.ts's
- * own bootstrap step-for-step so behavior matches the default path
- * exactly.
+ * Fix: drop the standalone Vercel Sandbox code entirely and talk to E2B
+ * directly (same 'e2b' package eve's own backend already depends on), and
+ * — rather than re-authoring (and risking re-diverging) a second bootstrap
+ * script — reuse the exact same prewarmed E2B snapshot eve's root-agent
+ * path already built and cached in the `SandboxTemplate` table. That
+ * snapshot already has numpy/pandas/matplotlib, agent-browser, Chrome for
+ * Testing, and the shared-lib fix all baked in from one single
+ * battle-tested bootstrap script, so this path gets a cold sandbox that
+ * ALREADY works instead of a from-scratch one that has to re-earn it.
+ * (There's currently only one row in that table app-wide, so `findFirst`
+ * is correct, not a shortcut — see ChatSandbox's schema comment.)
  *
- * Credentials: no explicit token/projectId/teamId passed — `@vercel/
- * sandbox` auto-detects Vercel's own OIDC token from the deployment
- * environment when running as a Vercel Function (same as eve's own
- * backend does), so this works in production with zero extra env vars.
+ * Persistence: E2B has no "resume by name" like `@vercel/sandbox`'s
+ * `getOrCreate({ name })` — only "reconnect by exact sandbox id" via
+ * `Sandbox.connect(id)`. The `ChatSandbox` table (one row per chat) is the
+ * missing persistence layer that makes resume-across-turns work here too.
  */
-import { Sandbox } from '@vercel/sandbox';
+import { Sandbox as E2BSandbox, RateLimitError as E2BRateLimitError } from 'e2b';
+import { prisma } from '@entry/db';
 
 export interface DirectChatSandbox {
   id: string;
-  run(opts: { command: string; env?: Record<string, string> }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  // `signal` added 2026-07-16 alongside bash.ts's own timeout fix -- forwarded
+  // straight into E2B's commands.run({signal}) so a tool-local abort actually
+  // cancels the in-flight command server-side, not just the caller's wait.
+  run(opts: { command: string; env?: Record<string, string>; signal?: AbortSignal }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
 
-async function bootstrap(sandbox: Sandbox): Promise<void> {
-  // numpy/pandas/matplotlib preinstalled for python_coding-adjacent work,
-  // same package set as the default path's sandbox.
-  await sandbox.runCommand('bash', [
-    '-c',
-    'pip3 install --quiet --break-system-packages numpy pandas matplotlib',
-  ]);
-  // agent-browser (github.com/vercel-labs/agent-browser) + Chrome for
-  // Testing, used by the browser_use tool below.
-  await sandbox.runCommand('bash', ['-c', 'npm install -g agent-browser && agent-browser install']);
+function resolveApiKey(): string {
+  const key = process.env.E2B_API_KEY;
+  if (!key) {
+    throw new Error(
+      'E2B_API_KEY is not configured — bash/browser_use tools are unavailable on the direct-chat path until it is set.',
+    );
+  }
+  return key;
+}
+
+// Kept identical to apps/agent/agent/sandbox/e2b-backend.ts's own retry
+// policy (see that file's comment for the full "confirmed real bug"
+// writeup this was born from) — duplicated rather than imported because
+// apps/web and apps/agent are separate workspace packages with no shared
+// "sandbox internals" package between them, not because the policy should
+// ever differ. Keep these two in sync if either changes.
+const RETRY_MAX_ATTEMPTS = 10;
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 8_000;
+
+function isRetryableE2BError(err: unknown): boolean {
+  if (err instanceof E2BRateLimitError) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /\b429\b|rate.?limit|\b50[0-4]\b|ECONNRESET|ETIMEDOUT|network error/i.test(message);
+}
+
+async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableE2BError(err) || attempt === RETRY_MAX_ATTEMPTS) throw err;
+      const uncappedDelay = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5);
+      const delay = Math.min(uncappedDelay, RETRY_MAX_DELAY_MS);
+      console.warn(`[direct-chat/e2b] ${label} hit a retryable error (attempt ${attempt}/${RETRY_MAX_ATTEMPTS}), retrying in ${Math.round(delay)}ms:`, err instanceof Error ? err.message : err);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  throw lastErr;
+}
+
+const IDLE_TIMEOUT_MS = 45 * 60 * 1000; // 45 min — generous for a long back-and-forth turn, matches the old Vercel config
+// Fallback base template + inline bootstrap, used ONLY if eve's root-agent
+// path has genuinely never prewarmed its own snapshot yet (fresh env,
+// nothing in SandboxTemplate). Mirrors apps/agent/agent/sandbox/sandbox.ts's
+// bootstrap step for step (including the apt-get shared-libs fix) so this
+// path is never worse off than the shared snapshot, just slower to start.
+const FALLBACK_BASE_TEMPLATE = process.env.E2B_BASE_TEMPLATE ?? 'entry-agent-base';
+
+async function bootstrapFallback(sandbox: E2BSandbox): Promise<void> {
+  await sandbox.commands.run(
+    'apt-get update -qq && apt-get install -y -qq libnss3 libatk-bridge2.0-0 libgbm1 libasound2 libxss1 libxrandr2 libxkbcommon0 libgtk-3-0',
+    { timeoutMs: 5 * 60 * 1000 },
+  );
+  await sandbox.commands.run('pip3 install --quiet --break-system-packages numpy pandas matplotlib', { timeoutMs: 5 * 60 * 1000 });
+  await sandbox.commands.run('npm install -g agent-browser && agent-browser install', { timeoutMs: 5 * 60 * 1000 });
+}
+
+async function createFreshSandbox(apiKey: string): Promise<E2BSandbox> {
+  const template = await prisma.sandboxTemplate.findFirst();
+  if (template) {
+    return withRetry('Sandbox.create (shared snapshot)', () =>
+      E2BSandbox.create(template.snapshotId, { apiKey, timeoutMs: IDLE_TIMEOUT_MS }),
+    );
+  }
+  // No shared snapshot exists yet anywhere in the app — bootstrap inline
+  // this one time rather than fail outright.
+  const sandbox = await withRetry('Sandbox.create (fallback base template)', () =>
+    E2BSandbox.create(FALLBACK_BASE_TEMPLATE, { apiKey, timeoutMs: IDLE_TIMEOUT_MS }),
+  );
+  await bootstrapFallback(sandbox);
+  return sandbox;
+}
+
+async function persistSandboxId(chatId: string, sandboxId: string): Promise<void> {
+  await prisma.chatSandbox.upsert({
+    where: { chatId },
+    create: { chatId, sandboxId },
+    update: { sandboxId },
+  });
 }
 
 /** One sandbox per chat, created lazily on the first tool call that needs
- *  it and reused for every later turn in the same conversation. */
+ *  it and reused for every later turn in the same conversation (persisted
+ *  via ChatSandbox — see file comment). */
 export async function getSandboxForChat(chatId: string): Promise<DirectChatSandbox> {
-  const sandbox = await Sandbox.getOrCreate({
-    name: `direct-chat-${chatId}`,
-    timeout: 45 * 60 * 1000, // 45 min idle timeout — generous for a long back-and-forth turn
-    resources: { vcpus: 2 },
-    // Exposed for the browser-preview feature (see /api/chats/[sessionId]/
-    // preview and the header "Preview" button) — up to 4 ports per
-    // sandbox is the SDK's own hard limit, so this picks the 4 most
-    // common dev-server defaults: Next/CRA/Express-style (3000), Vite dev
-    // (5173), a generic fallback (8080), and Vite's own preview/build-serve
-    // mode (4173). Whichever one the agent's dev server actually binds to
-    // gets a real public https://*.vercel.run domain automatically via
-    // sandbox.domain(port) — see getPreviewForChat below.
-    ports: [3000, 5173, 8080, 4173],
-    onCreate: async sbx => {
-      await bootstrap(sbx);
-    },
-  });
+  const apiKey = resolveApiKey();
+  const existing = await prisma.chatSandbox.findUnique({ where: { chatId } });
 
+  let sandbox: E2BSandbox;
+  if (existing) {
+    try {
+      sandbox = await withRetry('Sandbox.connect', () => E2BSandbox.connect(existing.sandboxId, { apiKey }));
+      // Reconnecting resets the idle clock server-side already, but bump
+      // it explicitly too so a long tool-heavy turn doesn't get cut short
+      // mid-way through.
+      await sandbox.setTimeout(IDLE_TIMEOUT_MS).catch(() => {});
+    } catch {
+      // Sandbox paused/expired/evicted — create a fresh one rather than
+      // hard-failing the tool call.
+      sandbox = await createFreshSandbox(apiKey);
+      await persistSandboxId(chatId, sandbox.sandboxId);
+    }
+  } else {
+    sandbox = await createFreshSandbox(apiKey);
+    await persistSandboxId(chatId, sandbox.sandboxId);
+  }
+
+  const id = sandbox.sandboxId;
   return {
-    id: sandbox.name ?? chatId,
-    async run({ command, env }) {
-      // `env` here is passed straight through to @vercel/sandbox's own
-      // per-call `runCommand` option — scoped to this one spawned
-      // process only, never persisted to the sandbox's ambient env or
-      // any file (see inject_credential.ts for why that distinction
-      // matters: it's what makes a credential unreadable by any later,
-      // separate command).
-      const result = await sandbox.runCommand({ cmd: 'bash', args: ['-c', command], timeoutMs: 5 * 60 * 1000, env });
-      const [stdout, stderr] = await Promise.all([result.stdout(), result.stderr()]);
-      return { exitCode: result.exitCode ?? 1, stdout, stderr };
+    id,
+    async run({ command, env, signal }) {
+      // 5 min per-command ceiling is a server-side SAFETY NET only now --
+      // in practice the caller's own signal (bash.ts's 120s
+      // withTimeoutSignal) fires first and actually cancels the in-flight
+      // E2B command via `signal` below, rather than just abandoning the
+      // wait. PLUS the shared withRetry wrapper around the dispatch
+      // itself, so a transient E2B 429/5xx getting the command started
+      // gets absorbed instead of surfacing as a bare tool failure -- same
+      // class of fix as e2b-backend.ts's own withRetry.
+      const result = await withRetry('commands.run', () =>
+        sandbox.commands.run(command, { timeoutMs: 5 * 60 * 1000, envs: env, signal }),
+      );
+      return { exitCode: result.exitCode ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
     },
   };
 }
@@ -96,29 +183,31 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
 export const PREVIEW_PORTS = [3000, 5173, 8080, 4173] as const;
 
 /**
- * Browser-preview support (2026-07-11): probes each of PREVIEW_PORTS for
- * something actually listening (a plain TCP-connect check from INSIDE the
- * sandbox via /dev/tcp, not a guess), and returns the first live one's
- * public domain. Returns `{ available: false }` rather than throwing when
- * nothing is up yet (e.g. no dev server started) or the sandbox itself is
- * unreachable — this is read by a plain status-polling endpoint, so a
- * normal "nothing running yet" state must never look like a hard error.
+ * Browser-preview support. Probes each of PREVIEW_PORTS for something
+ * actually listening (a plain TCP-connect check from INSIDE the sandbox),
+ * returns the first live one's public URL via E2B's `getHost(port)`
+ * (E2B's equivalent of Vercel Sandbox's `sandbox.domain(port)`). Returns
+ * `{ available: false }` rather than throwing when nothing is up yet or
+ * the sandbox itself is unreachable — read by a plain status-polling
+ * endpoint, so "nothing running yet" must never look like a hard error.
  */
 export async function getPreviewForChat(chatId: string): Promise<
   | { available: true; url: string; port: number }
   | { available: false; reason: string }
 > {
   try {
-    const sandbox = await Sandbox.getOrCreate({ name: `direct-chat-${chatId}`, ports: [...PREVIEW_PORTS] });
+    const apiKey = resolveApiKey();
+    const existing = await prisma.chatSandbox.findUnique({ where: { chatId } });
+    if (!existing) return { available: false, reason: 'No sandbox has been created for this chat yet.' };
+
+    const sandbox = await withRetry('Sandbox.connect (preview)', () => E2BSandbox.connect(existing.sandboxId, { apiKey }));
+
     for (const port of PREVIEW_PORTS) {
-      const probe = await sandbox
-        .runCommand('bash', ['-c', `timeout 2 bash -c '</dev/tcp/127.0.0.1/${port}' 2>/dev/null && echo UP || echo DOWN`], {
-          timeoutMs: 5000,
-        })
+      const probe = await sandbox.commands
+        .run(`timeout 2 bash -c '</dev/tcp/127.0.0.1/${port}' 2>/dev/null && echo UP || echo DOWN`, { timeoutMs: 5000 })
         .catch(() => null);
-      const stdout = probe ? await probe.stdout() : '';
-      if (stdout.includes('UP')) {
-        return { available: true, url: sandbox.domain(port), port };
+      if (probe?.stdout?.includes('UP')) {
+        return { available: true, url: `https://${sandbox.getHost(port)}`, port };
       }
     }
     return { available: false, reason: 'No dev server is listening on any of the preview ports yet.' };
@@ -128,21 +217,26 @@ export async function getPreviewForChat(chatId: string): Promise<
 }
 
 /**
- * "Agent can restart it itself in case of an error." Stops the current
- * sandbox session outright (getOrCreate's default resume behavior is not
- * enough when the underlying VM/dev-server is actually wedged, not just
- * idle) so the NEXT getSandboxForChat/getPreviewForChat call creates a
- * fresh session. bootstrap() only re-runs if the whole named sandbox was
- * deleted, which this deliberately does NOT do — stop+resume keeps the
- * filesystem (so the user's code isn't lost), only recycles the VM/session.
+ * "Agent can restart it itself in case of an error." Kills the current
+ * sandbox outright (a stuck/wedged VM needs more than idle-resume) so the
+ * NEXT getSandboxForChat/getPreviewForChat call creates a fresh one from
+ * the shared snapshot. Filesystem state is NOT preserved across a restart
+ * (E2B has no stop/resume-with-same-disk primitive like Vercel Sandbox
+ * did) — this is a deliberate, documented trade-off: a genuinely wedged
+ * sandbox needs a clean slate anyway, and the shared snapshot means the
+ * fresh one is immediately usable (tooling intact), not a bare box.
  */
 export async function restartSandboxForChat(chatId: string): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const sandbox = await Sandbox.getOrCreate({ name: `direct-chat-${chatId}`, ports: [...PREVIEW_PORTS], resume: false });
-    await sandbox.stop().catch(() => {});
-    // Immediately resume so the sandbox is warm again by the time this
-    // returns, rather than lazily on the next tool call.
-    await Sandbox.getOrCreate({ name: `direct-chat-${chatId}`, ports: [...PREVIEW_PORTS] });
+    const apiKey = resolveApiKey();
+    const existing = await prisma.chatSandbox.findUnique({ where: { chatId } });
+    if (existing) {
+      await E2BSandbox.connect(existing.sandboxId, { apiKey })
+        .then(sandbox => sandbox.kill())
+        .catch(() => {});
+    }
+    const fresh = await createFreshSandbox(apiKey);
+    await persistSandboxId(chatId, fresh.sandboxId);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

@@ -91,8 +91,22 @@ function resolveApiKey(options: E2BBackendOptions | undefined): string {
  * Exponential backoff with jitter, capped attempts, so a sustained outage
  * still surfaces an error rather than hanging the tool call forever.
  */
-const RETRY_MAX_ATTEMPTS = 4;
+// UPDATED (2026-07-16, real bug: "429 in tool calls should never happen
+// at all") — 4 attempts with an uncapped exponential backoff only bought
+// ~3.5s of total absorption (500ms + 1s + 2s, then give up on attempt 4).
+// That's short enough that any 429 burst lasting more than a few seconds
+// (E2B's own per-API-key limiter, documented as applying across
+// concurrent sandbox creation + command execution) still surfaced as a
+// hard tool failure -- exactly the reported symptom. Raised to 10
+// attempts with the backoff CAPPED at 8s per wait (rather than left to
+// grow unbounded past useful) so total worst-case absorption is ~50s of
+// patient retrying before a 429 is ever allowed to reach the caller as a
+// real error, while still comfortably fitting inside a single tool call's
+// budget (well under the 75s sub-generation timeout / 300s route
+// maxDuration) instead of hanging indefinitely.
+const RETRY_MAX_ATTEMPTS = 10;
 const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 8_000;
 
 function isRetryableE2BError(err: unknown): boolean {
   if (err instanceof E2BRateLimitError) return true;
@@ -108,7 +122,8 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
     } catch (err) {
       lastErr = err;
       if (!isRetryableE2BError(err) || attempt === RETRY_MAX_ATTEMPTS) throw err;
-      const delay = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5);
+      const uncappedDelay = RETRY_BASE_DELAY_MS * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5);
+      const delay = Math.min(uncappedDelay, RETRY_MAX_DELAY_MS);
       console.warn(`[e2b] ${label} hit a retryable error (attempt ${attempt}/${RETRY_MAX_ATTEMPTS}), retrying in ${Math.round(delay)}ms:`, err instanceof Error ? err.message : err);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
@@ -329,7 +344,7 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
       try {
         for (const seed of input.seedFiles) {
           const data = typeof seed.content === 'string' ? seed.content : toArrayBuffer(seed.content);
-          await sandbox.files.write(resolvePath(seed.path), data);
+          await withRetry('files.write (seed)', () => sandbox.files.write(resolvePath(seed.path), data));
         }
         if (input.bootstrap) {
           const session = buildSession(sandbox);
@@ -380,7 +395,7 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
           },
           async removePath(opts: { path: string; force?: boolean; recursive?: boolean }) {
             try {
-              await sandbox.files.remove(resolvePath(opts.path));
+              await withRetry('files.remove', () => sandbox.files.remove(resolvePath(opts.path)));
             } catch (err) {
               if (!opts.force) throw err;
             }

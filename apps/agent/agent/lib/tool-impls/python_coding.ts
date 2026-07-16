@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withTimeoutSignal } from './with-timeout-signal.js';
 
 function stripCodeFence(raw: string): string {
   let stripped = raw.trim();
@@ -13,6 +14,9 @@ function stripCodeFence(raw: string): string {
   }
   return stripped;
 }
+
+// See with-timeout-signal.ts / code_artifact.ts's identical constant.
+const TIMEOUT_MS = 75_000;
 
 export const pythonCoding = {
   description: 'Generate Python code that satisfies a natural-language requirements description.',
@@ -46,23 +50,37 @@ export const pythonCoding = {
     // (previously unset, so silently whatever the SDK/provider default
     // happened to be for whichever fast model `model()` resolves to) --
     // real headroom instead of an undocumented ceiling.
-    const { text } = await generateText({
-      model: await model(undefined, ctx?.byokModel),
-      maxOutputTokens: 8192,
-      // See task_analysis.ts's comment -- top-level `system`, not an
-      // embedded `role: 'system'` message, is what actually survives
-      // translation into Responses-API-style providers.
-      system:
-        'Write complete, runnable Python code that satisfies the given requirements. ' +
-        'Respond with ONLY the code in a single fenced ```python code block, no explanation ' +
-        'before or after it. For editing an existing long file, write a short, targeted script ' +
-        '(read the file, make precise string/regex replacements, write it back) rather than ' +
-        'reproducing the whole file as one inline string literal.',
-      messages: [{ role: 'user', content: requirements }],
-    });
+    //
+    // UPDATED (2026-07-16) — added the same internal timeout guard
+    // code_artifact.ts got (see with-timeout-signal.ts): bounds worst-case
+    // latency for this call itself instead of letting a slow/hung upstream
+    // model ride along until the outer request's own maxDuration silently
+    // kills the whole turn.
+    const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'python_coding');
+    try {
+      const { text } = await generateText({
+        model: await model(undefined, ctx?.byokModel),
+        abortSignal: t.signal,
+        maxOutputTokens: 8192,
+        // See task_analysis.ts's comment -- top-level `system`, not an
+        // embedded `role: 'system'` message, is what actually survives
+        // translation into Responses-API-style providers.
+        system:
+          'Write complete, runnable Python code that satisfies the given requirements. ' +
+          'Respond with ONLY the code in a single fenced ```python code block, no explanation ' +
+          'before or after it. For editing an existing long file, write a short, targeted script ' +
+          '(read the file, make precise string/regex replacements, write it back) rather than ' +
+          'reproducing the whole file as one inline string literal.',
+        messages: [{ role: 'user', content: requirements }],
+      });
 
-    const code = stripCodeFence(text);
-    return { code };
+      const code = stripCodeFence(text);
+      return { code };
+    } catch (err) {
+      throw t.rethrow(err);
+    } finally {
+      t.clear();
+    }
   },
 };
 
