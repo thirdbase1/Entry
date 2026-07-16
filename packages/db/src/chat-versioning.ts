@@ -168,7 +168,9 @@ export async function flushPendingVersion(
     return version;
   });
 
-  return { versionNumber: result.versionNumber, summary, filesChanged: fileRows.length, linesAdded: totalAdded, linesRemoved: totalRemoved };
+  const info = { versionNumber: result.versionNumber, summary, filesChanged: fileRows.length, linesAdded: totalAdded, linesRemoved: totalRemoved, revertedFromVersionNumber: opts.revertedFromVersionNumber };
+  await appendVersionCardMessage(chatId, info);
+  return info;
 }
 
 /**
@@ -179,6 +181,62 @@ export async function flushPendingVersion(
  * happens client-side (same `diff` package, isomorphic) so the server
  * only ever ships two plain strings, not a pre-rendered diff blob.
  */
+/**
+ * Appends a lightweight, self-contained "version card" message to a
+ * direct/BYOK chat's persisted `events` (a real AI SDK UIMessage[] for
+ * that chat shape -- see EveChatSession.events' schema comment). Renders
+ * client-side via the `data-version-card` part type
+ * (components/chat/renderers/version-card.tsx). Deliberately a no-op for
+ * eve-default-path chats: their `events` holds eve's own
+ * HandleMessageStreamEvent[] log, a completely different shape that this
+ * app's eve event-reducer/replay owns end to end -- splicing a raw
+ * UIMessage into that array would corrupt it. Matches the same
+ * eve-vs-direct split already established for revert (`canRevertLive` in
+ * the versions list route) and the Files tab.
+ *
+ * Best-effort by design (same philosophy as touchChatFileTree /
+ * scheduleVersionFlush elsewhere in this feature): the version itself is
+ * already durably recorded in ChatVersion/ChatVersionFile by the time
+ * this runs, so a failure here just means the chat-visible card doesn't
+ * show up immediately -- the version is still fully there in the History
+ * page / diff API, never silently lost.
+ */
+async function appendVersionCardMessage(
+  chatId: string,
+  info: { versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number; revertedFromVersionNumber?: number },
+): Promise<void> {
+  try {
+    const chat = await prisma.eveChatSession.findUnique({ where: { id: chatId } });
+    if (!chat || (!chat.byokModelId && !chat.requestedModel)) return; // eve-default path -- skip, see comment above
+
+    const events = Array.isArray(chat.events) ? (chat.events as unknown[]) : [];
+    const cardMessage = {
+      id: `version-card-${info.versionNumber}`,
+      role: 'assistant',
+      parts: [
+        {
+          type: 'data-version-card',
+          data: {
+            versionNumber: info.versionNumber,
+            summary: info.summary,
+            filesChanged: info.filesChanged,
+            linesAdded: info.linesAdded,
+            linesRemoved: info.linesRemoved,
+            revertedFromVersionNumber: info.revertedFromVersionNumber ?? null,
+            createdAt: new Date().toISOString(),
+          },
+        },
+      ],
+    };
+    await prisma.eveChatSession.update({
+      where: { id: chatId },
+      data: { events: [...events, cardMessage] as any },
+    });
+  } catch (err) {
+    console.error('[chat-versioning] appendVersionCardMessage failed', chatId, err);
+  }
+}
+
 export async function getFileDiffContent(
   chatId: string,
   versionNumber: number,

@@ -44,6 +44,22 @@ import { safeExecute } from './safe-execute.js';
 
 const MAX_STEPS = 14;
 
+/**
+ * FIXED (2026-07-16, real bug: "agent is timing out while waiting for a
+ * tool call"). MAX_STEPS alone does not bound wall-clock time -- each
+ * iteration does a sandbox snapshot exec, an LLM decision call, an action
+ * exec, and a screenshot exec/upload, which can each take 5-20s+ depending
+ * on the page and model. 14 slow steps can comfortably exceed
+ * direct/chat/route.ts's 300s maxDuration (Vercel Hobby ceiling) all by
+ * itself, even before any other tool call or model turn in the same
+ * request -- and a maxDuration kill is a hard platform-level termination,
+ * not a catchable error, so nothing gets surfaced to the model or the
+ * user at all; it just looks like the agent silently hung. This budget
+ * makes the loop always return a normal, graceful (partial) result well
+ * before that kill, the same way MAX_STEPS already does for step count.
+ */
+const WALL_CLOCK_BUDGET_MS = 180_000;
+
 const NextActionSchema = z.object({
   done: z.boolean().describe('True if the task is fully complete (or has definitively failed) and no more actions are needed.'),
   success: z.boolean().optional().describe('When done=true: whether the task actually succeeded (vs. failed/gave up).'),
@@ -216,6 +232,7 @@ export const browserUse = {
     const steps: StepResult[] = [];
     let finalStatus: 'finished' | 'failed' = 'finished';
     let finalMarkdown = '';
+    const startedAt = Date.now();
 
     // FIXED (2026-07-15, confirmed live against a real E2B sandbox): every
     // single browser_use call was failing with "Auto-launch failed: CDP
@@ -269,6 +286,11 @@ export const browserUse = {
     }
 
     for (let i = 0; i < MAX_STEPS; i++) {
+      if (Date.now() - startedAt > WALL_CLOCK_BUDGET_MS) {
+        finalStatus = 'failed';
+        finalMarkdown = `Stopped after running out of time (${Math.round(WALL_CLOCK_BUDGET_MS / 1000)}s budget) before the task reported completion. Completed ${steps.length} step(s).`;
+        break;
+      }
       const snap = await runCli('snapshot -i --json');
       const pageState = snap.ok ? snap.stdout.slice(0, 6000) : `(snapshot failed: ${snap.stderr.slice(0, 500)})`;
 

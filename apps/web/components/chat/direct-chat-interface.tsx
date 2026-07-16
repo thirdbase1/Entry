@@ -45,6 +45,8 @@ import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
+import { VersionCard } from './renderers/version-card';
+import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
 import type { AttachedContext } from './chat-context';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 import { AutoFixSendProvider } from './chat-auto-fix-context';
@@ -179,6 +181,35 @@ function DirectChatSession({
       if (!createdRef.current) {
         createdRef.current = true;
         if (!sessionId) router.replace(`/chats/${chat.id}`);
+      }
+      // The turn's version card (if any file changed) is appended
+      // server-side slightly AFTER this stream finishes -- see
+      // appendVersionCardMessage in packages/db/src/chat-versioning.ts,
+      // called from an `after()` callback that by definition runs once
+      // the whole HTTP response (the one onFinish just fired for) is
+      // fully sent. So it can't be part of `finalMessages` yet; adopt it
+      // with a few short, cheap retries instead of a hard reload -- same
+      // "fetch the authoritative persisted snapshot" trick the dropped-
+      // connection recovery effect above already uses, just proactive
+      // instead of reactive. No-op (silently gives up) if it never shows
+      // up -- the version itself is never lost either way, only this
+      // immediate in-chat card would be delayed to next reload.
+      const activeId = sessionId ?? chat.id;
+      if (!activeId) return;
+      for (const delayMs of [400, 900, 1600]) {
+        await new Promise(r => setTimeout(r, delayMs));
+        try {
+          const res = await fetch(`/api/chats/${activeId}`);
+          if (!res.ok) continue;
+          const snap = await res.json();
+          const persisted = Array.isArray(snap?.events) ? snap.events : null;
+          if (persisted && persisted.length > chat.messages.length) {
+            chat.setMessages(persisted);
+            return;
+          }
+        } catch {
+          // best-effort, try the next delay
+        }
       }
     },
   });
@@ -316,6 +347,8 @@ function DirectChatSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, chat.id, chat.status]);
 
+  const { requestOpenHistory } = useChatPanel();
+
   const isBusy = chat.status === 'submitted' || chat.status === 'streaming';
   const messages = chat.messages;
   const lastMessage = messages[messages.length - 1];
@@ -421,6 +454,7 @@ function DirectChatSession({
   }
 
   return (
+    <ChatPanelProvider>
     <AutoFixSendProvider send={message => onSend(message)} isBusy={isBusy} hasMessages={messages.length > 0}>
     <div className={`flex flex-col h-full ${className}`}>
       {headerContent}
@@ -440,6 +474,9 @@ function DirectChatSession({
                   >
                     {m.parts.map((part, i) => {
                       if (part.type === 'text') return <MarkdownText key={i} text={part.text} />;
+                      if (part.type === 'data-version-card') {
+                        return <VersionCard key={i} data={(part as any).data} onOpen={() => requestOpenHistory((part as any).data.versionNumber)} />;
+                      }
                       // Renders an attached/generated image (2026-07-11,
                       // photo-attach feature). User-sent images are file
                       // parts with mediaType image/* -- the part.type
@@ -562,5 +599,6 @@ function DirectChatSession({
       </div>
     </div>
     </AutoFixSendProvider>
+    </ChatPanelProvider>
   );
 }

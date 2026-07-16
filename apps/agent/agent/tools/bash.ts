@@ -1,22 +1,19 @@
-import { defineBashTool } from 'eve/tools';
+import { defineTool } from 'eve/tools';
+import { bash } from '../lib/tool-impls/bash.js';
 
 /**
- * Real shell access into the same persistent sandbox browser_use already
- * runs commands in (see ../sandbox/sandbox.ts — python3 + numpy/pandas/
- * matplotlib + agent-browser preinstalled there). This was missing
- * entirely: lib/persona.ts's <tool-calling-guidelines> already instructs
- * the model to "draft a python script [with python_coding] before
- * executing it with `bash` in the sandbox" — but no `agent/tools/bash.ts`
- * ever existed, so every attempt to call it failed with
- * AI_NoSuchToolError ("Model tried to call unavailable tool 'bash'").
- * eve auto-registers a tool per file here, named after the file's own
- * slug — so this file alone (no other wiring) is what makes `bash` a
- * real, callable tool matching what the prompt already promises.
+ * FIXED (2026-07-16, real bug: this was the one tool of eve's 21 still
+ * using the framework's own bare `defineBashTool` (executeBashOnSandbox in
+ * eve/dist/src/execution/sandbox/bash-tool.js) instead of the shared,
+ * already-hardened `lib/tool-impls/bash.ts` every other tool re-exports
+ * here. That raw version has no timeout at all AND no safe-error
+ * wrapping -- a hung command rides the full 300s maxDuration with nothing
+ * surfaced, and any thrown error (bad sandbox, killed process, etc.)
+ * propagates uncaught instead of becoming a normal tool-error result the
+ * model can see and react to -- exactly the "agent stops itself / times
+ * out waiting on a tool call" class of bug already fixed everywhere else
+ * via with-timeout-signal.ts + safe-execute.ts. Switching to the shared
+ * impl (120s timeout, safeExecute-wrapped) closes this last gap so eve's
+ * main chat path gets the same protection direct/BYOK chat already had.
  */
-export default defineBashTool({
-  description:
-    'Execute a shell command in the persistent sandbox (same one browser_use runs in). ' +
-    'Use this to actually run code — e.g. `python3 script.py` after drafting it with ' +
-    'python_coding, install packages with pip3/npm, inspect files, run curl, etc. ' +
-    'Returns real stdout/stderr/exitCode from actual execution.',
-});
+export default defineTool(bash as any);

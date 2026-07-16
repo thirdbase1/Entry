@@ -6,6 +6,7 @@ import { useLibraryStore, useAllItems, type Chat } from '@/store/library';
 import { cn } from '@/lib/utils';
 import { ChatPreviewPanel } from './chat-preview-panel';
 import { usePreviewAutoFix } from './use-preview-autofix';
+import { useChatPanel } from './chat-panel-context';
 
 export function ChatPageHeader({ sessionId }: { sessionId: string }) {
   const { toggleCollect } = useLibraryStore();
@@ -20,6 +21,17 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
   const [copied, setCopied] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Tapping a Version card in the message list (renderers/version-card.tsx)
+  // should open this panel straight to its History tab — see
+  // chat-panel-context.tsx's file comment for why this needs a context
+  // instead of a direct prop (the panel and the message list are siblings,
+  // not parent/child).
+  const { historyRequestNonce } = useChatPanel();
+  useEffect(() => {
+    if (historyRequestNonce > 0) setPreviewOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyRequestNonce]);
 
   // Reverted (2026-07-15, explicit user request: "no leave the preview
   // and the share") -- the immediately-preceding change had folded Share
@@ -157,6 +169,7 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
           onManualRestart={preview.manualRestart}
           onRefresh={preview.refresh}
           onClose={() => setPreviewOpen(false)}
+          jumpToHistoryNonce={historyRequestNonce}
         />
       )}
     </div>

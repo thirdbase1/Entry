@@ -21,11 +21,11 @@
  * (packages/db/prisma/schema.prisma) for the two-path (direct vs eve)
  * rationale.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { PreviewStatus } from './use-preview-autofix';
 import { ChatFilesTab } from './chat-files-tab';
 import { ChatTerminalTab } from './chat-terminal-tab';
-import { ChatDeploymentsTab } from './chat-deployments-tab';
+import { ChatVersionsTab } from './chat-versions-tab';
 
 export function ChatPreviewPanel({
   sessionId,
@@ -34,6 +34,7 @@ export function ChatPreviewPanel({
   onManualRestart,
   onRefresh,
   onClose,
+  jumpToHistoryNonce,
 }: {
   sessionId: string;
   state: PreviewStatus | null;
@@ -41,10 +42,19 @@ export function ChatPreviewPanel({
   onManualRestart: () => Promise<unknown>;
   onRefresh: () => Promise<void>;
   onClose: () => void;
+  /** Bumped by ChatPageHeader (see chat-panel-context.tsx) whenever a
+   *  Version card in the chat is tapped -- jumps straight to the History
+   *  tab. Optional so every other caller of this panel is unaffected. */
+  jumpToHistoryNonce?: number;
 }) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [tab, setTab] = useState<'preview' | 'files' | 'terminal' | 'history'>('preview');
+
+  useEffect(() => {
+    if (jumpToHistoryNonce) setTab('history');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpToHistoryNonce]);
 
   const restart = async () => {
     setRestarting(true);
@@ -114,7 +124,7 @@ export function ChatPreviewPanel({
       <div className="flex-1 min-h-0 relative bg-background">
         {tab === 'files' && <ChatFilesTab sessionId={sessionId} />}
         {tab === 'terminal' && <ChatTerminalTab sessionId={sessionId} />}
-        {tab === 'history' && <ChatDeploymentsTab />}
+        {tab === 'history' && <ChatVersionsTab sessionId={sessionId} />}
 
         {tab === 'preview' && !state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
 
