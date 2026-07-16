@@ -102,10 +102,22 @@ const IDLE_TIMEOUT_MS = 45 * 60 * 1000; // 45 min — generous for a long back-a
 const FALLBACK_BASE_TEMPLATE = process.env.E2B_BASE_TEMPLATE ?? 'entry-agent-base';
 
 async function bootstrapFallback(sandbox: E2BSandbox): Promise<void> {
+  // E2B sandboxes run commands as a non-root `user` (confirmed live:
+  // apt-get failed with "Could not open lock file /var/lib/apt/lists/lock
+  // - open (13: Permission denied)" without sudo). Passwordless sudo is
+  // available on this backend (unlike Vercel Sandbox where the default
+  // user already has root) -- mirrors apps/agent/agent/sandbox/sandbox.ts.
   await sandbox.commands.run(
-    'apt-get update -qq && apt-get install -y -qq libnss3 libatk-bridge2.0-0 libgbm1 libasound2 libxss1 libxrandr2 libxkbcommon0 libgtk-3-0',
+    'sudo apt-get update -qq && sudo apt-get install -y -qq libnss3 libatk-bridge2.0-0 libgbm1 libasound2 libxss1 libxrandr2 libxkbcommon0 libgtk-3-0',
     { timeoutMs: 5 * 60 * 1000 },
   );
+  // Node 24 (2026-07-16, corrected from an earlier Node-22 attempt): Vitest
+  // only needed >=20.19/22+, but agent-browser@0.32.0 itself declares
+  // "engines": { "node": ">=24.0.0" } -- confirmed live, npm prints
+  // EBADENGINE against Node 22 for exactly this package. Node 24 satisfies
+  // both. `n`/npm global installs work fine as the non-root user here (no
+  // sudo needed for these two, confirmed live) -- only apt-get needs it.
+  await sandbox.commands.run('npm install -g n && n 24', { timeoutMs: 5 * 60 * 1000 });
   await sandbox.commands.run('pip3 install --quiet --break-system-packages numpy pandas matplotlib', { timeoutMs: 5 * 60 * 1000 });
   await sandbox.commands.run('npm install -g agent-browser && agent-browser install', { timeoutMs: 5 * 60 * 1000 });
 }

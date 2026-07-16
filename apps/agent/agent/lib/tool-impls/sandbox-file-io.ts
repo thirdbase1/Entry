@@ -1,5 +1,6 @@
 import type { ToolExecCtx } from './types.js';
 import { prisma } from '@entry/db';
+import { recordFileChange, isFirstPendingChangeForChat, flushPendingVersion } from '@entry/db/chat-versioning';
 
 /**
  * Shared low-level sandbox file I/O for write_file.ts and edit_file.ts.
@@ -61,6 +62,58 @@ async function touchChatFileTree(chatId: string, path: string, size: number): Pr
   }
 }
 
+/**
+ * Added 2026-07-16, alongside the new custom "Versions" system (see
+ * packages/db/src/chat-versioning.ts's file comment for the full
+ * design). Buffers this write into the in-memory per-chat pending batch
+ * and, the FIRST time a chat has a pending change during this turn,
+ * registers an `after()` callback to flush the whole turn's changes into
+ * one ChatVersion once the response is fully done streaming -- i.e. once
+ * the agent has actually finished the task, not after every individual
+ * tool call. Best-effort: never let a versioning hiccup fail the file
+ * write itself, same philosophy as touchChatFileTree above.
+ *
+ * `next/server`'s `after()` is imported dynamically because this file is
+ * shared by BOTH apps/web (a Next.js app, where `after()` is real) and
+ * apps/agent (a plain Node/eve app with no Next.js runtime at all) --
+ * a static top-level `import { after } from 'next/server'` would fail to
+ * resolve entirely in the apps/agent build. Both callers still end up
+ * running inside the SAME apps/web Next.js request in production (see
+ * apps/agent/agent/channels/eve.ts's file comment: eve's routes are
+ * mounted directly into the apps/web origin), so the dynamic import
+ * always succeeds at runtime for either path -- this is purely a build-
+ * time module-resolution workaround, not a real behavioral difference.
+ */
+async function scheduleVersionFlush(chatId: string): Promise<void> {
+  try {
+    if (!isFirstPendingChangeForChat(chatId)) return; // already scheduled for this turn
+    const { after } = await import('next/server');
+    after(() =>
+      flushPendingVersion(chatId).catch(err => {
+        console.error('[chat-versioning] flush failed', chatId, err);
+      }),
+    );
+  } catch {
+    // Non-Next.js caller (shouldn't happen in production, see comment
+    // above) or `next/server` unavailable for some other reason -- fall
+    // back to a best-effort immediate flush so a version still gets
+    // recorded instead of silently dropping the buffered changes.
+    flushPendingVersion(chatId).catch(err => {
+      console.error('[chat-versioning] fallback flush failed', chatId, err);
+    });
+  }
+}
+
+async function trackChange(ctx: ToolExecCtx, path: string, changeType: 'added' | 'modified' | 'deleted', content: string | null): Promise<void> {
+  try {
+    const chatId = ctx.session.id;
+    recordFileChange(chatId, path, changeType, content);
+    await scheduleVersionFlush(chatId);
+  } catch (err) {
+    console.error('[chat-versioning] track failed', err);
+  }
+}
+
 // Parses the trailing `stat -c%s` line every write/append command below
 // chains onto its own command, so the new file size is known from the
 // SAME round-trip that did the write -- no separate sandbox call needed.
@@ -75,6 +128,11 @@ export async function sandboxWriteFile(ctx: ToolExecCtx, path: string, content: 
   const sandbox = await ctx.getSandbox();
   const b64 = Buffer.from(content, 'utf8').toString('base64');
   const safePath = JSON.stringify(path);
+  // Read the file's existing state (if any) BEFORE overwriting, purely to
+  // know whether this is an 'added' or 'modified' change for versioning
+  // -- one extra tiny round-trip, only for tracking, never blocks/fails
+  // the actual write below if it errors.
+  const existed = await sandbox.run({ command: `test -f ${safePath} && echo 1 || echo 0` }).then(r => r.stdout.trim() === '1').catch(() => false);
   // `dirname` via a subshell so nested new directories are created on
   // demand (e.g. writing "src/lib/new-module.ts" when "src/lib" doesn't
   // exist yet), same as most editors' "create file" behavior. The
@@ -87,6 +145,7 @@ export async function sandboxWriteFile(ctx: ToolExecCtx, path: string, content: 
   }
   const size = parseTrailingSize(result.stdout) ?? Buffer.byteLength(content, 'utf8');
   await touchChatFileTree(ctx.session.id, path, size);
+  await trackChange(ctx, path, existed ? 'modified' : 'added', content);
   return { ok: true };
 }
 
@@ -146,5 +205,15 @@ export async function sandboxAppendFile(
   }
   const size = parseTrailingSize(result.stdout);
   if (size != null) await touchChatFileTree(ctx.session.id, path, size);
+
+  if (mode === 'start') {
+    await trackChange(ctx, path, 'added', content);
+  } else {
+    // 'append' -- read back the full resulting content for accurate
+    // versioning (we only base64'd the newly-appended chunk above, not
+    // the whole file).
+    const read = await sandboxReadFile(ctx, path);
+    if (read.ok) await trackChange(ctx, path, 'modified', read.content);
+  }
   return { ok: true };
 }

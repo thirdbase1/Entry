@@ -45,7 +45,7 @@ export default defineSandbox({
   // default ~480MB one -- see e2b-backend.ts's BASE_TEMPLATE) and the
   // Chrome launch now needs AGENT_BROWSER_ARGS set, both of which need a
   // fresh snapshot, not a reused stale one.
-  revalidationKey: () => 'entry-browser-bootstrap-v3',
+  revalidationKey: () => 'entry-browser-bootstrap-v5',
 
   async bootstrap({ use }) {
     const sandbox = await use();
@@ -61,6 +61,16 @@ export default defineSandbox({
     // this case (a disposable, single-purpose sandbox container, not a
     // shared system Python) — see PEP 668 and Debian's own bug tracker for
     // this flag's intended use.
+    // Node 22 (2026-07-16): the base E2B template ships Node 20.9.0, but
+    // Vitest and modern tooling require Node >= 20.19 or Node 22+. Install
+    // Node 22 via `n` early in bootstrap so every subsequent npm/npx/node
+    // call in this snapshot and in live sessions picks up Node 22 from
+    // /usr/local/bin (which precedes /usr/bin in PATH). `n` is the
+    // lightest reliable approach -- pure npm package, no curl-to-bash,
+    // installs in a few seconds, idempotent. Bump revalidationKey (v3->v4)
+    // forces eve to rebuild the snapshot rather than reuse the stale one.
+    await sandbox.run({ command: 'sudo npm install -g n && sudo n 24 && node --version' });
+
     await sandbox.run({ command: 'pip3 install --quiet --break-system-packages numpy pandas matplotlib' });
 
     // agent-browser (github.com/vercel-labs/agent-browser) + Chrome for

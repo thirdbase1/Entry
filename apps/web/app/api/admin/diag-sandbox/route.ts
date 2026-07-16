@@ -49,6 +49,23 @@ export async function GET(req: NextRequest) {
 
     const preview = await getPreviewForChat(chatId);
 
+    let browser: { exitCode: number; stdout: string; stderr: string; ms: number } | undefined;
+    if (url.searchParams.get('testBrowser') === '1') {
+      const browserStart = Date.now();
+      // Matches the real invocation shape used by lib/tool-impls/browser_use.ts
+      // (`agent-browser --session <id> <action> ...`), not a guess.
+      const session = `diag-${Date.now()}`;
+      const browserResult = await sandbox.run({
+        command: `agent-browser --session ${session} open 'https://example.com'`,
+      });
+      browser = {
+        exitCode: browserResult.exitCode,
+        stdout: browserResult.stdout,
+        stderr: browserResult.stderr,
+        ms: Date.now() - browserStart,
+      };
+    }
+
     return NextResponse.json({
       ok: true,
       chatId,
@@ -57,6 +74,7 @@ export async function GET(req: NextRequest) {
       bashMs,
       bash: { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr },
       preview,
+      browser,
     });
   } catch (err: any) {
     return NextResponse.json(

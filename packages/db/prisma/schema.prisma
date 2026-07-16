@@ -750,3 +750,66 @@ model AppVersion {
 
   @@map("app_versions")
 }
+
+// Custom, app-native PER-CHAT version history (2026-07-16, replaces the
+// user's rejected "GitHub versioning" idea entirely -- explicit request:
+// "our own internal versioning system... every time the agent modifies
+// one or more files, it should automatically create a new version
+// (snapshot)... a clean minimal version card... tapping opens history...
+// no Compare button, only Revert, instantly restore".
+//
+// Scope is ONE chat's own sandbox/project (each chat already has its own
+// isolated sandbox -- see ChatSandbox/ChatFileTree), NOT this repo's own
+// source code (that's what AppVersion above is for, a separate, unrelated
+// concept). versionNumber is sequential per chatId (1, 2, 3...), assigned
+// the moment the agent finishes a turn that actually touched >=1 file --
+// see packages/db/src/chat-versioning.ts for where these rows get
+// written (hooked into sandboxWriteFile/sandboxAppendFile, the single
+// choke point both eve's root agent and the direct/BYOK chat path share
+// for every file mutation) and apps/web/app/api/chats/[id]/versions for
+// how they're read/reverted.
+model ChatVersion {
+  id                        String   @id @default(cuid())
+  chatId                    String   @map("chat_id") @db.VarChar
+  versionNumber             Int      @map("version_number")
+  summary                   String   @db.Text
+  filesChanged               Int      @map("files_changed")
+  linesAdded                Int      @map("lines_added")
+  linesRemoved              Int      @map("lines_removed")
+  // Set only on a version CREATED BY a revert action -- the version
+  // number that was restored. Lets the chat-timeline card read "Version
+  // 7 · Reverted from v1" per the user's exact spec, and lets the
+  // History page skip showing a Revert button on a version that IS the
+  // live head.
+  revertedFromVersionNumber Int?     @map("reverted_from_version_number")
+  createdAt                 DateTime @default(now()) @map("created_at")
+
+  @@unique([chatId, versionNumber])
+  @@index([chatId, createdAt])
+  @@map("chat_versions")
+}
+
+// One row per file that actually changed in a given ChatVersion. Always
+// stores the file's FULL new content (not just a diff) so revert never
+// needs the diff to be losslessly invertible -- the unified diff shown
+// in the UI is derived on read by diffing THIS content against whatever
+// the same `path` last stored in the highest versionNumber < this one
+// for the same chatId (see findPreviousContent in chat-versioning.ts).
+// chatId + versionNumber are denormalized from ChatVersion (not just a
+// versionId FK) specifically so the revert query below can be a single
+// indexed `DISTINCT ON (path)` scan with no join.
+model ChatVersionFile {
+  id            String  @id @default(cuid())
+  chatId        String  @map("chat_id") @db.VarChar
+  versionId     String  @map("version_id")
+  versionNumber Int     @map("version_number")
+  path          String  @db.VarChar
+  changeType    String  @map("change_type") @db.VarChar // 'added' | 'modified' | 'deleted'
+  content       String? @db.Text // full new file content; null when changeType is 'deleted'
+  linesAdded    Int     @map("lines_added")
+  linesRemoved  Int     @map("lines_removed")
+
+  @@index([chatId, path, versionNumber])
+  @@index([versionId])
+  @@map("chat_version_files")
+}
