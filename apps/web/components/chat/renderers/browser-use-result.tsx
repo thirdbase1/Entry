@@ -18,8 +18,10 @@
  * suddenly render as empty.
  */
 import type { EveDynamicToolPart } from 'eve/react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { EmbedWebIcon, EmptyIcon, SingleSelectCheckSolidIcon } from '@blocksuite/icons/rc';
+import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { MarkdownText } from '@/components/ui/markdown';
 import { GenericToolResult } from './generic-tool-result';
 
@@ -76,6 +78,101 @@ function LoadingIcon() {
   return <span className="inline-block w-5 h-5 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin" />;
 }
 
+/**
+ * Click-to-view full-size screenshot viewer (2026-07-16, explicit user
+ * request: "so I can click and view images the browser use screenshot").
+ * Portaled to document.body so it always covers the whole viewport
+ * regardless of the chat bubble's own overflow/stacking context, with
+ * prev/next through every screenshot step in this tool call and
+ * Escape/backdrop-click to close -- same interaction pattern as any
+ * standard image lightbox, no new dependency needed (react-dom's
+ * createPortal is already available).
+ */
+function ScreenshotLightbox({
+  images,
+  index,
+  onClose,
+  onNavigate,
+}: {
+  images: Array<{ url: string; description: string }>;
+  index: number;
+  onClose: () => void;
+  onNavigate: (nextIndex: number) => void;
+}) {
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+      else if (e.key === 'ArrowLeft') onNavigate((index - 1 + images.length) % images.length);
+      else if (e.key === 'ArrowRight') onNavigate((index + 1) % images.length);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [index, images.length, onClose, onNavigate]);
+
+  if (typeof document === 'undefined') return null;
+  const current = images[index];
+  if (!current) return null;
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[9999] bg-black/90 flex items-center justify-center p-4 sm:p-8"
+      onClick={onClose}
+    >
+      <button
+        onClick={e => {
+          e.stopPropagation();
+          onClose();
+        }}
+        className="absolute top-4 right-4 size-9 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+        aria-label="Close"
+      >
+        <X className="size-5" />
+      </button>
+
+      {images.length > 1 && (
+        <button
+          onClick={e => {
+            e.stopPropagation();
+            onNavigate((index - 1 + images.length) % images.length);
+          }}
+          className="absolute left-2 sm:left-4 top-1/2 -translate-y-1/2 size-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+          aria-label="Previous screenshot"
+        >
+          <ChevronLeft className="size-6" />
+        </button>
+      )}
+
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={current.url}
+        alt={current.description || 'Browser screenshot'}
+        className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      />
+
+      {images.length > 1 && (
+        <button
+          onClick={e => {
+            e.stopPropagation();
+            onNavigate((index + 1) % images.length);
+          }}
+          className="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 size-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+          aria-label="Next screenshot"
+        >
+          <ChevronRight className="size-6" />
+        </button>
+      )}
+
+      {images.length > 1 && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/80 text-xs bg-black/40 px-2.5 py-1 rounded-full">
+          {index + 1} / {images.length}
+        </div>
+      )}
+    </div>,
+    document.body
+  );
+}
+
 export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreaming?: boolean }) {
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
   const output = part.state === 'output-available' ? part.output : undefined;
@@ -88,15 +185,22 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
   // most recent one, but any thumbnail in the strip below can be clicked
   // to preview an earlier step instead (see thumbnail strip below).
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
   const screenshotSteps = useMemo(() => parsed.steps.filter(s => s.screenshotUrl), [parsed.steps]);
+  const activeShotIndex =
+    selectedIndex !== null && screenshotSteps[selectedIndex] ? selectedIndex : screenshotSteps.length ? screenshotSteps.length - 1 : -1;
   const activeShot =
     selectedIndex !== null && screenshotSteps[selectedIndex]
       ? screenshotSteps[selectedIndex].screenshotUrl
       : parsed.currentScreenshot ?? (screenshotSteps.length ? screenshotSteps[screenshotSteps.length - 1].screenshotUrl : null);
+  const lightboxImages = useMemo(
+    () => screenshotSteps.map(s => ({ url: s.screenshotUrl as string, description: s.description })),
+    [screenshotSteps]
+  );
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult icon={<EmbedWebIcon />} title="The browser task failed." status="output-error">
+      <GenericToolResult icon={<EmbedWebIcon />} autoExpand title="The browser task failed." status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );
@@ -105,6 +209,7 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
   return (
     <GenericToolResult
       icon={<EmbedWebIcon />}
+      autoExpand
       title={
         isRunning ? (
           <span className="text-sm text-muted-foreground">The browser task is running. Below are the steps and results.</span>
@@ -122,15 +227,19 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
             <img
               src={activeShot}
               alt="Browser screenshot"
-              className="w-full max-h-96 object-contain rounded-lg border bg-muted/30"
+              onClick={() => activeShotIndex >= 0 && setLightboxOpen(true)}
+              className="w-full max-h-96 object-contain rounded-lg border bg-muted/30 cursor-zoom-in hover:opacity-90 transition-opacity"
             />
             {screenshotSteps.length > 1 && (
               <div className="flex gap-2 overflow-x-auto pb-1">
                 {screenshotSteps.map((s, idx) => (
                   <button
                     key={idx}
-                    onClick={() => setSelectedIndex(idx)}
-                    className={`shrink-0 w-16 h-12 rounded border overflow-hidden ${
+                    onClick={() => {
+                      setSelectedIndex(idx);
+                      setLightboxOpen(true);
+                    }}
+                    className={`shrink-0 w-16 h-12 rounded border overflow-hidden cursor-zoom-in ${
                       (selectedIndex ?? screenshotSteps.length - 1) === idx ? 'border-primary ring-1 ring-primary' : 'border-border'
                     }`}
                     title={s.description}
@@ -193,6 +302,15 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
           <div className="p-3 text-sm text-muted-foreground text-center">No detailed content available.</div>
         )}
       </div>
+
+      {lightboxOpen && activeShotIndex >= 0 && (
+        <ScreenshotLightbox
+          images={lightboxImages}
+          index={activeShotIndex}
+          onClose={() => setLightboxOpen(false)}
+          onNavigate={next => setSelectedIndex(next)}
+        />
+      )}
     </GenericToolResult>
   );
 }
