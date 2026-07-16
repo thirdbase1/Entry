@@ -78,6 +78,7 @@ import { streamText, tool, stepCountIs, convertToModelMessages, smoothStream, ty
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
+import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
@@ -567,6 +568,26 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           console.error('[direct chat] final save failed', chatId, err);
           logError({ source: 'direct-chat-final-save', error: err, userId, chatId });
         });
+
+      // Universal, tool-agnostic version capture (2026-07-16, real bug:
+      // "no matter the tool it use to change something in file... the
+      // card should show instantly") -- diffs the sandbox's real
+      // filesystem against its git baseline from the end of the
+      // previous turn, so this sees every change regardless of which
+      // tool made it (write_file/edit_file/append_file, or a raw bash
+      // rm/mv/sed/redirect that none of those ever touch). Only runs if
+      // some tool actually created a sandbox this turn -- `sandboxPromise`
+      // stays undefined otherwise, meaning nothing on disk could have
+      // changed. Deliberately awaited here (not deferred to the
+      // `consumeStream` after() below) so appendVersionCardMessage's
+      // events-append -- and this same route's own final-save write
+      // above -- can never race each other.
+      if (sandboxPromise) {
+        const sandbox = await sandboxPromise;
+        await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
+          console.error('[direct chat] version capture failed', chatId, err);
+        });
+      }
     },
     headers: {
       'x-direct-chat-session-id': chatId,

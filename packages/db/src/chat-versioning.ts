@@ -8,16 +8,36 @@
  * per-file line-by-line diff; the only action is an instant, one-click
  * Revert (no Compare button -- a version already IS a single snapshot).
  *
- * Hook point: `recordFileChange()` is called from the single choke point
- * every file mutation already goes through regardless of which chat path
- * is driving it (sandboxWriteFile/sandboxAppendFile in
- * apps/agent/agent/lib/tool-impls/sandbox-file-io.ts, shared by both eve's
- * root agent and the direct/BYOK chat path -- see that file). Each call
- * buffers the change in-memory for that chatId; the actual ChatVersion +
- * ChatVersionFile rows are only written once by `flushPendingVersion()`,
- * called via Next's `after()` once the whole turn's HTTP response has
- * fully finished (so one version = one whole agent turn, not one per
- * individual tool call, matching "when the agent finishes a task").
+ * REWRITTEN (2026-07-16, real bug: "no matter the tool it use to change
+ * something in file... the card should show instantly"): the original
+ * design only ever detected changes made through the three dedicated
+ * file tools (write_file/edit_file/append_file), because that was the
+ * only place `recordFileChange` was ever called from. Any file mutation
+ * the agent made via `bash` directly (rm, sed -i, mv, redirects, a build
+ * step writing generated files, etc -- all extremely common) was
+ * completely invisible to versioning. Instrumenting every current AND
+ * future tool one-by-one doesn't scale and will always miss the next
+ * one someone adds.
+ *
+ * Fix: stop trying to catch every mutation at the tool layer. Instead,
+ * `captureVersionFromSandboxDiff()` diffs the sandbox's OWN real
+ * filesystem state against a git baseline committed at the end of the
+ * previous turn -- this sees literally every change, regardless of which
+ * tool (or combination of tools) produced it, because it's reading the
+ * actual disk, not instrumenting the code path that wrote to it. Called
+ * once per turn, right when the agent stops:
+ *   - eve-default path: apps/agent/agent/hooks/version-capture.ts, a
+ *     `turn.completed` stream-event hook (fires the instant eve accepts
+ *     that event -- see that file's own comment for why a hook and not
+ *     a hand-rolled hop through `after()`).
+ *   - direct/BYOK path: apps/web/app/api/direct/chat/route.ts's own
+ *     `onFinish`, same as before.
+ * `recordFileChange`/`flushPendingVersion` (the original manual
+ * per-tool-call buffer) are kept, unchanged, ONLY for the revert route
+ * (apps/web/app/api/chats/[sessionId]/versions/[versionNumber]/revert/
+ * route.ts) -- a revert already knows exactly which paths it wrote/
+ * deleted and their exact new content, so there's nothing to diff there
+ * and no reason to pay a git round-trip for it.
  */
 import * as Diff from 'diff';
 import { prisma } from './db.js';
@@ -39,7 +59,8 @@ const pendingByChat = new Map<string, Map<string, PendingChange>>();
 /** Called from sandbox-file-io.ts right after a write/append/delete
  *  actually succeeds against the sandbox. Last write for a given path
  *  within one turn wins (Map keyed by path) -- a version reflects the NET
- *  change over the whole turn, not every intermediate edit. */
+ *  change over the whole turn, not every intermediate edit. Only used by
+ *  the revert route now -- see file comment. */
 export function recordFileChange(chatId: string, path: string, changeType: ChangeType, content: string | null): void {
   let bucket = pendingByChat.get(chatId);
   if (!bucket) {
@@ -51,7 +72,8 @@ export function recordFileChange(chatId: string, path: string, changeType: Chang
 
 /** True the FIRST time a file changes within the current turn's buffer
  *  for this chat -- used by the caller to know whether it still needs to
- *  register an `after()` flush for this turn (only needs to happen once). */
+ *  register an `after()` flush for this turn (only needs to happen once).
+ *  Only used by the revert route now -- see file comment. */
 export function isFirstPendingChangeForChat(chatId: string): boolean {
   const bucket = pendingByChat.get(chatId);
   return !bucket || bucket.size === 0;
@@ -107,20 +129,19 @@ async function findPreviousContent(chatId: string, path: string): Promise<string
 }
 
 /**
- * Writes the buffered changes for one chat as a single new ChatVersion,
- * if there are any. Safe to call multiple times (e.g. a defensive extra
- * `after()` registration) -- it's a no-op once the buffer for that chat
- * is empty. Returns the created version's summary info, or null if there
- * was nothing to record.
+ * Shared core: writes one buffered set of changes as a single new
+ * ChatVersion (+ its ChatVersionFile rows), if there are any. Used by
+ * both `flushPendingVersion` (manual per-tool buffer, revert route only)
+ * and `captureVersionFromSandboxDiff` (git-diff based, every normal
+ * turn) -- same schema, same card-append behavior, only the source of
+ * `changes` differs.
  */
-export async function flushPendingVersion(
+async function writeVersionRows(
   chatId: string,
-  opts: { revertedFromVersionNumber?: number; summaryOverride?: string } = {},
+  changes: PendingChange[],
+  opts: { revertedFromVersionNumber?: number; summaryOverride?: string },
 ): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
-  const bucket = pendingByChat.get(chatId);
-  if (!bucket || bucket.size === 0) return null;
-  const changes = Array.from(bucket.values());
-  pendingByChat.delete(chatId);
+  if (changes.length === 0) return null;
 
   let totalAdded = 0;
   let totalRemoved = 0;
@@ -174,13 +195,128 @@ export async function flushPendingVersion(
 }
 
 /**
- * Returns the before/after full content for one path within one version
- * -- "before" is whatever that path last held in an earlier version (or
- * null if this is its first appearance); "after" is null if this
- * version's change was a delete. The actual line-by-line diff rendering
- * happens client-side (same `diff` package, isomorphic) so the server
- * only ever ships two plain strings, not a pre-rendered diff blob.
+ * Writes the buffered changes for one chat as a single new ChatVersion,
+ * if there are any. Safe to call multiple times (e.g. a defensive extra
+ * `after()` registration) -- it's a no-op once the buffer for that chat
+ * is empty. Returns the created version's summary info, or null if there
+ * was nothing to record. Only used by the revert route now -- see file
+ * comment.
  */
+export async function flushPendingVersion(
+  chatId: string,
+  opts: { revertedFromVersionNumber?: number; summaryOverride?: string } = {},
+): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
+  const bucket = pendingByChat.get(chatId);
+  if (!bucket || bucket.size === 0) return null;
+  const changes = Array.from(bucket.values());
+  pendingByChat.delete(chatId);
+  return writeVersionRows(chatId, changes, opts);
+}
+
+/**
+ * Minimal shape both eve's `SandboxSession` and the direct/BYOK path's
+ * `DirectChatSandbox` already satisfy -- see chat-versioning.ts callers
+ * (apps/agent/agent/hooks/version-capture.ts and
+ * apps/web/app/api/direct/chat/route.ts) for which concrete type each
+ * passes in. Only `run` is needed here.
+ */
+export interface VersionCaptureSandbox {
+  run(opts: { command: string }): PromiseLike<{ exitCode: number; stdout: string; stderr: string }>;
+}
+
+const GIT_IGNORE_CONTENTS = [
+  'node_modules/',
+  '.next/',
+  'dist/',
+  'build/',
+  '.turbo/',
+  '__pycache__/',
+  '*.pyc',
+  '.venv/',
+  'venv/',
+  '.cache/',
+  '.git/',
+  '',
+].join('\n');
+
+/**
+ * Detects EVERY file change made during the turn that just ended --
+ * regardless of which tool made it (write_file, edit_file, append_file,
+ * a raw `bash` rm/mv/sed/redirect, a generated build artifact, anything)
+ * -- by diffing the sandbox's real filesystem against a git baseline
+ * committed at the end of the previous turn. Records one ChatVersion
+ * (same schema, same card-append behavior as before) if anything
+ * changed, then re-commits so the next turn's diff starts from a clean
+ * baseline again.
+ *
+ * First-ever call for a chat just initializes the git baseline (no
+ * ChatVersion is created for it -- there's nothing to compare against
+ * yet, this IS the starting point) and returns null.
+ *
+ * Best-effort throughout: a git hiccup here should never surface as a
+ * user-visible failure on an otherwise-successful turn, same philosophy
+ * as touchChatFileTree/trackChange elsewhere in this feature.
+ */
+export async function captureVersionFromSandboxDiff(
+  chatId: string,
+  sandbox: VersionCaptureSandbox,
+): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
+  try {
+    const initCheck = await sandbox.run({ command: 'git rev-parse --is-inside-work-tree 2>/dev/null || echo NO_REPO' });
+    const alreadyInitialized = initCheck.stdout.trim() === 'true';
+
+    if (!alreadyInitialized) {
+      await sandbox.run({
+        command: [
+          'git init -q',
+          'git config user.email "agent@entry.internal"',
+          'git config user.name "Entry Agent"',
+          `printf '%s' ${JSON.stringify(GIT_IGNORE_CONTENTS)} > .gitignore`,
+          'git add -A',
+          'git commit -q -m "baseline" --allow-empty',
+        ].join(' && '),
+      });
+      return null; // baseline only -- nothing to diff against yet
+    }
+
+    await sandbox.run({ command: 'git add -A' });
+    const statusResult = await sandbox.run({ command: "git diff --cached --name-status --no-renames" });
+    const lines = statusResult.stdout.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length === 0) return null; // nothing changed this turn
+
+    const changes: PendingChange[] = [];
+    for (const line of lines) {
+      const [statusCode, ...pathParts] = line.split('\t');
+      const path = pathParts.join('\t');
+      if (!path) continue;
+      const code = statusCode[0];
+      if (code === 'D') {
+        changes.push({ path, changeType: 'deleted', content: null });
+      } else {
+        // 'A' (added) or 'M' (modified) -- read the STAGED content (what
+        // was just `git add -A`'d), not the working tree, so this is
+        // exactly what will be committed as this turn's baseline below.
+        const safePath = JSON.stringify(path);
+        const showResult = await sandbox.run({ command: `git show :${safePath}` });
+        changes.push({ path, changeType: code === 'A' ? 'added' : 'modified', content: showResult.exitCode === 0 ? showResult.stdout : '' });
+      }
+    }
+
+    const info = await writeVersionRows(chatId, changes, {});
+
+    // Re-commit so next turn's `git diff --cached` starts from a clean
+    // baseline -- runs regardless of whether writeVersionRows actually
+    // produced a version (e.g. a transient DB hiccup shouldn't leave the
+    // git index permanently dirty and re-diff the same changes forever).
+    await sandbox.run({ command: `git commit -q -m "version ${info?.versionNumber ?? 'unrecorded'}" --allow-empty` });
+
+    return info;
+  } catch (err) {
+    console.error('[chat-versioning] captureVersionFromSandboxDiff failed', chatId, err);
+    return null;
+  }
+}
+
 /**
  * Appends a lightweight, self-contained "version card" message to a
  * direct/BYOK chat's persisted `events` (a real AI SDK UIMessage[] for
@@ -192,7 +328,11 @@ export async function flushPendingVersion(
  * app's eve event-reducer/replay owns end to end -- splicing a raw
  * UIMessage into that array would corrupt it. Matches the same
  * eve-vs-direct split already established for revert (`canRevertLive` in
- * the versions list route) and the Files tab.
+ * the versions list route) and the Files tab. Eve-default chats instead
+ * get their card rendered CLIENT-SIDE, purely locally (never persisted
+ * into `events`) -- see chat-interface.tsx's `turn.completed` handling,
+ * which fetches this same version from the read-only versions-list route
+ * the instant that event arrives.
  *
  * Best-effort by design (same philosophy as touchChatFileTree /
  * scheduleVersionFlush elsewhere in this feature): the version itself is

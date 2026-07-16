@@ -2,7 +2,7 @@
 
 import { useEveAgent } from 'eve/react';
 import type { EveMessage, UseEveAgentSnapshot } from 'eve/react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
@@ -13,6 +13,8 @@ import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 import { AutoFixSendProvider } from './chat-auto-fix-context';
+import { VersionCard, type VersionCardData } from './renderers/version-card';
+import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
 import { toast } from '@/lib/toast';
 import { useOnlineStatus } from './use-online-status';
 
@@ -462,6 +464,7 @@ export function ChatInterface({
   }
 
   return (
+    <ChatPanelProvider>
     <ChatInterfaceInner
       key={`eve-${sessionId ?? 'new'}-${recoveryKey}`}
       sessionId={sessionId}
@@ -483,6 +486,7 @@ export function ChatInterface({
       isRecovering={isRecovering}
       onTurnStateChange={handleTurnStateChange}
     />
+    </ChatPanelProvider>
   );
 }
 
@@ -537,6 +541,86 @@ function ChatInterfaceInner({
   // silence. onError + the banner below are what was missing.
   const [turnError, setTurnError] = useState<string | null>(null);
 
+  // Universal, tool-agnostic version cards for the eve-default path
+  // (2026-07-16, real bug: "the versioning and the card none are
+  // working or showing in the UI"). The server-side capture
+  // (apps/agent/agent/hooks/version-capture.ts, a `turn.completed`
+  // stream-event hook) already durably records every version the
+  // instant a turn ends, regardless of which tool changed a file --
+  // but it deliberately never touches THIS chat type's `events` log
+  // (eve's own HandleMessageStreamEvent[] shape can't safely hold a
+  // spliced-in card -- see chat-versioning.ts's appendVersionCardMessage
+  // comment). So the card here is rendered PURELY client-side: the same
+  // `turn.completed` event this component already receives live (see
+  // `onEvent` below) triggers an immediate fetch of the read-only
+  // versions-list route, and if it finds a version number newer than
+  // the last one this component has seen, it renders a local card
+  // anchored right after whatever the last message was at that moment
+  // -- never persisted, just like AggregatedTodoList's own client-only
+  // derived UI below.
+  const [localVersionCards, setLocalVersionCards] = useState<Array<{ afterMessageId: string; data: VersionCardData }>>([]);
+  const lastSeenVersionRef = useRef<number | null>(null);
+  const latestMessagesRef = useRef<readonly EveMessage[]>([]);
+  const { requestOpenHistory } = useChatPanel();
+
+  const checkForNewVersion = useCallback(async (chatIdForVersions: string) => {
+    try {
+      const res = await fetch(`/api/chats/${chatIdForVersions}/versions`);
+      if (!res.ok) return;
+      const json = (await res.json()) as {
+        versions: Array<{
+          versionNumber: number;
+          summary: string;
+          filesChanged: number;
+          linesAdded: number;
+          linesRemoved: number;
+          revertedFromVersionNumber: number | null;
+          createdAt: string;
+        }>;
+      };
+      const head = json.versions[0];
+      if (!head) {
+        if (lastSeenVersionRef.current === null) lastSeenVersionRef.current = 0;
+        return;
+      }
+      if (lastSeenVersionRef.current === null) {
+        // First check this mount -- seed silently. Only versions created
+        // AFTER this chat was opened should ever pop up a fresh card.
+        lastSeenVersionRef.current = head.versionNumber;
+        return;
+      }
+      if (head.versionNumber <= lastSeenVersionRef.current) return;
+      lastSeenVersionRef.current = head.versionNumber;
+      const lastMessageId = latestMessagesRef.current[latestMessagesRef.current.length - 1]?.id;
+      if (!lastMessageId) return;
+      setLocalVersionCards(prev =>
+        prev.some(c => c.data.versionNumber === head.versionNumber)
+          ? prev
+          : [
+              ...prev,
+              {
+                afterMessageId: lastMessageId,
+                data: {
+                  versionNumber: head.versionNumber,
+                  summary: head.summary,
+                  filesChanged: head.filesChanged,
+                  linesAdded: head.linesAdded,
+                  linesRemoved: head.linesRemoved,
+                  revertedFromVersionNumber: head.revertedFromVersionNumber,
+                  createdAt: head.createdAt,
+                },
+              },
+            ],
+      );
+    } catch {
+      // Best-effort -- a missed check just means the card doesn't show
+      // instantly here; the Versions tab (chat-versions-tab.tsx) always
+      // reads the same durable rows directly and is never affected.
+    }
+  }, []);
+
+  const chatIdRef = useRef<string | undefined>(sessionId);
+
   const agent = useEveAgent({
     initialEvents,
     initialSession,
@@ -562,6 +646,18 @@ function ChatInterfaceInner({
     // reached the user). Read the raw stream event ourselves so the real
     // message always wins when it's present.
     onEvent(event) {
+      if (event.type === 'turn.completed') {
+        const activeId = chatIdRef.current;
+        if (activeId) {
+          void checkForNewVersion(activeId);
+          // Safety-net retry: the server-side git-diff capture hook
+          // (apps/agent/agent/hooks/version-capture.ts) runs concurrently
+          // with this same event reaching the client, so give it a beat
+          // to land before giving up on the first check.
+          setTimeout(() => void checkForNewVersion(activeId), 1200);
+        }
+        return;
+      }
       if (event.type !== 'session.failed' && event.type !== 'turn.failed') return;
       const data = event.data as { message?: string; details?: { message?: string } };
       const real = data.details?.message ?? data.message;
@@ -596,11 +692,15 @@ function ChatInterfaceInner({
   // turn already fully finished client-side.
   useEffect(() => {
     onSessionIdKnown(agent.session?.sessionId);
+    const activeId = agent.session?.sessionId ?? sessionId;
+    chatIdRef.current = activeId;
+    if (activeId && lastSeenVersionRef.current === null) void checkForNewVersion(activeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agent.session?.sessionId]);
+  }, [agent.session?.sessionId, sessionId]);
 
   const isBusy = agent.status === 'submitted' || agent.status === 'streaming';
   const messages = agent.data.messages;
+  latestMessagesRef.current = messages;
   // Same reasoning as direct-chat-interface.tsx's `pendingTurn`: a fresh
   // mount (e.g. a reload while eve's session was still generating
   // server-side) always starts `agent.status` at 'ready' regardless of
@@ -733,13 +833,19 @@ function ChatInterfaceInner({
           <div ref={scrollRef} className="flex-1 overflow-y-auto py-4">
             <div className="max-w-[832px] mx-auto px-4 w-full flex flex-col [&>*:not(:first-child)]:mt-4">
               {messages.map((m, idx) => (
-                <MessageRenderer
-                  key={m.id}
-                  message={m}
-                  isStreaming={isBusy && idx === messages.length - 1}
-                  allMessages={messages}
-                  onSend={onSend}
-                />
+                <Fragment key={m.id}>
+                  <MessageRenderer
+                    message={m}
+                    isStreaming={isBusy && idx === messages.length - 1}
+                    allMessages={messages}
+                    onSend={onSend}
+                  />
+                  {localVersionCards
+                    .filter(c => c.afterMessageId === m.id)
+                    .map(c => (
+                      <VersionCard key={`version-${c.data.versionNumber}`} data={c.data} onOpen={() => requestOpenHistory(c.data.versionNumber)} />
+                    ))}
+                </Fragment>
               ))}
             </div>
           </div>
