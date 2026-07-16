@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { featureService } from '@entry/features';
-import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
+import { getSandboxForChat, getPreviewForChat } from '@/lib/direct-chat/sandbox';
 import { prisma } from '@entry/db';
 
 async function isAuthorized(req: NextRequest): Promise<boolean> {
@@ -29,31 +29,45 @@ async function isAuthorized(req: NextRequest): Promise<boolean> {
 export async function GET(req: NextRequest) {
   if (!(await isAuthorized(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const throwawayChatId = `diag-sandbox-${Date.now()}`;
+  // Optional ?chatId=... reproduces a REAL chat's exact preview-route
+  // path (same functions [sessionId]/preview/route.ts calls) against its
+  // real, persisted ChatSandbox row -- for confirming a specific reported
+  // chat is actually fixed, not just that the mechanism works in the
+  // abstract. Falls back to a disposable throwaway id (cleaned up after)
+  // when omitted.
+  const url = new URL(req.url);
+  const realChatId = url.searchParams.get('chatId');
+  const chatId = realChatId ?? `diag-sandbox-${Date.now()}`;
   const start = Date.now();
   try {
-    const sandbox = await getSandboxForChat(throwawayChatId);
+    const sandbox = await getSandboxForChat(chatId);
     const bootMs = Date.now() - start;
 
     const bashStart = Date.now();
     const result = await sandbox.run({ command: 'echo "hello-from-e2b-verify" && python3 --version && node --version' });
     const bashMs = Date.now() - bashStart;
 
+    const preview = await getPreviewForChat(chatId);
+
     return NextResponse.json({
       ok: true,
+      chatId,
       sandboxId: sandbox.id,
       bootMs,
       bashMs,
       bash: { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr },
+      preview,
     });
   } catch (err: any) {
     return NextResponse.json(
-      { ok: false, name: err?.name, message: err?.message, stack: err?.stack?.split('\n').slice(0, 5) },
+      { ok: false, chatId, name: err?.name, message: err?.message, stack: err?.stack?.split('\n').slice(0, 5) },
       { status: 500 },
     );
   } finally {
-    // Clean up the throwaway ChatSandbox row this created, since
-    // throwawayChatId is not a real chat.
-    await prisma.chatSandbox.deleteMany({ where: { chatId: throwawayChatId } }).catch(() => {});
+    // Only clean up the throwaway row -- never touch a real chat's
+    // persisted ChatSandbox row.
+    if (!realChatId) {
+      await prisma.chatSandbox.deleteMany({ where: { chatId } }).catch(() => {});
+    }
   }
 }
