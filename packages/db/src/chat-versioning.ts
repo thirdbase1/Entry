@@ -530,3 +530,66 @@ export async function planRevert(chatId: string, targetVersionNumber: number): P
 
   return actions;
 }
+
+/**
+ * Single-file revert (2026-07-17, "improve history and versioning" push
+ * -- real gap: the only revert action was the whole version snapshot;
+ * if 11 files changed in a version and only one of them needs rolling
+ * back, the old-only option threw away the other 10 files' progress
+ * too). Same before/after model as `planRevert`, just scoped to one
+ * path instead of every tracked path -- returns null when there's
+ * nothing to actually do (the path's content as of the target version
+ * already matches its current live content, or neither version nor the
+ * live state ever tracked this path at all).
+ */
+export async function planRevertSingleFile(
+  chatId: string,
+  targetVersionNumber: number,
+  path: string,
+): Promise<RevertFileAction | null> {
+  const asOfTarget = await prisma.chatVersionFile.findFirst({
+    where: { chatId, path, versionNumber: { lte: targetVersionNumber } },
+    orderBy: { versionNumber: 'desc' },
+  });
+  const asOfHead = await prisma.chatVersionFile.findFirst({
+    where: { chatId, path },
+    orderBy: { versionNumber: 'desc' },
+  });
+
+  const targetIsLive = asOfTarget && asOfTarget.changeType !== 'deleted';
+  const headIsLive = asOfHead && asOfHead.changeType !== 'deleted';
+
+  if (!targetIsLive) {
+    // Didn't exist (or was deleted) as of the target version -- if it
+    // exists live now, that means a later version created/restored it,
+    // so reverting this one file means deleting it again.
+    return headIsLive ? { path, action: 'delete', content: null } : null;
+  }
+
+  if (headIsLive && asOfHead!.content === asOfTarget!.content) return null; // already matches -- no-op
+  return { path, action: 'write', content: asOfTarget!.content };
+}
+
+/**
+ * Full-content snapshot of every live (non-deleted) tracked path as of
+ * a given version -- the read side of `restoreLatestFilesToSandbox`'s
+ * same query, pulled out standalone for the version-snapshot download
+ * endpoint (2026-07-17). Deliberately pure-DB, no sandbox involved: this
+ * is what makes it work for BOTH direct/BYOK AND eve-default chats alike
+ * (unlike revert, which needs a live sandbox to actually write into),
+ * since every ChatVersionFile row is already a complete stored copy of
+ * that file's content at that point -- nothing to fetch from a sandbox
+ * at all.
+ */
+export async function getSnapshotFiles(
+  chatId: string,
+  versionNumber: number,
+): Promise<Array<{ path: string; content: string }>> {
+  const rows = await prisma.$queryRaw<Array<{ path: string; change_type: string; content: string | null }>>`
+    SELECT DISTINCT ON (path) path, change_type, content
+    FROM chat_version_files
+    WHERE chat_id = ${chatId} AND version_number <= ${versionNumber}
+    ORDER BY path, version_number DESC
+  `;
+  return rows.filter(r => r.change_type !== 'deleted' && r.content != null).map(r => ({ path: r.path, content: r.content! }));
+}
