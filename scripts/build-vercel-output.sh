@@ -7,7 +7,7 @@
 #
 # Usage (run from repo root):
 #   ./scripts/build-vercel-output.sh
-#   npx vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN"
+#   npx vercel deploy --prebuilt --prod --archive=tgz --token "$VERCEL_TOKEN"
 #
 # Requires `vercel pull` to have been run at least once so apps/web has a
 # .vercel/project.json (or that env vars are otherwise already configured
@@ -129,4 +129,4 @@ VCEOF
 echo "==> [6/6] Done. .vercel/output is ready:"
 du -sh "$OUT"
 echo ""
-echo "Next: npx vercel deploy --prebuilt --prod --token \"\$VERCEL_TOKEN\""
+echo "Next: npx vercel deploy --prebuilt --prod --archive=tgz --token \"\$VERCEL_TOKEN\""

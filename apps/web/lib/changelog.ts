@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-17',
+    title: 'Fixed the versioning system tracking the Vercel CLI\'s own cache files as project changes',
+    items: [
+      'A version card could show files like ".cache/com.vercel.cli/..." and ".local/share/com.vercel.cli/..." with a Revert button -- that\'s the Vercel CLI\'s own global state, not anything you or the agent changed in your project. Now excluded, including cleaning up any of it already being tracked from before this fix.',
+    ],
+  },
+  {
+    date: '2026-07-17',
     title: "Fixed the Files tab dumping ~3000 sandbox junk files in a brand new chat",
     items: [
       "A new chat's Files tab was showing the sandbox's own pre-loaded tooling cache (npm cache, Playwright browsers, shell rc files, etc.) instead of an empty project -- capped at 3000 entries, which is exactly what was showing up. Now excluded by name so only real project files ever appear.",

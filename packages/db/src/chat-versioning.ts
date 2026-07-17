@@ -224,6 +224,19 @@ export interface VersionCaptureSandbox {
   run(opts: { command: string }): PromiseLike<{ exitCode: number; stdout: string; stderr: string }>;
 }
 
+// (2026-07-17, user-reported: a version card showing 5 files changed
+// that were all Vercel CLI's OWN state -- .cache/com.vercel.cli/...,
+// .local/share/com.vercel.cli/... -- with a live Revert button on them).
+// Root cause: whenever the agent runs the `vercel` CLI inside a chat's
+// sandbox (which is routine -- building/deploying Entry itself, or any
+// project the user asks it to deploy), the CLI writes its OWN global
+// state under XDG dirs that default to right under the sandbox's home/
+// cwd: $XDG_CACHE_HOME (~/.cache/com.vercel.cli) and $XDG_DATA_HOME
+// (~/.local/share/com.vercel.cli), plus `.vercel/` (the project-link
+// dir vercel CLI writes into cwd directly). None of those were ever in
+// this list -- `.cache/` WAS already ignored, but `.local/` and
+// `.vercel/` never were, so they got git-added, diffed, and versioned
+// like real project edits every single time the CLI ran.
 const GIT_IGNORE_CONTENTS = [
   'node_modules/',
   '.next/',
@@ -236,8 +249,47 @@ const GIT_IGNORE_CONTENTS = [
   'venv/',
   '.cache/',
   '.git/',
+  // CLI/tooling global state that can land directly in cwd when it
+  // doubles as $HOME -- never actual project files. Kept in sync with
+  // list_files.ts's own EXCLUDED list (same root cause, different
+  // consumer) -- see that file's comment.
+  '.vercel/',
+  '.local/',
+  '.config/',
+  '.npm/',
+  '.cargo/',
+  '.rustup/',
+  '.nvm/',
+  '.pyenv/',
+  '.agent-browser/',
+  'browsers/',
+  '_cacache/',
+  '_logs/',
+  '_update-notifier-last-checked',
+  '.bashrc',
+  '.bash_logout',
+  '.bash_history',
+  '.profile',
+  '.sudo_as_admin_successful',
+  '.wget-hsts',
+  '.lesshst',
+  '.viminfo',
+  '.ssh/',
+  '.gnupg/',
   '',
 ].join('\n');
+
+// Matches GIT_IGNORE_CONTENTS' own directory entries (the trailing `/`
+// ones) -- used to actively `git rm --cached` anything that matched an
+// OLDER, shorter ignore list and got tracked/committed before this fix,
+// since .gitignore alone never retroactively untracks an already-
+// committed path. Kept separate from the raw .gitignore text (which also
+// has file-pattern lines like `*.pyc` that `git rm -r --cached` can't
+// take a bare pattern for the same way) rather than re-parsing it.
+const IGNORED_DIR_NAMES = [
+  '.vercel', '.local', '.config', '.npm', '.cargo', '.rustup', '.nvm', '.pyenv',
+  '.agent-browser', 'browsers', '_cacache', '_logs', '.cache', '.ssh', '.gnupg',
+];
 
 /**
  * Detects EVERY file change made during the turn that just ended --
@@ -279,16 +331,39 @@ export async function captureVersionFromSandboxDiff(
       return null; // baseline only -- nothing to diff against yet
     }
 
+    // Rewrite .gitignore + untrack anything matching it EVERY turn, not
+    // just at first init -- a chat whose baseline was committed before
+    // this fix (i.e. almost every existing chat) already has an older,
+    // shorter .gitignore on disk, and a .gitignore change alone never
+    // un-tracks a path git already committed. `git rm -r --cached` is a
+    // no-op (exit 128, ignored via `|| true`) for any name that was
+    // never tracked, so this is safe to run unconditionally every time.
+    const untrackCmd = IGNORED_DIR_NAMES.map(d => `git rm -r --cached ${JSON.stringify(d)} >/dev/null 2>&1 || true`).join(' && ');
+    await sandbox.run({
+      command: [`printf '%s' ${JSON.stringify(GIT_IGNORE_CONTENTS)} > .gitignore`, untrackCmd].join(' && '),
+    });
+
     await sandbox.run({ command: 'git add -A' });
     const statusResult = await sandbox.run({ command: "git diff --cached --name-status --no-renames" });
     const lines = statusResult.stdout.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 0) return null; // nothing changed this turn
 
     const changes: PendingChange[] = [];
+    // Belt-and-suspenders on top of the untrack step above: a path being
+    // un-tracked THIS turn (because it matched a newly-added ignore rule
+    // on an older baseline) shows up right here as a plain 'D' delete --
+    // correct in that it really is leaving the index, but showing the
+    // user a version card like "5 files deleted: vercel-latest.json,
+    // telemetry-session.json..." is just a different flavor of the same
+    // noise this fix is trying to remove, not a real project change.
+    // Filter those out of the CARD entirely rather than special-casing
+    // the summary text -- there is nothing genuinely worth showing here.
+    const isIgnoredToolingPath = (p: string) => IGNORED_DIR_NAMES.some(d => p === d || p.startsWith(`${d}/`));
+
     for (const line of lines) {
       const [statusCode, ...pathParts] = line.split('\t');
       const path = pathParts.join('\t');
-      if (!path) continue;
+      if (!path || isIgnoredToolingPath(path)) continue;
       const code = statusCode[0];
       if (code === 'D') {
         changes.push({ path, changeType: 'deleted', content: null });

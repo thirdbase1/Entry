@@ -168,7 +168,7 @@ vercel pull --yes --environment production   # pulls project settings (env vars 
 
 # Ship the hand-built artifacts straight to Vercel, skipping their broken
 # build step entirely
-npx vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN"
+npx vercel deploy --prebuilt --prod --archive=tgz --token "$VERCEL_TOKEN"
 ```
 
 Notes:
