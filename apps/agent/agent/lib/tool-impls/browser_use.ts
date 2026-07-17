@@ -8,6 +8,7 @@ import { safeExecute } from './safe-execute.js';
 import {
   createOrDispatchBrowserUseTask,
   getBrowserUseSession,
+  listBrowserUseMessages,
   type BrowserUseSlot,
   type BrowserUseSessionResult,
 } from '../browser-use-cloud-client.js';
@@ -46,9 +47,27 @@ import { createSteelSession, connectSteelBrowser } from '../steel-client.js';
  * work) while Steel costs an LLM call per step -- cheaper/faster by
  * default, but all three genuinely run in parallel across different
  * chat turns/tasks since each is tracked as its own ChatBrowserSession row.
+ *
+ * UPDATED (2026-07-17, "make the whole browser feature 3x better"):
+ *   - Both lanes now persist a live, incrementally-growing `steps` feed
+ *     to the DB DURING execution (not just once at the very end), so the
+ *     chat UI's Browser tab can show a real thought-stream next to the
+ *     video instead of the video being the only signal something's
+ *     happening. Browser Use's steps come from its own message stream
+ *     (docs.browser-use.com/cloud/agent/streaming); Steel's come from
+ *     this file's own decide/act loop, one entry per action.
+ *   - Browser Use sessions now request `enableRecording`, and once a
+ *     recording is ready its presigned URL is persisted to
+ *     `recordingUrl` so the UI can offer "watch recording" after a
+ *     session ends.
+ *   - Poll cadence tightened (3000ms -> 2000ms) for a snappier feed.
+ *   - Steel's step budget raised (12 -> 20 steps) so more involved
+ *     multi-step tasks (multi-page flows, forms with several fields)
+ *     have a realistic chance of finishing in one call instead of
+ *     hitting the ceiling early.
  */
 
-const POLL_INTERVAL_MS = 3000;
+const POLL_INTERVAL_MS = 2000;
 // How long THIS tool call keeps polling/stepping before reporting back --
 // NOT the browser's own lifetime. Both providers keep the session alive
 // well past this on their own (Browser Use's keepAlive, Steel's
@@ -57,7 +76,8 @@ const POLL_INTERVAL_MS = 3000;
 // still be active" from the request. Call back in with session_id to
 // keep going.
 const WALL_CLOCK_BUDGET_MS = 60_000;
-const MAX_STEEL_STEPS = 12;
+const MAX_STEEL_STEPS = 20;
+const MAX_STEPS_STORED = 200;
 
 type Lane = { provider: 'browser_use'; slot: BrowserUseSlot } | { provider: 'steel'; slot: 1 };
 
@@ -77,7 +97,18 @@ type SessionRow = {
   liveUrl: string | null;
   output: string | null;
   isTaskSuccessful: boolean | null;
+  steps: unknown;
+  recordingUrl: string | null;
 };
+
+type StepEntry = { id?: string; role: string; summary: string; screenshotUrl: string | null; at: string };
+
+function appendSteps(existing: unknown, add: StepEntry[]): StepEntry[] {
+  if (add.length === 0) return Array.isArray(existing) ? (existing as StepEntry[]) : [];
+  const cur = Array.isArray(existing) ? (existing as StepEntry[]) : [];
+  const merged = [...cur, ...add];
+  return merged.length > MAX_STEPS_STORED ? merged.slice(merged.length - MAX_STEPS_STORED) : merged;
+}
 
 async function pickFreeLane(chatId: string): Promise<Lane> {
   const active = await prisma.chatBrowserSession.findMany({
@@ -104,18 +135,52 @@ function outputToText(output: unknown): string | null {
 
 // --- Browser Use Cloud lane -------------------------------------------------
 
-async function runBrowserUseLane(params: { task: string; slot: BrowserUseSlot; providerSessionId?: string }): Promise<{
+async function runBrowserUseLane(params: {
+  task: string;
+  slot: BrowserUseSlot;
+  providerSessionId?: string;
+  rowId: string;
+  priorSteps: unknown;
+}): Promise<{
   providerSessionId: string;
   liveUrl: string | null;
   output: string | null;
   screenshotUrl: string | null;
   isTaskSuccessful: boolean | null;
   stillRunning: boolean;
+  recordingUrl: string | null;
 }> {
   const result = await createOrDispatchBrowserUseTask(params.slot, { task: params.task, sessionId: params.providerSessionId, keepAlive: true });
   let finalResult = result;
   let stillRunning = !isDone(finalResult);
+  let steps = params.priorSteps;
+  let messageCursor: string | undefined = (() => {
+    const arr = Array.isArray(params.priorSteps) ? (params.priorSteps as StepEntry[]) : [];
+    return arr.length ? arr[arr.length - 1]?.id : undefined;
+  })();
   const startedAt = Date.now();
+
+  // Immediately persist the live view + running status so the Browser
+  // tab shows the iframe right away, well before the first poll tick --
+  // matters most for a brand new session (result.id === providerSessionId).
+  await prisma.chatBrowserSession
+    .update({ where: { id: params.rowId }, data: { liveUrl: finalResult.liveUrl ?? undefined, status: stillRunning ? 'running' : 'idle' } })
+    .catch(() => {});
+
+  async function pollMessagesAndPersist() {
+    try {
+      const msgs = await listBrowserUseMessages(params.slot, result.id, messageCursor);
+      if (msgs.length === 0) return;
+      messageCursor = msgs[msgs.length - 1].id;
+      const newSteps: StepEntry[] = msgs.map(m => ({ id: m.id, role: m.role, summary: m.summary, screenshotUrl: m.screenshotUrl, at: new Date().toISOString() }));
+      steps = appendSteps(steps, newSteps);
+      await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } });
+    } catch {
+      // Message streaming is a nice-to-have live feed -- never fail the whole tool call over it.
+    }
+  }
+
+  await pollMessagesAndPersist();
   while (stillRunning && Date.now() - startedAt < WALL_CLOCK_BUDGET_MS) {
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
     try {
@@ -124,7 +189,9 @@ async function runBrowserUseLane(params: { task: string; slot: BrowserUseSlot; p
       break;
     }
     stillRunning = !isDone(finalResult);
+    await pollMessagesAndPersist();
   }
+
   return {
     providerSessionId: result.id,
     liveUrl: finalResult.liveUrl,
@@ -132,6 +199,7 @@ async function runBrowserUseLane(params: { task: string; slot: BrowserUseSlot; p
     screenshotUrl: finalResult.screenshotUrl,
     isTaskSuccessful: finalResult.isTaskSuccessful,
     stillRunning,
+    recordingUrl: finalResult.recordingUrls[0] ?? null,
   };
 }
 
@@ -186,12 +254,19 @@ async function decideSteelAction(params: { llmModel: Parameters<typeof generateO
   return { ok: false as const, reason: 'model did not return a valid next action' };
 }
 
-async function runSteelLane(params: { task: string; websocketUrl: string; llmModel: Parameters<typeof generateObject>[0]['model'] }): Promise<{
+async function runSteelLane(params: {
+  task: string;
+  websocketUrl: string;
+  llmModel: Parameters<typeof generateObject>[0]['model'];
+  rowId: string;
+  priorSteps: unknown;
+}): Promise<{
   output: string | null;
   screenshotUrl: string | null;
   isTaskSuccessful: boolean | null;
 }> {
   const browser = await connectSteelBrowser(params.websocketUrl);
+  let steps = params.priorSteps;
   try {
     const context = browser.contexts()[0];
     const page = context.pages()[0] ?? (await context.newPage());
@@ -206,13 +281,20 @@ async function runSteelLane(params: { task: string; websocketUrl: string; llmMod
       const decision = await decideSteelAction({ llmModel: params.llmModel, task: params.task, history, pageText, url: page.url() });
       if (!decision.ok) {
         outcome = { done: true, success: false, summary: `Browser automation stopped: the controlling model kept returning invalid responses (${decision.reason}).` };
+        steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
         break;
       }
       const next: SteelAction = decision.action;
       if (next.done) {
         outcome = { done: true, success: next.success, summary: next.summary };
+        steps = appendSteps(steps, [
+          { role: 'ai', summary: next.summary || (next.success ? 'Task completed.' : 'Task did not complete.'), screenshotUrl: null, at: new Date().toISOString() },
+        ]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
         break;
       }
+      let stepText: string;
       try {
         switch (next.action) {
           case 'goto':
@@ -238,9 +320,19 @@ async function runSteelLane(params: { task: string; websocketUrl: string; llmMod
             break;
         }
         history.push(next.stepDescription);
+        stepText = next.stepDescription;
       } catch (err) {
-        history.push(`${next.stepDescription} — FAILED: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300));
+        const failText = `${next.stepDescription} — FAILED: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300);
+        history.push(failText);
+        stepText = failText;
       }
+      // Persisted live, one entry per action, so the Browser tab's step
+      // feed updates in near-real-time while this loop is still running
+      // (previously the whole steps history only ever showed up once the
+      // entire tool call had already finished).
+      steps = appendSteps(steps, [{ role: 'ai', summary: stepText, screenshotUrl: null, at: new Date().toISOString() }]);
+      await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+
       if (i === MAX_STEEL_STEPS - 1 && !outcome.done) {
         outcome = { done: true, success: false, summary: `Stopped after ${MAX_STEEL_STEPS} steps without the task reporting completion.` };
       }
@@ -267,10 +359,10 @@ export const browserUse = {
   description:
     'Drive a real cloud browser to complete a task: navigate, click, fill forms, read pages, extract data. Give it a ' +
     "natural-language task; it runs in a live, watchable cloud browser (the chat UI's Browser tab shows it in real " +
-    "time) and returns a summary when done. The browser stays alive after the task finishes -- pass the returned " +
-    'session_id back in to send a FOLLOW-UP task in the SAME browser (same cookies/tabs/page state) instead of ' +
-    'starting fresh. Call browser_stop when genuinely finished with a session. Up to three sessions can run in ' +
-    'parallel for this chat, across two different cloud browser providers.',
+    "time, plus a live step-by-step feed of what it's doing) and returns a summary when done. The browser stays alive " +
+    'after the task finishes -- pass the returned session_id back in to send a FOLLOW-UP task in the SAME browser ' +
+    '(same cookies/tabs/page state) instead of starting fresh. Call browser_stop when genuinely finished with a ' +
+    'session. Up to three sessions can run in parallel for this chat, across two different cloud browser providers.',
   inputSchema: z.object({
     task: z.string().describe('Natural-language description of what the browser should do next.'),
     session_id: z
@@ -290,39 +382,53 @@ export const browserUse = {
       const existing = await prisma.chatBrowserSession.findUnique({ where: { id: session_id } });
       if (!existing || existing.chatId !== chatId) throw new Error(`No browser session "${session_id}" found for this chat.`);
       if (existing.status === 'stopped') throw new Error(`Browser session "${session_id}" was already stopped -- omit session_id to start a new one.`);
-      row = existing;
+      row = existing as SessionRow;
       lane = existing.provider === 'steel' ? { provider: 'steel', slot: 1 } : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
     } else {
       lane = await pickFreeLane(chatId);
     }
 
     if (lane.provider === 'browser_use') {
-      const laneResult = await runBrowserUseLane({ task, slot: lane.slot, providerSessionId: row?.providerSessionId });
+      // Create the row up front (before the lane even starts polling) so
+      // an incremental step feed has somewhere to write to from the very
+      // first tick -- for a brand-new session this starts as a
+      // placeholder and gets its real providerSessionId/liveUrl filled
+      // in a moment later by runBrowserUseLane itself.
+      if (!row) {
+        row = (await prisma.chatBrowserSession.create({
+          data: { chatId, provider: 'browser_use', slot: lane.slot, providerSessionId: 'pending', task, status: 'running', steps: [] },
+        })) as SessionRow;
+      }
 
-      row = row
-        ? await prisma.chatBrowserSession.update({
-            where: { id: row.id },
-            data: {
-              task,
-              status: laneResult.stillRunning ? 'running' : 'idle',
-              liveUrl: laneResult.liveUrl ?? row.liveUrl,
-              output: laneResult.output ?? row.output,
-              isTaskSuccessful: laneResult.isTaskSuccessful ?? row.isTaskSuccessful,
-            },
-          })
-        : await prisma.chatBrowserSession.create({
-            data: {
-              chatId,
-              provider: 'browser_use',
-              slot: lane.slot,
-              providerSessionId: laneResult.providerSessionId,
-              task,
-              status: laneResult.stillRunning ? 'running' : 'idle',
-              liveUrl: laneResult.liveUrl,
-              output: laneResult.output,
-              isTaskSuccessful: laneResult.isTaskSuccessful,
-            },
-          });
+      let laneResult: Awaited<ReturnType<typeof runBrowserUseLane>>;
+      try {
+        laneResult = await runBrowserUseLane({
+          task,
+          slot: lane.slot,
+          providerSessionId: row.providerSessionId === 'pending' ? undefined : row.providerSessionId,
+          rowId: row.id,
+          priorSteps: row.steps,
+        });
+      } catch (err) {
+        // Never leave a lane permanently "stuck" occupied by a row that
+        // failed before it ever got a real provider session id -- mark
+        // it failed so pickFreeLane frees the slot back up immediately.
+        await prisma.chatBrowserSession.update({ where: { id: row.id }, data: { status: 'failed' } }).catch(() => {});
+        throw err;
+      }
+
+      row = (await prisma.chatBrowserSession.update({
+        where: { id: row.id },
+        data: {
+          task,
+          providerSessionId: laneResult.providerSessionId,
+          status: laneResult.stillRunning ? 'running' : 'idle',
+          liveUrl: laneResult.liveUrl ?? row.liveUrl,
+          output: laneResult.output ?? row.output,
+          isTaskSuccessful: laneResult.isTaskSuccessful ?? row.isTaskSuccessful,
+          recordingUrl: laneResult.recordingUrl ?? row.recordingUrl,
+        },
+      })) as SessionRow;
 
       const markdown = laneResult.stillRunning
         ? `Still working in a live browser (session \`${row.id}\`) -- it keeps running even though this tool call is reporting back now. Call browser_use again with session_id "${row.id}" to check progress or continue, or browser_stop to end it.`
@@ -335,6 +441,7 @@ export const browserUse = {
         markdown,
         sessionId: row.id,
         liveUrl: row.liveUrl,
+        recordingUrl: row.recordingUrl,
         provider: 'browser_use',
       };
     }
@@ -352,7 +459,7 @@ export const browserUse = {
       const session = await createSteelSession();
       websocketUrl = session.websocketUrl;
       liveUrl = session.liveUrl;
-      row = await prisma.chatBrowserSession.create({
+      row = (await prisma.chatBrowserSession.create({
         data: {
           chatId,
           provider: 'steel',
@@ -362,17 +469,18 @@ export const browserUse = {
           task,
           status: 'running',
           liveUrl,
+          steps: [],
         },
-      });
+      })) as SessionRow;
     }
 
     const llmModel = await model(undefined, ctx?.byokModel);
-    const laneResult = await runSteelLane({ task, websocketUrl, llmModel });
+    const laneResult = await runSteelLane({ task, websocketUrl, llmModel, rowId: row.id, priorSteps: row.steps });
 
-    row = await prisma.chatBrowserSession.update({
+    row = (await prisma.chatBrowserSession.update({
       where: { id: row.id },
       data: { task, status: 'idle', output: laneResult.output, isTaskSuccessful: laneResult.isTaskSuccessful },
-    });
+    })) as SessionRow;
 
     return {
       status: laneResult.isTaskSuccessful === false ? 'failed' : 'finished',
@@ -381,6 +489,7 @@ export const browserUse = {
       markdown: laneResult.output,
       sessionId: row.id,
       liveUrl: row.liveUrl,
+      recordingUrl: row.recordingUrl,
       provider: 'steel',
     };
   },

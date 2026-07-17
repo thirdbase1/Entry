@@ -48,6 +48,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
       liveUrl: r.liveUrl,
       output: r.output,
       isTaskSuccessful: r.isTaskSuccessful,
+      // Live step/thought feed (2026-07-17, "make the browser 3x better")
+      // -- capped to the most recent 50 for this response even though up
+      // to 200 are kept in the DB, since the panel only ever shows a
+      // scrolling recent-activity feed, not full history.
+      steps: (Array.isArray(r.steps) ? r.steps : []).slice(-50),
+      recordingUrl: r.recordingUrl,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     })),

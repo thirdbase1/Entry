@@ -771,6 +771,18 @@ model ChatBrowserSession {
   liveUrl            String?   @map("live_url") @db.VarChar
   output             String?   @db.Text
   isTaskSuccessful   Boolean?  @map("is_task_successful")
+  // Live step/thought feed shown in the chat UI's Browser tab, appended to
+  // incrementally DURING execution (not just written once at the end) --
+  // added 2026-07-17, explicit user request to make the browser feature
+  // "3x better": array of {role, summary, at}, newest last, capped at 200
+  // entries per session (see MAX_STEPS_STORED in browser_use.ts).
+  steps              Json      @default("[]") @map("steps")
+  // Presigned MP4 URL once Browser Use finishes recording the session
+  // (Steel doesn't currently get one here -- its recording/replay lives
+  // entirely in Steel's own dashboard, not surfaced through this API).
+  // Presigned URLs expire ~1hr after Browser Use issues them, so this is
+  // best-effort/"as of last poll", not guaranteed still valid later.
+  recordingUrl       String?   @map("recording_url") @db.VarChar
   createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
