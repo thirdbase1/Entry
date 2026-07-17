@@ -271,42 +271,53 @@ async function decideSteelAction(params: {
 }) {
   const MAX_ATTEMPTS = 3;
   let lastBadText = '';
+  // Not every BYOK model/relay behind `params.llmModel` supports image
+  // input -- e.g. a text-only model proxied through a compatibility
+  // relay may reject an image content part outright (400-style error,
+  // not a NoObjectGeneratedError). Rather than aborting the whole Steel
+  // task the first time that happens, drop back to text-only and retry
+  // the SAME step once before giving up on it.
+  let includeImage = true;
+  let triedNoImageFallback = false;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const base =
       `Task: ${params.task}\n\nSteps so far (${params.history.length}): ${params.history.join('; ') || '(none yet)'}\n\n` +
-      `Current URL: ${params.url}\nOpen tabs: ${params.tabCount}\nVisible page text (truncated):\n${params.pageText.slice(0, 4000)}\n\n` +
-      'A screenshot of the current page state is attached -- use it to judge what is actually visible/clickable ' +
-      '(watch for cookie banners, modals, or popups covering the target) rather than relying on the text alone.';
+      `Current URL: ${params.url}\nOpen tabs: ${params.tabCount}\nVisible page text (truncated):\n${params.pageText.slice(0, 4000)}` +
+      (includeImage
+        ? '\n\nA screenshot of the current page state is attached -- use it to judge what is actually visible/clickable ' +
+          '(watch for cookie banners, modals, or popups covering the target) rather than relying on the text alone.'
+        : '');
     const textContent =
       attempt === 0
         ? base
         : `${base}\n\nIMPORTANT: your previous response was not valid JSON matching the schema. Respond with ONLY strict JSON, no markdown fences, no commentary.${lastBadText ? `\n\nYour last (invalid) response: ${lastBadText.slice(0, 500)}` : ''}`;
+    const content: Array<{ type: 'text'; text: string } | { type: 'file'; data: string; mediaType: string }> = [{ type: 'text', text: textContent }];
+    if (includeImage) content.push({ type: 'file', data: params.screenshotBase64, mediaType: 'image/png' });
     try {
       const { object } = await generateObject({
         model: params.llmModel,
         schema: SteelActionSchema,
         system:
           'You control a real remote web browser one action at a time via Playwright locators. You are given the task, ' +
-          'steps taken so far, the current URL, number of open tabs, the visible text of the current page, AND a screenshot ' +
-          'of what the page actually looks like right now. Decide the SINGLE next action needed to make progress, using a ' +
+          'steps taken so far, the current URL, number of open tabs, the visible text of the current page' +
+          (includeImage ? ', AND a screenshot of what the page actually looks like right now' : '') +
+          '. Decide the SINGLE next action needed to make progress, using a ' +
           'Playwright locator string for selector (text=, role=, css=, id=). If a new tab opened (e.g. after clicking a link ' +
           'that opens target=_blank) and open tabs > 1, use switch_tab with the tab index to move to the new tab before ' +
           'continuing. Only set done=true once the task is genuinely complete, or cannot be completed after reasonable ' +
           'attempts (then success=false and explain why).',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: textContent },
-              { type: 'file', data: params.screenshotBase64, mediaType: 'image/png' },
-            ],
-          },
-        ],
+        messages: [{ role: 'user', content }],
       });
       return { ok: true as const, action: object };
     } catch (err) {
       if (NoObjectGeneratedError.isInstance(err)) {
         lastBadText = err.text ?? '';
+        continue;
+      }
+      if (includeImage && !triedNoImageFallback) {
+        includeImage = false;
+        triedNoImageFallback = true;
+        attempt--;
         continue;
       }
       return { ok: false as const, reason: err instanceof Error ? err.message : String(err) };
