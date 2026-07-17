@@ -119,18 +119,28 @@ function appendSteps(existing: unknown, add: StepEntry[]): StepEntry[] {
   return merged.length > MAX_STEPS_STORED ? merged.slice(merged.length - MAX_STEPS_STORED) : merged;
 }
 
-async function pickFreeLane(chatId: string): Promise<Lane> {
+async function pickFreeLane(chatId: string, preferred?: 'browser_use' | 'steel'): Promise<Lane> {
   const active = await prisma.chatBrowserSession.findMany({
     where: { chatId, status: { in: ['running', 'idle'] } },
     select: { provider: true, slot: true },
   });
   const used = new Set(active.map(a => `${a.provider}:${a.slot}`));
-  for (const lane of LANES) {
+  // If the caller asked for a specific provider, honor it (try it first) --
+  // this is what actually lets the agent "just call Steel" instead of the
+  // system always defaulting to Browser Use for every new session.
+  const ordered = preferred ? [...LANES].sort((a, b) => (a.provider === preferred ? -1 : b.provider === preferred ? 1 : 0)) : LANES;
+  for (const lane of ordered) {
     if (!used.has(`${lane.provider}:${lane.slot}`)) return lane;
   }
   throw new Error(
     'Both browser lanes (browser_use, steel) are already in use for this chat -- call browser_stop on an existing session_id before starting another, or reuse an existing session_id as a follow-up.',
   );
+}
+
+/** True for errors that mean "this provider account itself can't run anything right now" (quota/billing), as opposed to a one-off task failure -- only these are worth silently falling back to the other lane for. */
+function isProviderUnavailableError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b402\b|plan limit|quota|insufficient credit/i.test(msg);
 }
 
 function isDone(result: BrowserUseSessionResult): boolean {
@@ -371,7 +381,9 @@ export const browserUse = {
     "time, plus a live step-by-step feed of what it's doing) and returns a summary when done. The browser stays alive " +
     'after the task finishes -- pass the returned session_id back in to send a FOLLOW-UP task in the SAME browser ' +
     '(same cookies/tabs/page state) instead of starting fresh. Call browser_stop when genuinely finished with a ' +
-    'session. Up to two sessions can run in parallel for this chat, one per cloud browser provider.',
+    'session. Up to two sessions can run in parallel for this chat, one per cloud browser provider -- pass `provider` ' +
+    'to pick which one for a NEW session (defaults to trying browser_use first, auto-falling back to steel if ' +
+    "browser_use's account itself is unavailable, e.g. out of quota).",
   inputSchema: z.object({
     task: z.string().describe('Natural-language description of what the browser should do next.'),
     session_id: z
@@ -380,8 +392,17 @@ export const browserUse = {
       .describe(
         'An existing browser session id (returned by a previous browser_use call) to send this task as a follow-up in the SAME live browser. Omit to start a brand new session.',
       ),
+    provider: z
+      .enum(['browser_use', 'steel'])
+      .optional()
+      .describe(
+        'Force a specific provider for a NEW session: "browser_use" (fully agentic, hands-off -- its own agent plans and executes the whole task) or ' +
+          '"steel" (a raw remote Chrome, driven one action at a time by this tool). Omit to auto-pick (tries browser_use first, falls back to steel ' +
+          "automatically if browser_use's account can't run anything right now, e.g. out of quota). Ignored when session_id is given -- a follow-up " +
+          "always reuses that session's existing provider.",
+      ),
   }),
-  async execute({ task, session_id }: { task: string; session_id?: string }, ctx: ToolExecCtx) {
+  async execute({ task, session_id, provider }: { task: string; session_id?: string; provider?: 'browser_use' | 'steel' }, ctx: ToolExecCtx) {
     const chatId = ctx.session.id;
 
     let row: SessionRow | null = null;
@@ -394,8 +415,10 @@ export const browserUse = {
       row = existing as SessionRow;
       lane = existing.provider === 'steel' ? { provider: 'steel', slot: 1 } : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
     } else {
-      lane = await pickFreeLane(chatId);
+      lane = await pickFreeLane(chatId, provider);
     }
+
+    let fellBackToSteel = false;
 
     if (lane.provider === 'browser_use') {
       // Create the row up front (before the lane even starts polling) so
@@ -409,7 +432,7 @@ export const browserUse = {
         })) as SessionRow;
       }
 
-      let laneResult: Awaited<ReturnType<typeof runBrowserUseLane>>;
+      let laneResult: Awaited<ReturnType<typeof runBrowserUseLane>> | null = null;
       try {
         laneResult = await runBrowserUseLane({
           task,
@@ -423,36 +446,61 @@ export const browserUse = {
         // failed before it ever got a real provider session id -- mark
         // it failed so pickFreeLane frees the slot back up immediately.
         await prisma.chatBrowserSession.update({ where: { id: row.id }, data: { status: 'failed' } }).catch(() => {});
-        throw err;
+
+        // AUTO-FALLBACK (2026-07-17, explicit user request: "make it easy
+        // for agent to call steel browser and the browser use -- currently
+        // all call go to browser use"): browser_use was always tried first
+        // for every brand-new session, so if that account itself can't run
+        // anything right now (quota/billing, not a one-off task failure),
+        // silently retry the SAME task on Steel instead of just failing the
+        // whole call -- only for a genuinely new session (never a
+        // session_id follow-up, which must stick to its already-established
+        // provider) and only when Steel's own lane is actually free.
+        const steelFree =
+          !session_id &&
+          (await prisma.chatBrowserSession.count({ where: { chatId, provider: 'steel', slot: 1, status: { in: ['running', 'idle'] } } })) === 0;
+        if (!session_id && steelFree && isProviderUnavailableError(err)) {
+          fellBackToSteel = true;
+        } else {
+          throw err;
+        }
       }
 
-      row = (await prisma.chatBrowserSession.update({
-        where: { id: row.id },
-        data: {
-          task,
-          providerSessionId: laneResult.providerSessionId,
-          status: laneResult.stillRunning ? 'running' : 'idle',
-          liveUrl: laneResult.liveUrl ?? row.liveUrl,
-          output: laneResult.output ?? row.output,
-          isTaskSuccessful: laneResult.isTaskSuccessful ?? row.isTaskSuccessful,
-          recordingUrl: laneResult.recordingUrl ?? row.recordingUrl,
-        },
-      })) as SessionRow;
+      if (fellBackToSteel) {
+        row = null;
+        lane = { provider: 'steel', slot: 1 };
+        // Falls through to the Steel section below -- deliberately no
+        // `return` here, this is the one case where lane switches mid-call.
+      } else {
+        const finalResult = laneResult!;
+        row = (await prisma.chatBrowserSession.update({
+          where: { id: row.id },
+          data: {
+            task,
+            providerSessionId: finalResult.providerSessionId,
+            status: finalResult.stillRunning ? 'running' : 'idle',
+            liveUrl: finalResult.liveUrl ?? row.liveUrl,
+            output: finalResult.output ?? row.output,
+            isTaskSuccessful: finalResult.isTaskSuccessful ?? row.isTaskSuccessful,
+            recordingUrl: finalResult.recordingUrl ?? row.recordingUrl,
+          },
+        })) as SessionRow;
 
-      const markdown = laneResult.stillRunning
-        ? `Still working in a live browser (session \`${row.id}\`) -- it keeps running even though this tool call is reporting back now. Call browser_use again with session_id "${row.id}" to check progress or continue, or browser_stop to end it.`
-        : laneResult.output || (laneResult.isTaskSuccessful ? 'Task completed.' : 'The task did not complete successfully.');
+        const markdown = finalResult.stillRunning
+          ? `Still working in a live browser (session \`${row.id}\`) -- it keeps running even though this tool call is reporting back now. Call browser_use again with session_id "${row.id}" to check progress or continue, or browser_stop to end it.`
+          : finalResult.output || (finalResult.isTaskSuccessful ? 'Task completed.' : 'The task did not complete successfully.');
 
-      return {
-        status: laneResult.stillRunning ? 'running' : laneResult.isTaskSuccessful === false ? 'failed' : 'finished',
-        steps: [],
-        screenshotUrl: laneResult.screenshotUrl,
-        markdown,
-        sessionId: row.id,
-        liveUrl: row.liveUrl,
-        recordingUrl: row.recordingUrl,
-        provider: 'browser_use',
-      };
+        return {
+          status: finalResult.stillRunning ? 'running' : finalResult.isTaskSuccessful === false ? 'failed' : 'finished',
+          steps: [],
+          screenshotUrl: finalResult.screenshotUrl,
+          markdown,
+          sessionId: row.id,
+          liveUrl: row.liveUrl,
+          recordingUrl: row.recordingUrl,
+          provider: 'browser_use',
+        };
+      }
     }
 
     // --- Steel lane ---
@@ -491,11 +539,15 @@ export const browserUse = {
       data: { task, status: 'idle', output: laneResult.output, isTaskSuccessful: laneResult.isTaskSuccessful },
     })) as SessionRow;
 
+    const fallbackNote = fellBackToSteel
+      ? 'Note: browser_use is unavailable right now (e.g. out of quota), so this ran on the Steel browser lane instead. '
+      : '';
+
     return {
       status: laneResult.isTaskSuccessful === false ? 'failed' : 'finished',
       steps: [],
       screenshotUrl: laneResult.screenshotUrl,
-      markdown: laneResult.output,
+      markdown: fallbackNote + (laneResult.output ?? ''),
       sessionId: row.id,
       liveUrl: row.liveUrl,
       recordingUrl: row.recordingUrl,
