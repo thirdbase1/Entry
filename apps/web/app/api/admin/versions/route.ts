@@ -20,6 +20,17 @@
  * kept as an internal implementation detail rather than reintroducing a
  * rebuild-every-revert flow.
  *
+ * CREDENTIAL SOURCE (2026-07-17): this used to read a static personal
+ * access token from a `VERCEL_TOKEN_2` env var, which twice went dead
+ * (wrong scope, then a stale value) and both times silently broke this
+ * whole route until manually caught and re-pasted. Replaced with Vercel
+ * Connect (`@vercel/connect`) -- a `vercel/entry-vercel-internal`
+ * connector owned by this project, authenticated via this Function's own
+ * OIDC identity, no stored long-lived secret at all. `getToken()` mints
+ * a short-lived scoped token per call and Vercel handles rotation --
+ * this class of "token silently died" bug should no longer be possible
+ * here. See @vercel/connect's README for the underlying OIDC exchange.
+ *
  * GET  -> version list, newest first, each flagged `isLive` by exact
  *         match against Vercel's current production deployment id
  *         (exact id equality -- no fuzzy sha matching).
@@ -38,14 +49,25 @@
  */
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
+import { getToken } from '@vercel/connect';
 
 const VERCEL_API = 'https://api.vercel.com';
 const PROJECT_ID = process.env.VERCEL_PROJECT_ID || 'prj_vwm0Sv2SJz07EcyEu7eGIPblMpLd';
 const TEAM_ID = process.env.VERCEL_ORG_ID || 'team_T8HMN4wYS9DoznHfnNiplKJW';
+const VERCEL_CONNECTOR = 'vercel/entry-vercel-internal';
 
-function vercelHeaders() {
-  const token = process.env.VERCEL_TOKEN_2;
-  if (!token) throw new Error('VERCEL_TOKEN_2 is not configured on the server.');
+// The "vercel" connector is a generic-OAuth connector (Vercel has no
+// dedicated managed connector type for itself), set up by a real human
+// (the app owner) authorizing it in their own browser -- so its grant is
+// bound to that owner's Vercel account, not an app-wide credential.
+// Redeeming it therefore needs subject: { type: 'user', id: <owner's
+// Vercel account uid> }, not { type: 'app' } (confirmed via the "Token
+// unresolved" error returned for the app-subject attempt).
+const OWNER_VERCEL_UID = process.env.VERCEL_OWNER_UID || 'X3QHylwBnTGvxQ1jG1LZ4HVe';
+
+async function vercelHeaders() {
+  const token = await getToken(VERCEL_CONNECTOR, { subject: { type: 'user', id: OWNER_VERCEL_UID } });
+  if (!token) throw new Error(`Vercel Connect returned no token for connector "${VERCEL_CONNECTOR}".`);
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
@@ -59,7 +81,7 @@ async function isAuthorized(req: Request): Promise<boolean> {
 async function currentLiveDeploymentId(): Promise<string | null> {
   const res = await fetch(
     `${VERCEL_API}/v6/deployments?projectId=${PROJECT_ID}&teamId=${TEAM_ID}&target=production&limit=1&state=READY`,
-    { headers: vercelHeaders(), cache: 'no-store' },
+    { headers: await vercelHeaders(), cache: 'no-store' },
   );
   if (!res.ok) return null;
   const data = (await res.json()) as { deployments: Array<{ uid: string }> };
@@ -122,7 +144,7 @@ export async function POST(req: Request) {
 
       const rollbackRes = await fetch(
         `${VERCEL_API}/v9/projects/${PROJECT_ID}/rollback/${target.vercelDeploymentId}?teamId=${TEAM_ID}`,
-        { method: 'POST', headers: vercelHeaders() },
+        { method: 'POST', headers: await vercelHeaders() },
       );
       if (!rollbackRes.ok) {
         const t = await rollbackRes.text();

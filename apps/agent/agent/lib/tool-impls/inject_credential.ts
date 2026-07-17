@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
-import { getCredential } from '../credential-vault.js';
+import { resolveServiceCredential } from '../connect-service-tokens.js';
 
 /**
  * SECURITY FIX (2026-07-15): the previous version of this tool wrote the
@@ -64,13 +64,11 @@ export const injectCredentialTool = {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envVarName)) {
       return { error: 'envVarName must be a valid shell variable name (letters, digits, underscore; not starting with a digit).' };
     }
-    const value = await getCredential(userId, service, label);
-    if (value == null) {
-      return {
-        error: `No saved credential for service "${service}"${label && label !== 'default' ? ` / label "${label}"` : ''}. ` +
-          'Ask the user for it, then call save_credential first.',
-      };
+    const resolved = await resolveServiceCredential(userId, service, label);
+    if ('error' in resolved) {
+      return { error: resolved.error };
     }
+    const value = resolved.value;
 
     const sandbox = await ctx.getSandbox();
     // Scoped to THIS call only — see file comment above. Never persisted

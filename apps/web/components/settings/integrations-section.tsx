@@ -29,32 +29,42 @@ interface KnownService {
   /** Some marks (e.g. Pxxl's raster wordmark) look better on a subtle
    *  tinted tile than bare on the card background. */
   iconBg?: string;
+  /** Has a real Vercel Connect connector (github/entry-github,
+   *  vercel/entry-vercel-internal, supabase/entry-supabase) — render a
+   *  one-click "Connect" OAuth button instead of a token-paste field.
+   *  Pxxl and Sendbyte have no such connector (no managed type, and
+   *  neither runs an OAuth server for a Custom OAuth connector), so
+   *  they stay token-only. */
+  oauth?: boolean;
 }
 
 const KNOWN_SERVICES: KnownService[] = [
   {
     service: 'vercel',
     name: 'Vercel',
-    hint: 'Personal Access Token — used to deploy this project to your own Vercel account.',
+    hint: 'Connect your own Vercel account — the agent deploys as you, with a short-lived token it never stores.',
     placeholder: 'Paste your Vercel token',
     tokenUrl: 'https://vercel.com/account/tokens',
     icon: '/integration-logos/vercel.svg',
+    oauth: true,
   },
   {
     service: 'github',
     name: 'GitHub',
-    hint: 'Fine-grained personal access token (repo scope) — used to push code to your own repos.',
+    hint: 'Connect your own GitHub account — the agent pushes/opens PRs as you, with a short-lived token it never stores.',
     placeholder: 'Paste your GitHub token',
     tokenUrl: 'https://github.com/settings/tokens',
     icon: '/integration-logos/github.svg',
+    oauth: true,
   },
   {
     service: 'supabase',
     name: 'Supabase',
-    hint: 'Personal access token — used to provision/manage your own Supabase projects.',
+    hint: 'Connect your own Supabase account — the agent provisions/manages your own projects, with a short-lived token it never stores.',
     placeholder: 'Paste your Supabase token',
     tokenUrl: 'https://supabase.com/dashboard/account/tokens',
     icon: '/integration-logos/supabase.svg',
+    oauth: true,
   },
   {
     service: 'pxxl',
@@ -196,6 +206,112 @@ function IntegrationCard({
   );
 }
 
+function OAuthIntegrationCard({
+  def,
+  connected,
+  onChanged,
+}: {
+  def: KnownService;
+  connected: boolean;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const connect = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/integrations/connect/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: def.service }),
+      });
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json.error?.message ?? json.error ?? 'Failed to start connection');
+      window.location.href = json.url;
+    } catch (e: any) {
+      setError(e.message ?? 'Something went wrong');
+      setBusy(false);
+    }
+  }, [def.service]);
+
+  const disconnect = useCallback(async () => {
+    if (!confirm(`Disconnect ${def.name}? Anything using this connection (deploys, chat) will stop working until you reconnect.`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/integrations/connect/disconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: def.service }),
+      });
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json.error?.message ?? json.error ?? 'Failed to disconnect');
+      onChanged();
+    } catch (e: any) {
+      setError(e.message ?? 'Something went wrong');
+    } finally {
+      setBusy(false);
+    }
+  }, [def.service, def.name, onChanged]);
+
+  return (
+    <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 flex items-start gap-3">
+          <div
+            className={
+              'w-9 h-9 rounded-md border shrink-0 flex items-center justify-center overflow-hidden ' +
+              (def.iconBg ?? 'bg-background')
+            }
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element -- tiny static brand marks from /public, not worth next/image's remote-pattern config */}
+            <img src={def.icon} alt={`${def.name} logo`} className="w-6 h-6 object-contain" />
+          </div>
+          <div className="flex-1 flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-foreground">{def.name}</span>
+              <span
+                className={
+                  connected
+                    ? 'text-[11px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary'
+                    : 'text-[11px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground'
+                }
+              >
+                {connected ? 'Connected' : 'Not connected'}
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground">{def.hint}</div>
+          </div>
+        </div>
+        {connected && (
+          <button
+            onClick={disconnect}
+            disabled={busy}
+            title="Disconnect"
+            className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive shrink-0 disabled:opacity-50"
+          >
+            <DeleteIcon className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+
+      {error && <div className="text-xs text-destructive">{error}</div>}
+
+      {!connected && (
+        <button
+          onClick={connect}
+          disabled={busy}
+          className="self-start h-8 px-3 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
+        >
+          {busy ? 'Redirecting…' : `Connect ${def.name}`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function CustomIntegrationCard({
   meta,
   onDisconnected,
@@ -322,6 +438,7 @@ function AddCustomIntegrationForm({ onSaved }: { onSaved: (meta: CredentialMeta)
 
 export function IntegrationsSection() {
   const [credentials, setCredentials] = useState<CredentialMeta[] | null>(null);
+  const [connectStatus, setConnectStatus] = useState<Record<string, boolean>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const reload = useCallback(() => {
@@ -334,6 +451,15 @@ export function IntegrationsSection() {
       .catch(e => {
         setLoadError(e.message ?? 'Failed to load integrations.');
         setCredentials([]);
+      });
+
+    fetch('/api/integrations/connect/status')
+      .then(async res => {
+        const json = await safeJson(res);
+        if (res.ok) setConnectStatus(json.connected ?? {});
+      })
+      .catch(() => {
+        // Non-fatal — OAuth cards just show "Not connected" until this loads.
       });
   }, []);
 
@@ -366,15 +492,24 @@ export function IntegrationsSection() {
         <div className="text-sm text-muted-foreground">Loading…</div>
       ) : (
         <>
-          {KNOWN_SERVICES.map(def => (
-            <IntegrationCard
-              key={def.service}
-              def={def}
-              connected={findMeta(def.service)}
-              onSaved={meta => setCredentials(prev => [meta, ...(prev ?? []).filter(c => !(c.service === meta.service && c.label === meta.label))])}
-              onDisconnected={reload}
-            />
-          ))}
+          {KNOWN_SERVICES.map(def =>
+            def.oauth ? (
+              <OAuthIntegrationCard
+                key={def.service}
+                def={def}
+                connected={Boolean(connectStatus[def.service])}
+                onChanged={reload}
+              />
+            ) : (
+              <IntegrationCard
+                key={def.service}
+                def={def}
+                connected={findMeta(def.service)}
+                onSaved={meta => setCredentials(prev => [meta, ...(prev ?? []).filter(c => !(c.service === meta.service && c.label === meta.label))])}
+                onDisconnected={reload}
+              />
+            )
+          )}
 
           {customCreds.map(meta => (
             <CustomIntegrationCard key={`${meta.service}:${meta.label}`} meta={meta} onDisconnected={reload} />
