@@ -4,6 +4,7 @@ import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { withTransientRetry } from '../transient-provider-error.js';
 
 function stripCodeFence(raw: string): string {
   let stripped = raw.trim();
@@ -34,46 +35,65 @@ export const codeArtifact = {
     userPrompt: z.string().describe('The user description of the code artifact, will be used to generate the code artifact'),
   }),
   async execute({ title, userPrompt }: { title: string; userPrompt: string }, ctx?: ToolExecCtx) {
-    const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'code_artifact');
-    try {
-      const { text } = await generateText({
-        model: await model(undefined, ctx?.byokModel),
-        abortSignal: t.signal,
-        // FIXED (2026-07-16, real bug: "code_artifact tool is so slow /
-        // model uses it and stops without any errors") — this was the one
-        // sub-generation tool-impl of the three (task_analysis,
-        // code_artifact, python_coding) that never got an explicit
-        // `maxOutputTokens` ceiling when python_coding got fixed for the
-        // identical class of bug on 2026-07-15 (see that file's comment).
-        // Unset meant whatever the SDK/provider default happened to be for
-        // whichever fast model `model()` resolves to — for a full
-        // single-file HTML document (markup + inline CSS + inline JS all
-        // in one response) that default is frequently uncapped or very
-        // high, so generation could run far longer than a user perceives
-        // as reasonable, with zero visible progress the whole time. A
-        // real, explicit ceiling bounds worst-case latency; combined with
-        // the timeout above, a call that's still too slow now fails fast
-        // and visibly instead of silently riding along until the outer
-        // request's own maxDuration kills the whole turn.
-        maxOutputTokens: 16000,
-        // See task_analysis.ts's comment -- top-level `system`, not an
-        // embedded `role: 'system'` message, is what actually survives
-        // translation into Responses-API-style providers.
-        system:
-          'Generate a single-file HTML snippet (inline <style> and <script>, no external resources ' +
-          'except data URIs) that fulfills the request. Respond with ONLY the HTML, no explanation. ' +
-          'Keep it as lean as reasonably possible for the request — avoid unrequested extra features, ' +
-          'inline comments, or boilerplate that inflates length without adding real functionality.',
-        messages: [{ role: 'user', content: userPrompt }],
-      });
+    // UPDATED (2026-07-17, "improve the whole AI process for long term
+    // task") — same two fixes as python_coding.ts's identical rewrite:
+    // a transient upstream capacity blip used to fail this whole call
+    // outright with zero retry, and a response cut off by
+    // `maxOutputTokens` (a real risk for a full single-file HTML+CSS+JS
+    // document) returned silently as if it were the complete artifact.
+    // `withTransientRetry` now wraps a per-attempt fresh timeout window,
+    // and `truncated: finishReason === 'length'` surfaces the latter.
+    const { text, finishReason } = await withTransientRetry(async () => {
+      const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'code_artifact');
+      try {
+        return await generateText({
+          model: await model(undefined, ctx?.byokModel),
+          abortSignal: t.signal,
+          // FIXED (2026-07-16, real bug: "code_artifact tool is so slow /
+          // model uses it and stops without any errors") — this was the one
+          // sub-generation tool-impl of the three (task_analysis,
+          // code_artifact, python_coding) that never got an explicit
+          // `maxOutputTokens` ceiling when python_coding got fixed for the
+          // identical class of bug on 2026-07-15 (see that file's comment).
+          // Unset meant whatever the SDK/provider default happened to be for
+          // whichever fast model `model()` resolves to — for a full
+          // single-file HTML document (markup + inline CSS + inline JS all
+          // in one response) that default is frequently uncapped or very
+          // high, so generation could run far longer than a user perceives
+          // as reasonable, with zero visible progress the whole time. A
+          // real, explicit ceiling bounds worst-case latency; combined with
+          // the timeout above, a call that's still too slow now fails fast
+          // and visibly instead of silently riding along until the outer
+          // request's own maxDuration kills the whole turn.
+          maxOutputTokens: 16000,
+          // See task_analysis.ts's comment -- top-level `system`, not an
+          // embedded `role: 'system'` message, is what actually survives
+          // translation into Responses-API-style providers.
+          system:
+            'Generate a single-file HTML snippet (inline <style> and <script>, no external resources ' +
+            'except data URIs) that fulfills the request. Respond with ONLY the HTML, no explanation. ' +
+            'Keep it as lean as reasonably possible for the request — avoid unrequested extra features, ' +
+            'inline comments, or boilerplate that inflates length without adding real functionality.',
+          messages: [{ role: 'user', content: userPrompt }],
+        });
+      } catch (err) {
+        throw t.rethrow(err);
+      } finally {
+        t.clear();
+      }
+    });
 
-      const html = stripCodeFence(text);
-      return { title, html, size: html.length };
-    } catch (err) {
-      throw t.rethrow(err);
-    } finally {
-      t.clear();
-    }
+    const html = stripCodeFence(text);
+    const truncated = finishReason === 'length';
+    return {
+      title,
+      html,
+      size: html.length,
+      truncated,
+      note: truncated
+        ? 'Output was cut off by the token limit before finishing — this HTML is likely incomplete/broken. Ask for a leaner version or split it into parts.'
+        : undefined,
+    };
   },
 };
 

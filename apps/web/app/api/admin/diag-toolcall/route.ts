@@ -11,7 +11,8 @@
  * POST { byokModelId } -- admin/bearer only, see admin/errors/route.ts
  * for the same auth pattern.
  */
-import { generateText, tool, stepCountIs } from 'ai';
+import { generateText, generateObject, NoObjectGeneratedError, tool, stepCountIs } from 'ai';
+import { z } from 'zod';
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
@@ -202,6 +203,121 @@ export const POST = withApiErrorHandling(async (req: Request) => {
     }
   } catch (err: any) {
     attempts.rawHeaderProbe = { error: err?.message };
+  }
+
+  // Vision + structured-output probe: reuses the browser_use Steel lane's
+  // EXACT schema shape and an EXACT-style prompt, with a real (tiny, 2x2
+  // red pixel) test image attached, run straight through the resolved
+  // model -- settles definitively whether THIS specific BYOK model/relay
+  // can do vision + generateObject's structured output at all, rather
+  // than inferring it from the tool-calling probes above (which use text
+  // only, no image).
+  try {
+    const tinyRedPngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCg==';
+    const { object } = await generateObject({
+      model,
+      schema: z.object({
+        done: z.boolean(),
+        stepDescription: z.string(),
+        action: z.enum(['goto', 'click', 'fill', 'press', 'scroll_down', 'scroll_up', 'wait_ms', 'switch_tab']).optional(),
+        selector: z.string().optional(),
+        value: z.string().optional(),
+      }),
+      system:
+        'You control a real remote web browser one action at a time. You are given the current URL, the visible text of ' +
+        'the page, and a screenshot. Decide the SINGLE next action needed to make progress, using a Playwright locator ' +
+        'string for selector.',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Task: go to the search box and search for "test". Current URL: https://example.com\nVisible page text: A red square is shown.\n\nA screenshot of the current page state is attached.' },
+            { type: 'file', data: tinyRedPngBase64, mediaType: 'image/png' },
+          ],
+        },
+      ],
+    });
+    attempts.visionObjectGen = { ok: true, object };
+  } catch (err: any) {
+    attempts.visionObjectGen = {
+      ok: false,
+      isNoObjectGeneratedError: NoObjectGeneratedError.isInstance(err),
+      rawText: NoObjectGeneratedError.isInstance(err) ? err.text : undefined,
+      name: err?.name,
+      message: err?.message,
+      statusCode: err?.statusCode,
+      responseBody: err?.responseBody,
+    };
+  }
+
+  // Text-only structured-output probe (no image at all) -- isolates
+  // whether the failure is specifically about image/file content parts,
+  // or whether this model/relay can't reliably do generateObject's
+  // structured output even in the simplest possible case.
+  try {
+    const { object } = await generateObject({
+      model,
+      schema: z.object({
+        done: z.boolean(),
+        stepDescription: z.string(),
+        action: z.enum(['goto', 'click', 'fill', 'press', 'scroll_down', 'scroll_up', 'wait_ms', 'switch_tab']).optional(),
+        selector: z.string().optional(),
+        value: z.string().optional(),
+      }),
+      system:
+        'You control a real remote web browser one action at a time. You are given the current URL and the visible text ' +
+        'of the page. Decide the SINGLE next action needed to make progress, using a Playwright locator string for selector.',
+      messages: [
+        { role: 'user', content: 'Task: go to the search box and search for "test". Current URL: https://example.com\nVisible page text: A search box is shown labelled "Search".' },
+      ],
+    });
+    attempts.textOnlyObjectGen = { ok: true, object };
+  } catch (err: any) {
+    attempts.textOnlyObjectGen = {
+      ok: false,
+      isNoObjectGeneratedError: NoObjectGeneratedError.isInstance(err),
+      rawText: NoObjectGeneratedError.isInstance(err) ? err.text : undefined,
+      name: err?.name,
+      message: err?.message,
+      statusCode: err?.statusCode,
+      responseBody: err?.responseBody,
+    };
+  }
+
+  // Plain generateText + manual JSON extraction -- exactly the shape of
+  // the new decideStepViaPlainText fallback in browser_use.ts, tested
+  // directly against this real model.
+  try {
+    const { text } = await generateText({
+      model,
+      system:
+        'You control a real remote web browser one action at a time. Respond with ONLY a single raw JSON object (no ' +
+        'markdown code fences, no explanation) matching exactly this shape: {"done": boolean, "stepDescription": ' +
+        'string, "action": one of "goto"|"click"|"fill"|"press"|"scroll_down"|"scroll_up"|"wait_ms"|"switch_tab", ' +
+        '"selector": string, "value": string}.',
+      messages: [
+        { role: 'user', content: 'Task: go to the search box and search for "test". Current URL: https://example.com\nVisible page text: A search box is shown labelled "Search".' },
+      ],
+    });
+    let parsed: unknown = null;
+    const start = text.indexOf('{');
+    if (start !== -1) {
+      let depth = 0;
+      for (let i = start; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            try { parsed = JSON.parse(text.slice(start, i + 1)); } catch { /* leave null */ }
+            break;
+          }
+        }
+      }
+    }
+    attempts.plainTextJsonFallback = { ok: parsed !== null, rawText: text, parsed };
+  } catch (err: any) {
+    attempts.plainTextJsonFallback = { ok: false, name: err?.name, message: err?.message };
   }
 
   return Response.json({ providerLabel, modelId, toolCount: entries.length, attempts });

@@ -5,6 +5,7 @@ import { resolveModelIdForProvider } from '../model-catalog.js';
 import { webSearch } from './web_search.js';
 import { webCrawl } from './web_crawl.js';
 import { safeExecute } from './safe-execute.js';
+import { withTransientRetry } from '../transient-provider-error.js';
 import type { ToolExecCtx } from './types.js';
 
 /**
@@ -36,6 +37,31 @@ import type { ToolExecCtx } from './types.js';
  * fixed at *definition* time, never picked dynamically per call, so this
  * is the correct way to get real runtime provider/model choice, not a
  * workaround.
+ *
+ * IMPROVED (2026-07-17, "improve the whole AI process for long term
+ * task"): three real gaps for anything that takes more than a handful of
+ * steps:
+ *
+ *   1. A hardcoded `stepCountIs(15)` for every delegated task regardless
+ *      of size -- a genuinely large subtask (e.g. "read these 6 pages
+ *      and cross-reference them", multi-part research, iterative
+ *      drafting) could get cut off mid-work with no way for the caller
+ *      to ask for a longer leash. Now callers can pass `maxSteps`
+ *      (bounded 1-40) when they know a task is bigger than the default.
+ *   2. No way to tell a clean finish from a step-limit cutoff -- both
+ *      returned `{ result: text, ... }` identically, so the parent model
+ *      had no signal that a "finished" subtask was actually truncated
+ *      mid-thought. Now checks the last step's `finishReason`: if the
+ *      loop only stopped because the step budget ran out (not because
+ *      the model itself decided it was done), `truncated: true` is
+ *      returned plus a note telling the parent it can re-delegate a
+ *      continuation using this result as context.
+ *   3. Zero retry on transient upstream errors (the same "no available
+ *      channel"/capacity-style failures browser_use.ts already learned
+ *      to retry past) -- a single blip anywhere in a long multi-step
+ *      subtask used to fail the ENTIRE delegated task outright. Now
+ *      wrapped in the same shared withTransientRetry used by
+ *      browser_use.ts.
  */
 
 const AgentDelegateInputSchema = z.object({
@@ -62,32 +88,61 @@ const AgentDelegateInputSchema = z.object({
       'Exact model to delegate to. Either a full Gateway id ("google/gemini-3-pro-preview") or a bare model name combined with `provider` ' +
         '("gemini-3-pro-preview" alongside provider "google"). Takes priority over the provider\'s auto-picked default when both resolve to a specific model.'
     ),
+  maxSteps: z
+    .number()
+    .int()
+    .min(1)
+    .max(40)
+    .optional()
+    .describe(
+      'Step budget for this subtask (default 15). Raise this (up to 40) for a genuinely large/long-running subtask — multi-part research, reading ' +
+        'several sources and cross-referencing them, iterative drafting — where 15 steps of tool calls + reasoning realistically will not be enough. ' +
+        "Leave it at the default for anything bounded/simple; a bigger budget just means a truncated failure takes longer to surface if it WAS simple."
+    ),
 });
 
 const AgentDelegateResultSchema = z.object({
   result: z.string(),
   modelUsed: z.string(),
   stepsTaken: z.number(),
+  truncated: z.boolean().optional(),
   note: z.string().optional(),
 });
 
 const SUBAGENT_SYSTEM_PROMPT =
   'You are a focused sub-agent completing ONE delegated task for a parent AI agent. You do not see the parent conversation — ' +
   'only the task message you were given. Use web_search/web_crawl if the task needs current information or a specific page\'s content. ' +
-  'Answer completely and directly; your entire reply is returned as-is to the parent, which will use it to continue helping its own user.';
+  'Answer completely and directly; your entire reply is returned as-is to the parent, which will use it to continue helping its own user. ' +
+  "If you're running low on remaining steps and won't finish in time, don't trail off mid-thought — stop and clearly summarize what you " +
+  "did complete, what's still left, and what the parent should do next (e.g. re-delegate the remainder with your partial result as context).";
+
+function isTruncatedFinish(steps: { finishReason?: string }[], maxSteps: number): boolean {
+  if (steps.length < maxSteps) return false;
+  const last = steps[steps.length - 1];
+  // Only 'stop' means the model itself decided it was done. Anything else
+  // on the very last allowed step (still wanting to call a tool, hit a
+  // length cap, etc.) means the step budget is what actually ended this,
+  // not the model reaching a genuine conclusion.
+  return last?.finishReason !== 'stop';
+}
 
 export const agentDelegate = {
   description:
     'Delegate a bounded subtask to a sub-agent, optionally on a SPECIFIC provider/model you choose (e.g. hand deep research to a Gemini model, ' +
     'careful planning to a Claude model, or a rewrite/tone pass to a GPT model) — matching a real multi-model workflow instead of doing everything ' +
     'on a single model. The sub-agent has its own fresh context (it does NOT see this conversation — pack everything it needs into `message`) and ' +
-    'can call web_search/web_crawl itself for research tasks. Returns its final result as plain text. Omit `provider`/`model` to delegate to a copy ' +
-    'of yourself instead of a different model.',
+    'can call web_search/web_crawl itself for research tasks. Returns its final result as plain text, plus `truncated: true` if it ran out of steps ' +
+    'before genuinely finishing (re-delegate a continuation using the partial result as context in that case, rather than treating it as complete). ' +
+    'Pass `maxSteps` for a task you expect to be long/involved. Omit `provider`/`model` to delegate to a copy of yourself instead of a different model.',
   inputSchema: AgentDelegateInputSchema,
   outputSchema: AgentDelegateResultSchema,
-  async execute({ message, provider, model }: { message: string; provider?: string; model?: string }, ctx?: ToolExecCtx) {
+  async execute(
+    { message, provider, model, maxSteps }: { message: string; provider?: string; model?: string; maxSteps?: number },
+    ctx?: ToolExecCtx
+  ) {
     let note: string | undefined;
     let modelId: string;
+    const budget = maxSteps ?? 15;
 
     if (ctx?.byokModel) {
       // BYOK turns never touch the Gateway at any depth (same policy as
@@ -98,14 +153,28 @@ export const agentDelegate = {
       if (provider || model) {
         note = `Custom provider/model requests aren't available on BYOK turns — ran on your connected model instead of ${[provider, model].filter(Boolean).join('/')}.`;
       }
-      const { text, steps } = await generateText({
-        model: ctx.byokModel,
-        system: SUBAGENT_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: message }],
-        tools: { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) },
-        stopWhen: stepCountIs(15),
-      });
-      return { result: text, modelUsed: 'byok', stepsTaken: steps.length, note };
+      const byokModel = ctx.byokModel;
+      const { text, steps } = await withTransientRetry(() =>
+        generateText({
+          model: byokModel,
+          system: SUBAGENT_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content: message }],
+          tools: { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) },
+          stopWhen: stepCountIs(budget),
+        })
+      );
+      const truncated = isTruncatedFinish(steps, budget);
+      return {
+        result: text,
+        modelUsed: 'byok',
+        stepsTaken: steps.length,
+        truncated,
+        note: truncated
+          ? [note, `Ran out of its ${budget}-step budget before finishing on its own — treat "result" as partial progress, not a final answer.`]
+              .filter(Boolean)
+              .join(' ')
+          : note,
+      };
     }
 
     if (model && model.includes('/')) {
@@ -125,15 +194,28 @@ export const agentDelegate = {
       modelId = await resolveModelIdForProvider('anthropic');
     }
 
-    const { text, steps } = await generateText({
-      model: gateway(modelId),
-      system: SUBAGENT_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: message }],
-      tools: { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) },
-      stopWhen: stepCountIs(15),
-    });
+    const { text, steps } = await withTransientRetry(() =>
+      generateText({
+        model: gateway(modelId),
+        system: SUBAGENT_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: message }],
+        tools: { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) },
+        stopWhen: stepCountIs(budget),
+      })
+    );
 
-    return { result: text, modelUsed: modelId, stepsTaken: steps.length, note };
+    const truncated = isTruncatedFinish(steps, budget);
+    return {
+      result: text,
+      modelUsed: modelId,
+      stepsTaken: steps.length,
+      truncated,
+      note: truncated
+        ? [note, `Ran out of its ${budget}-step budget before finishing on its own — treat "result" as partial progress, not a final answer.`]
+            .filter(Boolean)
+            .join(' ')
+        : note,
+    };
   },
 };
 

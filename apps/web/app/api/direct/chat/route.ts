@@ -57,7 +57,8 @@
  * separately, but the wrapper is what stops ANY tool's upstream failure
  * from doing the same thing again).
  */
-import { NextRequest, after } from 'next/server';
+import { NextRequest } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 
 // Long autonomous agentic turns (many chained tool calls) need real
 // runway, but the actual ceiling depends on the Vercel plan the project
@@ -74,7 +75,16 @@ import { NextRequest, after } from 'next/server';
 // about this if/when needed). Bump this back up if/when the project
 // moves to Pro or above.
 export const maxDuration = 300;
-import { streamText, tool, stepCountIs, convertToModelMessages, smoothStream, type UIMessage } from 'ai';
+import {
+  streamText,
+  tool,
+  stepCountIs,
+  convertToModelMessages,
+  smoothStream,
+  createUIMessageStreamResponse,
+  type UIMessage,
+  type UIMessageChunk,
+} from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
@@ -84,6 +94,7 @@ import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
+import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
 import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
 import { compactMessagesIfNeeded } from '@/lib/direct-chat/compact-messages';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
@@ -423,6 +434,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // overhead) AND a disabled tool could still be called by the model.
   const activeTools = Object.fromEntries(Object.entries(allTools).filter(([name]) => !disabledToolSet.has(name))) as typeof allTools;
 
+  // Tracked across steps so a fully-empty final turn (see
+  // fill-empty-refusal.ts) can report WHY it was empty instead of just
+  // silently patching in a generic message.
+  let lastFinishReason: string | undefined;
+  let lastRawFinishReason: string | undefined;
+
   const result = streamText({
     model,
     stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
@@ -481,6 +498,8 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // call" report is a five-second log lookup instead of a guess.
     onStepFinish(step) {
       const { stepNumber, finishReason, rawFinishReason, toolCalls, toolResults, usage, text, warnings, content } = step;
+      lastFinishReason = finishReason;
+      lastRawFinishReason = rawFinishReason;
       const toolErrors = content
         .filter((part): part is Extract<typeof part, { type: 'tool-error' }> => part.type === 'tool-error')
         .map(part => ({ tool: part.toolName, error: part.error instanceof Error ? part.error.message : String(part.error) }));
@@ -570,14 +589,27 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // onFinish, and a client that reconnects (see direct-chat-interface.tsx's
   // online/visibilitychange recovery fetch) picks up the completed
   // result instead of a stalled/lost one.
-  after(() =>
+  // Switched next/server's after() -> @vercel/functions' raw waitUntil()
+  // (2026-07-17). Live-fire tested against production: a real client
+  // disconnect a few seconds into a tool call, with after()+consumeStream(),
+  // reproducibly killed the turn outright -- onFinish never ran, nothing
+  // persisted, no error even logged. Re-tested the identical scenario with
+  // waitUntil() instead and the turn kept running server-side well past
+  // the disconnect (confirmed via a durable DB checkpoint written mid-tool-
+  // call, and separately by the run persisting for its full natural
+  // duration up to the 300s ceiling instead of dying in the first few
+  // seconds). Matches Vercel's own guidance for this exact case:
+  // https://github.com/vercel/ai/issues/10844 -- "waitUntil() guarantees
+  // the promise completes even after function termination," which is not
+  // guaranteed for after() in the same way on this runtime.
+  waitUntil(
     Promise.resolve(result.consumeStream()).catch((err: unknown) => {
       console.error('[direct chat] background consumeStream failed', chatId, err);
       logError({ source: 'direct-chat-consumestream', error: err, userId, chatId, context: { providerLabel, modelId } });
     })
   );
 
-  return result.toUIMessageStreamResponse({
+  const uiStream = result.toUIMessageStream({
     originalMessages: uiMessages,
     generateMessageId: () => crypto.randomUUID(),
     sendReasoning: true,
@@ -600,7 +632,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // execute() that never resolves) would otherwise save a dangling
       // call right now and brick every future turn on this chat, exactly
       // the failure this whole file's sanitizer exists to prevent.
-      const sanitizedFinalMessages = sanitizeDanglingToolCalls(finalMessages as UIMessage[]);
+      const sanitizedFinalMessages = fillEmptyAssistantReply(
+        sanitizeDanglingToolCalls(finalMessages as UIMessage[]),
+        lastFinishReason,
+        lastRawFinishReason
+      );
       await prisma.eveChatSession
         .update({ where: { id: chatId, userId }, data: { events: sanitizedFinalMessages as any } })
         .catch(err => {
@@ -628,6 +664,50 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         });
       }
     },
+  });
+
+  // Confirmed real bug (2026-07-17): a turn can finish with zero text and
+  // zero tool calls at all -- e.g. Anthropic returning
+  // finishReason 'content-filter' / rawFinishReason 'refusal', a clean
+  // model refusal that throws no exception at all. The AI SDK does not
+  // treat this as an error (onError above never fires), so without this
+  // wrapper the client sees total silence: the "Thinking…" indicator just
+  // disappears and nothing ever replaces it. Every chunk is relayed
+  // through unmodified while tracking whether ANYTHING real (visible text
+  // or a tool call) was ever emitted; only if the whole stream ends
+  // without any is a real text-start/text-delta/text-end chunk sequence
+  // appended, explaining why -- same wording fillEmptyAssistantReply
+  // already persisted server-side above, so a page refresh shows the
+  // identical message instead of it vanishing.
+  let sawRealContent = false;
+  const wrappedStream = new ReadableStream<UIMessageChunk>({
+    async start(controller) {
+      try {
+        for await (const chunk of uiStream) {
+          if (chunk.type === 'text-delta' && chunk.delta.trim().length > 0) {
+            sawRealContent = true;
+          } else if (chunk.type.startsWith('tool-')) {
+            sawRealContent = true;
+          }
+          controller.enqueue(chunk);
+        }
+      } catch (err) {
+        controller.error(err);
+        return;
+      }
+      if (!sawRealContent) {
+        const id = crypto.randomUUID();
+        const fallbackText = describeRefusal(lastFinishReason, lastRawFinishReason);
+        controller.enqueue({ type: 'text-start', id });
+        controller.enqueue({ type: 'text-delta', id, delta: fallbackText });
+        controller.enqueue({ type: 'text-end', id });
+      }
+      controller.close();
+    },
+  });
+
+  return createUIMessageStreamResponse({
+    stream: wrappedStream,
     headers: {
       'x-direct-chat-session-id': chatId,
       'x-direct-chat-provider': providerLabel,

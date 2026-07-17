@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { generateObject, generateText, NoObjectGeneratedError } from 'ai';
+import { isTransientProviderError, sleep } from '../transient-provider-error.js';
 import { prisma } from '@entry/db';
 import { put } from '@vercel/blob';
 import { model } from '../gateway.js';
@@ -226,23 +227,68 @@ async function runBrowserUseLane(params: {
 
 // --- Steel lane (we drive it ourselves) -------------------------------------
 
+/**
+ * FIXED (2026-07-17, real production data from a live repro against the
+ * user's actual configured model -- NOT a relay/provider bug at all,
+ * despite the "controlling model kept returning invalid responses"
+ * message pointing at every BYOK provider they tried): the model was
+ * returning genuinely correct, well-formed JSON the entire time --
+ * `{"action": "wait_ms", "selector": null, "stepDescription": "...", 
+ * "value": 10000}` -- our schema just rejected it for being TOO STRICT
+ * in three ways that are all completely normal for an LLM's JSON output:
+ *   1. `done` had no default, so a model that (reasonably) only sets it
+ *      when true and omits it otherwise failed validation outright.
+ *   2. `.optional()` alone only accepts undefined, not JSON `null` --
+ *      but a model asked to fill in a schema will very often emit an
+ *      explicit `null` for a field that doesn't apply this step (e.g.
+ *      `selector` on a `wait_ms` action) rather than omitting the key.
+ *   3. `value` was `string`-only, but `10000` (a real JS/JSON number) is
+ *      the obviously correct way for a model to express "10 seconds" --
+ *      forcing it to instead emit the STRING `"10000"` for a numeric
+ *      value is an arbitrary demand most models won't reliably follow.
+ * `.nullish()` (accepts null AND undefined) + transforms normalize every
+ * field to the shape the rest of the code already expects, and `value`
+ * now accepts either a string or a number and coerces to string. This
+ * was likely the actual root cause of the ORIGINAL failures across every
+ * BYOK provider the user tried (schema-level, not relay-level) -- the
+ * plain-text fallback above was necessary but not sufficient on its own.
+ */
 const SteelActionSchema = z.object({
-  done: z.boolean().describe('True once the task is fully complete or has definitively failed.'),
-  success: z.boolean().optional().describe('When done=true: whether the task actually succeeded.'),
-  summary: z.string().optional().describe('When done=true: concise markdown summary of the outcome, for the end user.'),
-  stepDescription: z.string().describe('One short sentence describing this step (shown in the UI).'),
+  done: z
+    .boolean()
+    .nullish()
+    .transform(v => v ?? false)
+    .describe('True once the task is fully complete or has definitively failed. Omit or leave false while still working.'),
+  success: z
+    .boolean()
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('When done=true: whether the task actually succeeded.'),
+  summary: z
+    .string()
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('When done=true: concise markdown summary of the outcome, for the end user.'),
+  stepDescription: z
+    .string()
+    .nullish()
+    .transform(v => v ?? '')
+    .describe('One short sentence describing this step (shown in the UI).'),
   action: z
     .enum(['goto', 'click', 'fill', 'press', 'scroll_down', 'scroll_up', 'wait_ms', 'switch_tab'])
-    .optional()
-    .describe('The single next action. Omit only when done=true.'),
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('The single next action. Omit or use null only when done=true.'),
   selector: z
     .string()
-    .optional()
-    .describe('Playwright locator string for click/fill (e.g. "text=Submit", "role=button[name=\'Log in\']", "css=#email"). Required for click/fill.'),
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('Playwright locator string for click/fill (e.g. "text=Submit", "role=button[name=\'Log in\']", "css=#email"). Required for click/fill, null/omit otherwise.'),
   value: z
-    .string()
-    .optional()
-    .describe('Payload: URL for goto, text to fill, key name for press, ms amount for scroll/wait_ms, tab index (0-based, newest last) for switch_tab.'),
+    .union([z.string(), z.number()])
+    .nullish()
+    .transform(v => (v === null || v === undefined ? undefined : String(v)))
+    .describe('Payload: URL for goto, text to fill, key name for press, ms amount (string or number, e.g. 10000 or "10000") for scroll/wait_ms, tab index (0-based, newest last) for switch_tab.'),
 });
 type SteelAction = z.infer<typeof SteelActionSchema>;
 
@@ -310,7 +356,24 @@ function extractJsonObject(text: string): unknown | null {
  * already can't manage structured JSON output is even less likely to
  * reliably combine that with vision reasoning.
  */
-async function decideStepViaPlainText(params: {
+/**
+ * ADDED (2026-07-17): live stress-testing (3 full runs back to back)
+ * surfaced a THIRD, completely different failure mode from the schema
+ * bug above -- "AI_APICallError: No available channel for model
+ * Qwen3.6-35B-A3B under group default (distributor)", already wrapped in
+ * the AI SDK's own "Failed after 3 attempts" AI_RetryError, meaning the
+ * SDK itself already silently retried 3 times before this ever reached
+ * our code. This is the relay reporting it currently has no backend
+ * capacity for this specific model -- genuinely transient/upstream, not
+ * a malformed-output problem, so it needs its own backoff-and-retry path
+ * instead of being lumped into the same generic failure message as the
+ * schema/JSON issue (which was actively misleading: "the controlling
+ * model kept returning invalid responses" implied a model output
+ * problem when the real cause was capacity, not content).
+ */
+// isTransientProviderError/sleep now live in ../transient-provider-error.ts (shared with tool-impls/agent.ts).
+
+export async function decideStepViaPlainText(params: {
   llmModel: Parameters<typeof generateObject>[0]['model'];
   task: string;
   history: string[];
@@ -318,42 +381,71 @@ async function decideStepViaPlainText(params: {
   url: string;
   tabCount: number;
   lastBadText: string;
-}): Promise<SteelAction | null> {
-  const { text } = await generateText({
-    model: params.llmModel,
-    system:
-      'You control a real remote web browser one action at a time via Playwright locators. You are given the task, steps ' +
-      'taken so far, the current URL, number of open tabs, and the visible text of the current page. Decide the SINGLE ' +
-      'next action needed to make progress.\n\n' +
-      'Respond with ONLY a single raw JSON object (no markdown code fences, no explanation before or after it) matching ' +
-      'exactly this shape:\n' +
-      '{"done": boolean, "success": boolean (only if done=true), "summary": string (only if done=true, concise markdown ' +
-      'outcome summary), "stepDescription": string (one short sentence describing this step), ' +
-      '"action": one of "goto"|"click"|"fill"|"press"|"scroll_down"|"scroll_up"|"wait_ms"|"switch_tab" (omit only when ' +
-      'done=true), "selector": Playwright locator string for click/fill e.g. "text=Submit", "role=button[name=\'Log in\']", ' +
-      '"css=#email" (required for click/fill), "value": URL for goto, text to fill, key name for press, ms amount for ' +
-      'scroll/wait_ms, or tab index (0-based, newest last) for switch_tab}.\n\n' +
-      'Only set done=true once the task is genuinely complete, or cannot be completed after reasonable attempts (then ' +
-      'success=false and explain why in summary).',
-    messages: [
-      {
-        role: 'user',
-        content:
-          `Task: ${params.task}\n\nSteps so far (${params.history.length}): ${params.history.join('; ') || '(none yet)'}\n\n` +
-          `Current URL: ${params.url}\nOpen tabs: ${params.tabCount}\nVisible page text (truncated):\n${params.pageText.slice(0, 4000)}` +
-          (params.lastBadText
-            ? `\n\nA previous attempt to get this as structured output failed; here is that raw (invalid) response for reference, in case it helps: ${params.lastBadText.slice(0, 500)}`
-            : ''),
-      },
-    ],
-  });
+}): Promise<{ action: SteelAction } | { action: null; rawText: string; parseError: string; transient?: boolean }> {
+  const system =
+    'You control a real remote web browser one action at a time via Playwright locators. You are given the task, steps ' +
+    'taken so far, the current URL, number of open tabs, and the visible text of the current page. Decide the SINGLE ' +
+    'next action needed to make progress.\n\n' +
+    'Respond with ONLY a single raw JSON object (no markdown code fences, no explanation before or after it) matching ' +
+    'exactly this shape:\n' +
+    '{"done": boolean, "success": boolean (only if done=true), "summary": string (only if done=true, concise markdown ' +
+    'outcome summary), "stepDescription": string (one short sentence describing this step), ' +
+    '"action": one of "goto"|"click"|"fill"|"press"|"scroll_down"|"scroll_up"|"wait_ms"|"switch_tab" (omit only when ' +
+    'done=true), "selector": Playwright locator string for click/fill e.g. "text=Submit", "role=button[name=\'Log in\']", ' +
+    '"css=#email" (required for click/fill), "value": URL for goto, text to fill, key name for press, ms amount for ' +
+    'scroll/wait_ms, or tab index (0-based, newest last) for switch_tab}.\n\n' +
+    'Only set done=true once the task is genuinely complete, or cannot be completed after reasonable attempts (then ' +
+    'success=false and explain why in summary).';
+  const messages: Parameters<typeof generateText>[0]['messages'] = [
+    {
+      role: 'user',
+      content:
+        `Task: ${params.task}\n\nSteps so far (${params.history.length}): ${params.history.join('; ') || '(none yet)'}\n\n` +
+        `Current URL: ${params.url}\nOpen tabs: ${params.tabCount}\nVisible page text (truncated):\n${params.pageText.slice(0, 4000)}` +
+        (params.lastBadText
+          ? `\n\nA previous attempt to get this as structured output failed; here is that raw (invalid) response for reference, in case it helps: ${params.lastBadText.slice(0, 500)}`
+          : ''),
+    },
+  ];
+
+  // RETRY-WITH-BACKOFF (2026-07-17): live stress testing surfaced
+  // "AI_APICallError: No available channel for model ... (distributor)"
+  // -- a transient upstream capacity error, not a malformed-output one --
+  // already wrapped in the AI SDK's own "Failed after 3 attempts"
+  // AI_RetryError by the time it reaches here. Give it its own short
+  // backoff-and-retry independent of the JSON/schema failure path below,
+  // instead of surfacing a misleading "invalid response" message for
+  // what's really just the relay being temporarily out of capacity.
+  let text = '';
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await generateText({ model: params.llmModel, system, messages });
+      text = res.text;
+      break;
+    } catch (err) {
+      if (isTransientProviderError(err) && attempt < 2) {
+        await sleep(1500 * (attempt + 1));
+        continue;
+      }
+      return {
+        action: null,
+        rawText: '',
+        parseError: `upstream model provider error: ${err instanceof Error ? err.message : String(err)}`,
+        transient: isTransientProviderError(err),
+      };
+    }
+  }
+
   const parsed = extractJsonObject(text);
-  if (parsed == null) return null;
+  if (parsed == null) return { action: null, rawText: text, parseError: 'no balanced {...} JSON object found in response text' };
   const result = SteelActionSchema.safeParse(parsed);
-  return result.success ? result.data : null;
+  if (!result.success) {
+    return { action: null, rawText: text, parseError: `JSON parsed but failed schema validation: ${result.error.message}` };
+  }
+  return { action: result.data };
 }
 
-async function decideSteelAction(params: {
+export async function decideSteelAction(params: {
   llmModel: Parameters<typeof generateObject>[0]['model'];
   task: string;
   history: string[];
@@ -418,13 +510,33 @@ async function decideSteelAction(params: {
         }
         continue;
       }
+      // ADDED (2026-07-17): a genuinely transient upstream error (e.g.
+      // "No available channel for model X under group default
+      // (distributor)", already retried 3x internally by the AI SDK
+      // itself and re-thrown as AI_RetryError) is NOT a malformed-output
+      // problem -- dropping the image or falling back to plain-text
+      // won't fix a relay capacity issue. Give it its own short
+      // backoff-and-retry within the attempt budget before treating it
+      // like any other failure.
+      if (isTransientProviderError(err) && attempt < MAX_ATTEMPTS - 1) {
+        await sleep(2000 * (attempt + 1));
+        continue;
+      }
       if (includeImage && !triedNoImageFallback) {
         includeImage = false;
         triedNoImageFallback = true;
         attempt--;
         continue;
       }
-      return { ok: false as const, reason: err instanceof Error ? err.message : String(err) };
+      return {
+        ok: false as const,
+        reason: isTransientProviderError(err)
+          ? `upstream model provider currently has no available capacity for this model (${err instanceof Error ? err.message : String(err)})`
+          : err instanceof Error
+            ? err.message
+            : String(err),
+        transient: isTransientProviderError(err),
+      };
     }
   }
 
@@ -437,7 +549,7 @@ async function decideSteelAction(params: {
   // extraction (see decideStepViaPlainText's doc comment) before giving
   // up on the whole task over it.
   try {
-    const fallbackAction = await decideStepViaPlainText({
+    const fallbackResult = await decideStepViaPlainText({
       llmModel: params.llmModel,
       task: params.task,
       history: params.history,
@@ -446,11 +558,53 @@ async function decideSteelAction(params: {
       tabCount: params.tabCount,
       lastBadText,
     });
-    if (fallbackAction) return { ok: true as const, action: fallbackAction };
+    if (fallbackResult.action) return { ok: true as const, action: fallbackResult.action };
+
+    // LAST-RESORT MODEL FALLBACK (ADDED — real production reports: "You
+    // 3x upgrade on still... all providers are failing with that model").
+    // Everything above has now failed with THIS SPECIFIC model/relay —
+    // structured output AND plain-text-with-manual-JSON-extraction, the
+    // two most permissive call shapes there are. At this point retrying
+    // the same broken model/relay again cannot help; the only thing left
+    // to try is a genuinely different model. Skip this if the failure
+    // was transient capacity (that's not a model-quality problem, and
+    // retrying via a fresh model would just mask a real "no available
+    // channel" for whatever the top-level BYOK model's calls need) or if
+    // no BYOK override is actually in play (nothing to fall back FROM).
+    if (!fallbackResult.transient && params.llmModel !== (await model('openai/gpt-4o-mini'))) {
+      try {
+        const rescueModel = await model('openai/gpt-4o-mini'); // no override arg -- forces the platform's own reliable Gateway model, bypassing whatever BYOK/relay just failed twice
+        const rescueResult = await decideStepViaPlainText({
+          llmModel: rescueModel,
+          task: params.task,
+          history: params.history,
+          pageText: params.pageText,
+          url: params.url,
+          tabCount: params.tabCount,
+          lastBadText: fallbackResult.rawText || lastBadText,
+        });
+        if (rescueResult.action) return { ok: true as const, action: rescueResult.action, usedFallbackModel: true as const };
+      } catch {
+        // Rescue attempt itself failed -- fall through to the original error below, unchanged.
+      }
+    }
+
+    return {
+      ok: false as const,
+      reason: fallbackResult.transient
+        ? `upstream model provider currently has no available capacity for this model (${fallbackResult.parseError})`
+        : `model did not return a valid next action (structured output failed; plain-text fallback also failed: ${fallbackResult.parseError}; raw text: ${fallbackResult.rawText.slice(0, 800)})`,
+      transient: fallbackResult.transient,
+    };
   } catch (err) {
-    return { ok: false as const, reason: `plain-text fallback also failed: ${err instanceof Error ? err.message : String(err)}` };
+    return {
+      ok: false as const,
+      reason: isTransientProviderError(err)
+        ? `upstream model provider currently has no available capacity for this model (${err instanceof Error ? err.message : String(err)})`
+        : `plain-text fallback threw: ${err instanceof Error ? err.message : String(err)}`,
+      transient: isTransientProviderError(err),
+    };
   }
-  return { ok: false as const, reason: 'model did not return a valid next action (structured output and plain-text JSON fallback both failed)' };
 }
 
 async function runSteelLane(params: {
@@ -506,11 +660,69 @@ async function runSteelLane(params: {
 
     let screenshotBase64 = await captureScreenshotBase64();
 
+    // STUCK-LOOP DETECTION (ADDED — real production reports of
+    // automation grinding through its whole step budget without
+    // finishing: most commonly a cookie banner/modal silently eating
+    // every click, or a bad selector that resolves to a harmless no-op
+    // instead of an error). Tracks whether the page's (url, visible
+    // text) actually changed after the previous action -- if it hasn't
+    // for several steps running, that's a much stronger and cheaper
+    // signal than waiting for MAX_STEEL_STEPS to just run out.
+    let prevPageSig: string | null = null;
+    let noChangeStreak = 0;
+    let warnedStuckOnce = false;
+    const NO_CHANGE_WARN_AT = 2;
+    const NO_CHANGE_ABORT_AT = 4;
+
     for (let i = 0; i < MAX_STEEL_STEPS; i++) {
+      // Give the page a brief chance to settle before reading it --
+      // deciding off a half-rendered page is a real source of both bad
+      // actions and the model's own confusion (empty/partial text it
+      // then has to guess around). Short timeout and always continues
+      // regardless (a page that never reaches networkidle, e.g. one
+      // with a live-updating widget, shouldn't stall the whole loop).
+      await currentPage()
+        .waitForLoadState('networkidle', { timeout: 3000 })
+        .catch(() => {});
       const pageText = await currentPage()
         .locator('body')
         .innerText({ timeout: 5000 })
         .catch(() => '');
+      const pageSig = `${currentPage().url()}::${pageText.trim().slice(0, 500)}`;
+      if (prevPageSig !== null && pageSig === prevPageSig) noChangeStreak++;
+      else noChangeStreak = 0;
+      prevPageSig = pageSig;
+      if (noChangeStreak >= NO_CHANGE_ABORT_AT) {
+        outcome = {
+          done: true,
+          success: false,
+          summary: `Stopped: the last ${noChangeStreak} actions had no visible effect on the page at all (stuck -- likely a blocking overlay/cookie banner, or a selector that silently no-ops). Try a more specific task description, or dismiss any blocking dialog first.`,
+        };
+        steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+        break;
+      }
+      if (noChangeStreak >= NO_CHANGE_WARN_AT && !warnedStuckOnce) {
+        warnedStuckOnce = true;
+        history.push(
+          `\u26a0\ufe0f SYSTEM: the last ${noChangeStreak} actions had no visible effect on the page -- try a different selector, scroll to reveal more content, dismiss any overlay/banner, or reconsider the approach entirely.`
+        );
+        // Surface this in the persisted step feed too (not just the
+        // model's own prompt context) so the Browser tab's live feed
+        // visibly shows a recovery attempt in progress, not just silence
+        // followed eventually by either success or a hard stop.
+        steps = appendSteps(steps, [
+          {
+            role: 'system',
+            summary: `Stuck: the last ${noChangeStreak} actions had no visible effect on the page — trying a different approach.`,
+            screenshotUrl: null,
+            at: new Date().toISOString(),
+          },
+        ]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+      } else if (noChangeStreak < NO_CHANGE_WARN_AT) {
+        warnedStuckOnce = false;
+      }
       const decision = await decideSteelAction({
         llmModel: params.llmModel,
         task: params.task,
@@ -521,12 +733,30 @@ async function runSteelLane(params: {
         screenshotBase64,
       });
       if (!decision.ok) {
-        outcome = { done: true, success: false, summary: `Browser automation stopped: the controlling model kept returning invalid responses (${decision.reason}).` };
+        outcome = {
+          done: true,
+          success: false,
+          summary: (decision as { transient?: boolean }).transient
+            ? `Browser automation stopped: ${decision.reason}.`
+            : `Browser automation stopped: the controlling model kept returning invalid responses (${decision.reason}).`,
+        };
         steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
         await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
         break;
       }
       const next: SteelAction = decision.action;
+      if ((decision as { usedFallbackModel?: boolean }).usedFallbackModel && !history.some(h => h.includes('switched to a backup model'))) {
+        history.push('(system switched to a backup model for this step after the configured model failed to respond validly)');
+        steps = appendSteps(steps, [
+          {
+            role: 'system',
+            summary: 'Switched to a backup model after the configured model failed to respond validly.',
+            screenshotUrl: null,
+            at: new Date().toISOString(),
+          },
+        ]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+      }
       if (next.done) {
         const finalShotUrl = await captureAndUploadScreenshot();
         outcome = { done: true, success: next.success, summary: next.summary };
@@ -688,11 +918,69 @@ async function runBrightDataLane(params: {
 
     let screenshotBase64 = await captureScreenshotBase64();
 
+    // STUCK-LOOP DETECTION (ADDED — real production reports of
+    // automation grinding through its whole step budget without
+    // finishing: most commonly a cookie banner/modal silently eating
+    // every click, or a bad selector that resolves to a harmless no-op
+    // instead of an error). Tracks whether the page's (url, visible
+    // text) actually changed after the previous action -- if it hasn't
+    // for several steps running, that's a much stronger and cheaper
+    // signal than waiting for MAX_STEEL_STEPS to just run out.
+    let prevPageSig: string | null = null;
+    let noChangeStreak = 0;
+    let warnedStuckOnce = false;
+    const NO_CHANGE_WARN_AT = 2;
+    const NO_CHANGE_ABORT_AT = 4;
+
     for (let i = 0; i < MAX_STEEL_STEPS; i++) {
+      // Give the page a brief chance to settle before reading it --
+      // deciding off a half-rendered page is a real source of both bad
+      // actions and the model's own confusion (empty/partial text it
+      // then has to guess around). Short timeout and always continues
+      // regardless (a page that never reaches networkidle, e.g. one
+      // with a live-updating widget, shouldn't stall the whole loop).
+      await currentPage()
+        .waitForLoadState('networkidle', { timeout: 3000 })
+        .catch(() => {});
       const pageText = await currentPage()
         .locator('body')
         .innerText({ timeout: 5000 })
         .catch(() => '');
+      const pageSig = `${currentPage().url()}::${pageText.trim().slice(0, 500)}`;
+      if (prevPageSig !== null && pageSig === prevPageSig) noChangeStreak++;
+      else noChangeStreak = 0;
+      prevPageSig = pageSig;
+      if (noChangeStreak >= NO_CHANGE_ABORT_AT) {
+        outcome = {
+          done: true,
+          success: false,
+          summary: `Stopped: the last ${noChangeStreak} actions had no visible effect on the page at all (stuck -- likely a blocking overlay/cookie banner, or a selector that silently no-ops). Try a more specific task description, or dismiss any blocking dialog first.`,
+        };
+        steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+        break;
+      }
+      if (noChangeStreak >= NO_CHANGE_WARN_AT && !warnedStuckOnce) {
+        warnedStuckOnce = true;
+        history.push(
+          `\u26a0\ufe0f SYSTEM: the last ${noChangeStreak} actions had no visible effect on the page -- try a different selector, scroll to reveal more content, dismiss any overlay/banner, or reconsider the approach entirely.`
+        );
+        // Surface this in the persisted step feed too (not just the
+        // model's own prompt context) so the Browser tab's live feed
+        // visibly shows a recovery attempt in progress, not just silence
+        // followed eventually by either success or a hard stop.
+        steps = appendSteps(steps, [
+          {
+            role: 'system',
+            summary: `Stuck: the last ${noChangeStreak} actions had no visible effect on the page — trying a different approach.`,
+            screenshotUrl: null,
+            at: new Date().toISOString(),
+          },
+        ]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+      } else if (noChangeStreak < NO_CHANGE_WARN_AT) {
+        warnedStuckOnce = false;
+      }
       const decision = await decideSteelAction({
         llmModel: params.llmModel,
         task: params.task,
@@ -703,12 +991,30 @@ async function runBrightDataLane(params: {
         screenshotBase64,
       });
       if (!decision.ok) {
-        outcome = { done: true, success: false, summary: `Browser automation stopped: the controlling model kept returning invalid responses (${decision.reason}).` };
+        outcome = {
+          done: true,
+          success: false,
+          summary: (decision as { transient?: boolean }).transient
+            ? `Browser automation stopped: ${decision.reason}.`
+            : `Browser automation stopped: the controlling model kept returning invalid responses (${decision.reason}).`,
+        };
         steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
         await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
         break;
       }
       const next: SteelAction = decision.action;
+      if ((decision as { usedFallbackModel?: boolean }).usedFallbackModel && !history.some(h => h.includes('switched to a backup model'))) {
+        history.push('(system switched to a backup model for this step after the configured model failed to respond validly)');
+        steps = appendSteps(steps, [
+          {
+            role: 'system',
+            summary: 'Switched to a backup model after the configured model failed to respond validly.',
+            screenshotUrl: null,
+            at: new Date().toISOString(),
+          },
+        ]);
+        await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+      }
       if (next.done) {
         const finalShotUrl = await captureAndUploadScreenshot();
         outcome = { done: true, success: next.success, summary: next.summary };
@@ -818,8 +1124,16 @@ export const browserUse = {
     'step limit) and the browser closes at the end of this same call, no session_id follow-up is supported for it ' +
     '(the underlying provider has no way to reattach to an already-open browser instance). Up to three sessions can ' +
     'run in parallel for this chat, one per cloud browser provider -- pass `provider` to pick which one for a NEW ' +
-    'session (defaults to trying browser_use first, auto-falling back to steel if browser_use\'s account itself is ' +
-    'unavailable, e.g. out of quota).',
+    'session (defaults to trying browser_use first, cascading automatically through steel then brightdata if an ' +
+    "earlier provider's account itself is unavailable, e.g. out of quota). " +
+    'For best results, make `task` as specific and self-contained as possible -- name the exact site/URL, the exact ' +
+    'field values or button labels to use, and what "done" looks like -- rather than a vague goal; the steel/brightdata ' +
+    "lanes plan one raw action at a time from just this text plus what's visible on the page, so ambiguity there " +
+    'directly costs steps and reliability. The tool self-heals from a couple of common failure modes on its own -- a ' +
+    'model/relay that stops returning usable output automatically falls back to a backup model for that step, and a ' +
+    "page that stops changing after repeated actions (e.g. a cookie banner silently blocking every click) is detected " +
+    'and reported explicitly instead of silently burning through the whole step budget -- so a returned failure means ' +
+    'those recoveries were already tried and it is a genuine stop, not a transient blip worth blindly retrying.',
   inputSchema: z.object({
     task: z.string().describe('Natural-language description of what the browser should do next.'),
     session_id: z
@@ -861,7 +1175,7 @@ export const browserUse = {
       lane = await pickFreeLane(chatId, provider);
     }
 
-    let fellBackToSteel = false;
+    let fellBackTo: 'steel' | 'brightdata' | null = null;
 
     if (lane.provider === 'browser_use') {
       // Create the row up front (before the lane even starts polling) so
@@ -899,21 +1213,34 @@ export const browserUse = {
         // whole call -- only for a genuinely new session (never a
         // session_id follow-up, which must stick to its already-established
         // provider) and only when Steel's own lane is actually free.
+        // CASCADING FALLBACK (widened — previously only ever tried Steel
+        // next; a chat where BOTH browser_use and Steel are unavailable at
+        // once, e.g. a shared quota outage, used to just fail outright even
+        // though Bright Data was sitting there free the whole time. Now
+        // tries Steel first (cheapest -- no extra provider account setup
+        // needed beyond the key already in use), then Bright Data, before
+        // finally giving up.
         const steelFree =
           !session_id &&
           (await prisma.chatBrowserSession.count({ where: { chatId, provider: 'steel', slot: 1, status: { in: ['running', 'idle'] } } })) === 0;
-        if (!session_id && steelFree && isProviderUnavailableError(err)) {
-          fellBackToSteel = true;
+        const brightdataFree =
+          !session_id &&
+          (await prisma.chatBrowserSession.count({ where: { chatId, provider: 'brightdata', slot: 1, status: { in: ['running', 'idle'] } } })) === 0;
+        if (!session_id && isProviderUnavailableError(err) && steelFree) {
+          fellBackTo = 'steel';
+        } else if (!session_id && isProviderUnavailableError(err) && brightdataFree) {
+          fellBackTo = 'brightdata';
         } else {
           throw err;
         }
       }
 
-      if (fellBackToSteel) {
+      if (fellBackTo) {
         row = null;
-        lane = { provider: 'steel', slot: 1 };
-        // Falls through to the Steel section below -- deliberately no
-        // `return` here, this is the one case where lane switches mid-call.
+        lane = { provider: fellBackTo, slot: 1 };
+        // Falls through to the Steel/Bright Data section below --
+        // deliberately no `return` here, this is the one case where lane
+        // switches mid-call.
       } else {
         const finalResult = laneResult!;
         row = (await prisma.chatBrowserSession.update({
@@ -997,8 +1324,8 @@ export const browserUse = {
         data: { task, status: 'idle', output: laneResult.output, isTaskSuccessful: laneResult.isTaskSuccessful },
       })) as SessionRow;
 
-      const fallbackNote = fellBackToSteel
-        ? 'Note: browser_use is unavailable right now (e.g. out of quota), so this ran on the Steel browser lane instead. '
+      const fallbackNote = fellBackTo
+        ? `Note: browser_use is unavailable right now (e.g. out of quota), so this ran on the ${fellBackTo === 'steel' ? 'Steel' : 'Bright Data'} browser lane instead. `
         : '';
 
       return {
@@ -1040,11 +1367,13 @@ export const browserUse = {
       data: { task, status: 'stopped', output: bdResult.output, isTaskSuccessful: bdResult.isTaskSuccessful, liveUrl: bdResult.liveUrl ?? row.liveUrl },
     })) as SessionRow;
 
+    const bdFallbackNote = fellBackTo === 'brightdata' ? 'Note: browser_use and Steel are both unavailable right now (e.g. out of quota), so this ran on the Bright Data browser lane instead. ' : '';
+
     return {
       status: bdResult.isTaskSuccessful === false ? 'failed' : 'finished',
       steps: [],
       screenshotUrl: bdResult.screenshotUrl,
-      markdown: bdResult.output ?? '',
+      markdown: bdFallbackNote + (bdResult.output ?? ''),
       sessionId: row.id,
       liveUrl: row.liveUrl,
       recordingUrl: null,

@@ -78,12 +78,32 @@ function StepFeed({ steps }: { steps: StepEntry[] }) {
   }
   return (
     <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto px-2.5 py-1.5 space-y-1 text-[11px] leading-snug">
-      {steps.map((s, i) => (
-        <div key={i} className="flex gap-1.5">
-          <span className="text-muted-foreground shrink-0">{s.role === 'human' ? '👤' : '•'}</span>
-          <span className="text-foreground/90 break-words">{s.summary}</span>
-        </div>
-      ))}
+      {steps.map((s, i) => {
+        // System-level notices (stuck-loop detection, backup-model
+        // rescue -- see browser_use.ts) are a genuinely different kind of
+        // event from a normal action step: they're the tool recovering
+        // from something going wrong mid-task, not just "here's what I
+        // did next". Visually distinct (amber, bordered, its own icon) so
+        // that's obvious at a glance in the live feed instead of blending
+        // into the plain bullet list.
+        if (s.role === 'system') {
+          return (
+            <div
+              key={i}
+              className="flex gap-1.5 items-start rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-1 text-amber-700 dark:text-amber-400"
+            >
+              <span className="shrink-0">⚠️</span>
+              <span className="break-words">{s.summary}</span>
+            </div>
+          );
+        }
+        return (
+          <div key={i} className="flex gap-1.5">
+            <span className="text-muted-foreground shrink-0">{s.role === 'human' ? '👤' : '•'}</span>
+            <span className="text-foreground/90 break-words">{s.summary}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

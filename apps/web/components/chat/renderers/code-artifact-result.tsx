@@ -56,11 +56,15 @@ export function CodeArtifactResult({ part }: { part: EveDynamicToolPart }) {
   const [view, setView] = useState<'Code' | 'Preview'>('Code');
   const [collapsed, setCollapsed] = useState(true);
   const input = part.input as { title?: string; userPrompt?: string } | undefined;
-  const output = part.state === 'output-available' ? (part.output as { title?: string; html?: string } | undefined) : undefined;
+  const output =
+    part.state === 'output-available'
+      ? (part.output as { title?: string; html?: string; truncated?: boolean; note?: string } | undefined)
+      : undefined;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
 
   const title = output?.title ?? input?.title ?? 'Code Artifact';
   const html = output?.html ?? '';
+  const truncated = output?.truncated ?? false;
 
   if (isRunning || !html) {
     return <GenericToolCalling icon={<FileIconHtmlIcon />} title={`Calling code_artifact …`} />;
@@ -124,6 +128,12 @@ export function CodeArtifactResult({ part }: { part: EveDynamicToolPart }) {
         </AnimatePresence>
       }
     >
+      {truncated && (
+        <div className="mx-4 mt-3 flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-400">
+          <span className="shrink-0">⚠️</span>
+          <span>{output?.note ?? 'Output was cut off by the token limit before finishing — this HTML is likely incomplete/broken.'}</span>
+        </div>
+      )}
       <div className={cn('relative', view === 'Preview' && 'h-150')}>
         <HtmlPreviewer
           code={html}

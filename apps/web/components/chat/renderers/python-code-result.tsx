@@ -25,7 +25,10 @@ import { GeneratingCard } from './generating-card';
 
 export function PythonCodeResult({ part }: { part: EveDynamicToolPart }) {
   const input = part.input as { task?: string } | undefined;
-  const output = part.state === 'output-available' ? (part.output as { code?: string; explanation?: string } | undefined) : undefined;
+  const output =
+    part.state === 'output-available'
+      ? (part.output as { code?: string; explanation?: string; truncated?: boolean; note?: string } | undefined)
+      : undefined;
   const isRunning = part.state === 'input-streaming' || part.state === 'input-available';
 
   if (isRunning || !output?.code) {
@@ -41,7 +44,13 @@ export function PythonCodeResult({ part }: { part: EveDynamicToolPart }) {
   }
 
   return (
-    <GenericToolResult title="Code generated" icon={<FilePythonIcon />}>
+    <GenericToolResult title={output.truncated ? 'Code generated (incomplete)' : 'Code generated'} icon={<FilePythonIcon />}>
+      {output.truncated && (
+        <div className="mx-4 mt-3 flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-400">
+          <span className="shrink-0">⚠️</span>
+          <span>{output.note ?? 'Output was cut off by the token limit before finishing — this script is likely incomplete.'}</span>
+        </div>
+      )}
       {output.explanation && (
         <div className="px-4 pt-3 text-sm text-muted-foreground">{output.explanation}</div>
       )}

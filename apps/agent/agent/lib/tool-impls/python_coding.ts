@@ -4,6 +4,7 @@ import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { withTransientRetry } from '../transient-provider-error.js';
 
 function stripCodeFence(raw: string): string {
   let stripped = raw.trim();
@@ -56,31 +57,52 @@ export const pythonCoding = {
     // latency for this call itself instead of letting a slow/hung upstream
     // model ride along until the outer request's own maxDuration silently
     // kills the whole turn.
-    const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'python_coding');
-    try {
-      const { text } = await generateText({
-        model: await model(undefined, ctx?.byokModel),
-        abortSignal: t.signal,
-        maxOutputTokens: 8192,
-        // See task_analysis.ts's comment -- top-level `system`, not an
-        // embedded `role: 'system'` message, is what actually survives
-        // translation into Responses-API-style providers.
-        system:
-          'Write complete, runnable Python code that satisfies the given requirements. ' +
-          'Respond with ONLY the code in a single fenced ```python code block, no explanation ' +
-          'before or after it. For editing an existing long file, write a short, targeted script ' +
-          '(read the file, make precise string/regex replacements, write it back) rather than ' +
-          'reproducing the whole file as one inline string literal.',
-        messages: [{ role: 'user', content: requirements }],
-      });
+    //
+    // UPDATED (2026-07-17, "improve the whole AI process for long term
+    // task") — two more real gaps this shares with browser_use.ts/
+    // tool-impls/agent.ts's rewrites: zero retry on a transient upstream
+    // capacity error (one blip used to fail the whole tool call outright,
+    // same class of bug fixed there), and no signal at all when the
+    // output actually got cut off by `maxOutputTokens` mid-file (the
+    // caller previously had no way to distinguish "here's the complete
+    // script" from "here's the first 8192 tokens of it"). Both fixed the
+    // same way: shared `withTransientRetry` wrapping a per-attempt fresh
+    // timeout window, and `truncated: finishReason === 'length'` in the
+    // return value.
+    const { text, finishReason } = await withTransientRetry(async () => {
+      const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'python_coding');
+      try {
+        return await generateText({
+          model: await model(undefined, ctx?.byokModel),
+          abortSignal: t.signal,
+          maxOutputTokens: 8192,
+          // See task_analysis.ts's comment -- top-level `system`, not an
+          // embedded `role: 'system'` message, is what actually survives
+          // translation into Responses-API-style providers.
+          system:
+            'Write complete, runnable Python code that satisfies the given requirements. ' +
+            'Respond with ONLY the code in a single fenced ```python code block, no explanation ' +
+            'before or after it. For editing an existing long file, write a short, targeted script ' +
+            '(read the file, make precise string/regex replacements, write it back) rather than ' +
+            'reproducing the whole file as one inline string literal.',
+          messages: [{ role: 'user', content: requirements }],
+        });
+      } catch (err) {
+        throw t.rethrow(err);
+      } finally {
+        t.clear();
+      }
+    });
 
-      const code = stripCodeFence(text);
-      return { code };
-    } catch (err) {
-      throw t.rethrow(err);
-    } finally {
-      t.clear();
-    }
+    const code = stripCodeFence(text);
+    const truncated = finishReason === 'length';
+    return {
+      code,
+      truncated,
+      note: truncated
+        ? 'Output was cut off by the token limit before finishing — this script is likely incomplete. Ask for it in smaller parts, or a shorter/simpler version.'
+        : undefined,
+    };
   },
 };
 
