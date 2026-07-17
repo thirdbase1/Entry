@@ -42,10 +42,17 @@ export const browserStop = {
     if (row.status === 'stopped') {
       return { stopped: true, alreadyStopped: true, sessionId: session_id };
     }
-    const taskOnly = Boolean(cancel_task_only) && row.provider !== 'steel';
+    const taskOnly = Boolean(cancel_task_only) && row.provider !== 'steel' && row.provider !== 'brightdata';
     try {
       if (row.provider === 'steel') {
         await stopSteelSession(row.providerSessionId);
+      } else if (row.provider === 'brightdata') {
+        // Bright Data has no create/release REST API -- the browser
+        // connection IS the session, and it's already closed by the time
+        // this row could even be reached here (runBrightDataLane always
+        // closes its own connection and marks the row 'stopped' before its
+        // tool call returns; see browser_use.ts's brightdata dispatch).
+        // Nothing provider-side to call.
       } else {
         await stopBrowserUseSession(row.slot as BrowserUseSlot, row.providerSessionId, taskOnly ? 'task' : 'session');
       }

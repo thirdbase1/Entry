@@ -55,6 +55,7 @@ interface BrowserSessionEntry {
 
 function providerLabel(provider: string, slot: number): string {
   if (provider === 'steel') return 'Steel';
+  if (provider === 'brightdata') return 'Bright Data';
   return `Browser Use (${slot})`;
 }
 

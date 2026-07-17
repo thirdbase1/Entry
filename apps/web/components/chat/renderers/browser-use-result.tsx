@@ -240,7 +240,7 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
               className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
             >
               <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shrink-0" />
-              Watch live{parsed.provider ? ` (${parsed.provider === 'steel' ? 'Steel' : 'Browser Use'})` : ''} — also visible in the Browser tab
+              Watch live{parsed.provider ? ` (${parsed.provider === 'steel' ? 'Steel' : parsed.provider === 'brightdata' ? 'Bright Data' : 'Browser Use'})` : ''} — also visible in the Browser tab
             </a>
           </div>
         )}
