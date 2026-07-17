@@ -27,7 +27,7 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
   // chat-panel-context.tsx's file comment for why this needs a context
   // instead of a direct prop (the panel and the message list are siblings,
   // not parent/child).
-  const { historyRequestNonce } = useChatPanel();
+  const { historyRequestNonce, historyRequestVersion } = useChatPanel();
   useEffect(() => {
     if (historyRequestNonce > 0) setPreviewOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -170,6 +170,7 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
           onRefresh={preview.refresh}
           onClose={() => setPreviewOpen(false)}
           jumpToHistoryNonce={historyRequestNonce}
+          jumpToHistoryVersion={historyRequestVersion}
           reconnectedNonce={preview.reconnectedNonce}
         />
       )}

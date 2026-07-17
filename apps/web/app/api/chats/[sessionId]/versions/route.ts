@@ -43,9 +43,22 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   if (before && Number.isInteger(before)) where.versionNumber = { lt: before };
   if (q) {
     const asNumber = Number(q);
+    // Also matches by touched file path (2026-07-17) -- "find the
+    // version that changed auth.ts" used to be impossible; summary text
+    // alone rarely mentions every path involved (a version with 12 files
+    // only lists a few basenames -- see chat-versioning.ts's
+    // `summarize()`). One extra indexed lookup against ChatVersionFile
+    // for matching paths, folded into the same OR as everything else.
+    const matchingVersionNumbers = await prisma.chatVersionFile.findMany({
+      where: { chatId: sessionId, path: { contains: q, mode: 'insensitive' } },
+      select: { versionNumber: true },
+      distinct: ['versionNumber'],
+      take: 500,
+    });
     where.OR = [
       { summary: { contains: q, mode: 'insensitive' } },
       ...(Number.isInteger(asNumber) ? [{ versionNumber: asNumber }] : []),
+      ...(matchingVersionNumbers.length ? [{ versionNumber: { in: matchingVersionNumbers.map(v => v.versionNumber) } }] : []),
     ];
   }
 

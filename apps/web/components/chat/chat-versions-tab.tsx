@@ -22,26 +22,31 @@
  * (renderers/version-card.tsx) — this tab is just the full, browsable
  * history of it, one level deeper.
  *
- * UPGRADED (2026-07-17, "improve history and versioning" push, six
- * concrete gaps closed):
- *  1. Live polling (matches the Files/Preview tabs' already-established
- *     pattern) instead of only ever refreshing on mount/manual click --
- *     a version created by the agent mid-session used to just not show
- *     up here until someone remembered to hit Refresh.
- *  2. A real search box, server-backed (route.ts's `?q=`) so it finds
- *     matches beyond whatever page happens to be currently loaded, not
- *     just a client-side filter over it.
- *  3. Actual "Load older" pagination via the `?before=` cursor -- the
- *     list used to hard-cap at a flat 200 with zero way to reach
- *     anything past that.
- *  4. Rename: a version's auto-generated summary can now be edited into
- *     a real milestone label.
- *  5. Per-file revert ("Revert this file" on each row inside an expanded
- *     version) alongside the existing whole-version Revert -- rolling
- *     back one bad file used to mean losing every other file's progress
- *     back to that point too.
- *  6. Per-version "Download" -- grabs that exact snapshot as a .tar.gz,
- *     works on every chat type since it's pure-DB (no sandbox needed).
+ * UPGRADED (2026-07-16 -> 2026-07-17, ten concrete gaps closed across
+ * two passes; this pass's four):
+ *  1. Revert-impact PREVIEW: clicking Revert now first shows the real
+ *     computed scope (via planRevert's GET preview) -- "this will update
+ *     N files and remove M" -- before Confirm actually applies anything.
+ *     Previously the confirm step showed nothing but the target
+ *     version's OWN historical stats, which describe what changed AT
+ *     that version, not what reverting TO it from today's head actually
+ *     touches.
+ *  2. "Undo this revert" -- a revert-created version (revertedFrom set)
+ *     now gets its own one-click action that jumps straight back to
+ *     the state right before that specific revert happened
+ *     (versionNumber - 1), instead of having to manually find and
+ *     revert to it from the list.
+ *  3. Search now also matches touched file paths server-side (route.ts)
+ *     -- "find the version that changed auth.ts" now actually works.
+ *  4. Completes a previously half-wired feature: tapping a Version card
+ *     in the chat already opened this tab, but always landed on the top
+ *     of the list with zero indication of which entry it was even
+ *     about. Now actually searches for, scrolls to, and auto-expands
+ *     that exact version.
+ *
+ * (Earlier pass: live polling, a real search box, "Load older" cursor
+ * pagination, inline rename, per-file revert, per-version .tar.gz
+ * snapshot download.)
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Diff from 'diff';
@@ -71,6 +76,13 @@ interface DiffPart {
   removed?: boolean;
 }
 
+interface RevertPreview {
+  totalChanges: number;
+  willWrite: number;
+  willDelete: number;
+  noop: boolean;
+}
+
 function timeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diffMs / 60000);
@@ -87,6 +99,14 @@ function changeTypeIcon(t: VersionFile['changeType']) {
   if (t === 'added') return <PlusIcon className="size-3 text-emerald-500 shrink-0" />;
   if (t === 'deleted') return <DeleteIcon className="size-3 text-red-500 shrink-0" />;
   return <EditIcon className="size-3 text-amber-500 shrink-0" />;
+}
+
+function previewText(p: RevertPreview): string {
+  if (p.noop) return "This version already matches the current state — nothing to revert.";
+  const parts: string[] = [];
+  if (p.willWrite > 0) parts.push(`restore ${p.willWrite} file${p.willWrite === 1 ? '' : 's'}`);
+  if (p.willDelete > 0) parts.push(`remove ${p.willDelete} file${p.willDelete === 1 ? '' : 's'} added since`);
+  return `This will ${parts.join(' and ')}.`;
 }
 
 function DiffView({ before, after }: { before: string | null; after: string | null }) {
@@ -220,15 +240,23 @@ function VersionEntry({
   version,
   canRevertLive,
   onReverted,
+  autoOpen,
 }: {
   sessionId: string;
   version: VersionListItem;
   canRevertLive: boolean;
   onReverted: () => void;
+  /** True once for the version this list was told to jump to (a Version
+   *  card tap, see chat-panel-context.tsx) -- auto-expands and scrolls
+   *  itself into view the first time this becomes true. */
+  autoOpen: boolean;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [files, setFiles] = useState<VersionFile[] | null>(null);
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [revertPreview, setRevertPreview] = useState<RevertPreview | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
   const [confirmRevert, setConfirmRevert] = useState(false);
   const [reverting, setReverting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -256,12 +284,44 @@ function VersionEntry({
     }
   }, [expanded, files, sessionId, version.versionNumber]);
 
-  const doRevert = useCallback(async () => {
+  // Deep-link jump (2026-07-17) -- see file comment #4.
+  useEffect(() => {
+    if (!autoOpen) return;
+    if (!expanded) toggle();
+    rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpen]);
+
+  // Revert-impact preview (2026-07-17) -- fetches the REAL scope of
+  // reverting to this version from today's head (via planRevert's GET,
+  // see revert/route.ts) before asking for confirmation, instead of
+  // going straight to a bare Confirm/Cancel with no idea how big the
+  // change actually is.
+  const startRevert = useCallback(async () => {
+    setLoadingPreview(true);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/chats/${sessionId}/versions/${version.versionNumber}/revert`);
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setNotice(data.error || 'Could not compute what this revert would change.');
+        return;
+      }
+      setRevertPreview(data);
+      setConfirmRevert(true);
+    } catch {
+      setNotice('Could not compute what this revert would change — try again in a moment.');
+    } finally {
+      setLoadingPreview(false);
+    }
+  }, [sessionId, version.versionNumber]);
+
+  const doRevert = useCallback(async (targetVersionNumber: number) => {
     setConfirmRevert(false);
     setReverting(true);
     setNotice(null);
     try {
-      const res = await fetch(`/api/chats/${sessionId}/versions/${version.versionNumber}/revert`, { method: 'POST' });
+      const res = await fetch(`/api/chats/${sessionId}/versions/${targetVersionNumber}/revert`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok || data.error) {
         setNotice(data.error || 'Revert failed.');
@@ -274,7 +334,7 @@ function VersionEntry({
     } finally {
       setReverting(false);
     }
-  }, [sessionId, version.versionNumber, onReverted]);
+  }, [sessionId, onReverted]);
 
   // Rename (2026-07-17) -- edits the summary/label in place via the
   // list route's own PATCH. Local `summary` state overrides the prop so
@@ -335,13 +395,20 @@ function VersionEntry({
   }, [sessionId, version.versionNumber]);
 
   const isRevert = version.revertedFromVersionNumber != null;
+  // Undo-this-revert (2026-07-17) -- a revert-created version's own
+  // "before" state is always exactly versionNumber - 1 (sequential
+  // per-chat numbering guarantees whatever was head immediately before
+  // this revert-creating version got written is that). Shown regardless
+  // of isHead -- unlike the generic Revert button, undoing the revert
+  // you JUST did is most useful precisely when it IS still the head.
+  const canUndoRevert = canRevertLive && isRevert && version.versionNumber > 1;
 
   return (
-    <div className="group relative pl-5 pb-4 last:pb-0">
+    <div ref={rootRef} className="group relative pl-5 pb-4 last:pb-0">
       <span
         className={`absolute left-0 top-1 w-[11px] h-[11px] rounded-full border-2 ${
           version.isHead ? 'bg-emerald-500 border-emerald-500' : 'bg-background border-border'
-        }`}
+        } ${autoOpen ? 'ring-2 ring-primary/40' : ''}`}
       />
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 text-left flex-1">
@@ -400,31 +467,54 @@ function VersionEntry({
           >
             {zipping ? '…' : 'Download'}
           </button>
+          {canUndoRevert && !confirmRevert && (
+            <button
+              onClick={() => doRevert(version.versionNumber - 1)}
+              disabled={reverting}
+              className="text-[11px] px-2 py-0.5 rounded border border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 disabled:opacity-50"
+              title={`Undo this revert — back to Version #${version.versionNumber - 1}`}
+            >
+              {reverting ? 'Undoing…' : 'Undo'}
+            </button>
+          )}
           {!version.isHead && canRevertLive && (
-            confirmRevert ? (
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={doRevert}
-                  disabled={reverting}
-                  className="text-[11px] px-2 py-0.5 rounded bg-red-500/15 text-red-600 dark:text-red-400 hover:bg-red-500/25 disabled:opacity-50"
-                >
-                  {reverting ? 'Reverting…' : 'Confirm'}
-                </button>
-                <button onClick={() => setConfirmRevert(false)} className="text-[11px] px-2 py-0.5 rounded hover:bg-accent text-muted-foreground">
-                  Cancel
-                </button>
-              </div>
-            ) : (
+            confirmRevert ? null : (
               <button
-                onClick={() => setConfirmRevert(true)}
-                className="text-[11px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-accent"
+                onClick={startRevert}
+                disabled={loadingPreview}
+                className="text-[11px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-accent disabled:opacity-50"
               >
-                Revert
+                {loadingPreview ? '…' : 'Revert'}
               </button>
             )
           )}
         </div>
       </div>
+
+      {confirmRevert && revertPreview && (
+        <div className="mt-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-2">
+          <div className="text-[11px] text-foreground">{previewText(revertPreview)}</div>
+          {!revertPreview.noop && (
+            <div className="flex items-center gap-1.5 mt-1.5">
+              <button
+                onClick={() => doRevert(version.versionNumber)}
+                disabled={reverting}
+                className="text-[11px] px-2 py-0.5 rounded bg-red-500/15 text-red-600 dark:text-red-400 hover:bg-red-500/25 disabled:opacity-50"
+              >
+                {reverting ? 'Reverting…' : 'Confirm revert'}
+              </button>
+              <button onClick={() => setConfirmRevert(false)} className="text-[11px] px-2 py-0.5 rounded hover:bg-accent text-muted-foreground">
+                Cancel
+              </button>
+            </div>
+          )}
+          {revertPreview.noop && (
+            <button onClick={() => setConfirmRevert(false)} className="text-[11px] px-2 py-0.5 rounded hover:bg-accent text-muted-foreground mt-1.5">
+              Close
+            </button>
+          )}
+        </div>
+      )}
 
       {notice && <div className="text-[11px] text-muted-foreground mt-1">{notice}</div>}
 
@@ -449,7 +539,20 @@ function VersionEntry({
 
 const POLL_INTERVAL_MS = 5000;
 
-export function ChatVersionsTab({ sessionId }: { sessionId: string }) {
+export function ChatVersionsTab({
+  sessionId,
+  jumpToVersion,
+  jumpToNonce,
+}: {
+  sessionId: string;
+  /** See VersionEntry's `autoOpen` -- the version a Version-card tap
+   *  (chat-panel-context.tsx) wants this tab to land on, or null/undefined
+   *  for a plain tab open with no specific target. */
+  jumpToVersion?: number | null;
+  /** Bumps on every tap, even of the SAME version card twice in a row,
+   *  so the jump re-fires each time rather than only on the first. */
+  jumpToNonce?: number;
+}) {
   const [versions, setVersions] = useState<VersionListItem[] | null>(null);
   const [canRevertLive, setCanRevertLive] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -461,6 +564,10 @@ export function ChatVersionsTab({ sessionId }: { sessionId: string }) {
   // request on every keystroke while typing a search term.
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const anyActionInFlightRef = useRef(false);
+  // The version a Version-card jump landed us on, so we know which
+  // single entry to auto-expand/scroll-to once it's loaded. Cleared
+  // once consumed so re-searching manually doesn't keep re-triggering it.
+  const [pendingJump, setPendingJump] = useState<number | null>(null);
 
   useEffect(() => {
     const id = setTimeout(() => setDebouncedSearch(search.trim()), 300);
@@ -502,6 +609,19 @@ export function ChatVersionsTab({ sessionId }: { sessionId: string }) {
     return () => clearInterval(interval);
   }, [refresh]);
 
+  // Deep-link jump (2026-07-17, file comment #4) -- a Version-card tap
+  // sets the search box directly to that version's number (search's own
+  // exact-versionNumber match, see list route.ts) so it's found
+  // regardless of pagination, then marks it as the pending auto-open
+  // target for whichever VersionEntry ends up rendering it.
+  useEffect(() => {
+    if (!jumpToNonce || jumpToVersion == null) return;
+    setSearch(String(jumpToVersion));
+    setDebouncedSearch(String(jumpToVersion));
+    setPendingJump(jumpToVersion);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpToNonce]);
+
   const loadMore = useCallback(async () => {
     if (!versions || versions.length === 0) return;
     setLoadingMore(true);
@@ -532,8 +652,11 @@ export function ChatVersionsTab({ sessionId }: { sessionId: string }) {
         <input
           type="text"
           value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Search versions by label or number…"
+          onChange={e => {
+            setSearch(e.target.value);
+            setPendingJump(null);
+          }}
+          placeholder="Search by label, version #, or file name…"
           className="w-full text-xs px-2 py-1 rounded-md border border-border bg-background placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/40"
         />
       </div>
@@ -564,6 +687,7 @@ export function ChatVersionsTab({ sessionId }: { sessionId: string }) {
                 version={v}
                 canRevertLive={canRevertLive}
                 onReverted={() => refresh()}
+                autoOpen={pendingJump === v.versionNumber}
               />
             ))}
           </div>

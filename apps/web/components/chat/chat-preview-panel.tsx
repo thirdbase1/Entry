@@ -36,6 +36,7 @@ export function ChatPreviewPanel({
   onRefresh,
   onClose,
   jumpToHistoryNonce,
+  jumpToHistoryVersion,
   reconnectedNonce,
 }: {
   sessionId: string;
@@ -48,6 +49,14 @@ export function ChatPreviewPanel({
    *  Version card in the chat is tapped -- jumps straight to the History
    *  tab. Optional so every other caller of this panel is unaffected. */
   jumpToHistoryNonce?: number;
+  /** The specific version number that triggered `jumpToHistoryNonce`
+   *  (2026-07-17, completing a previously half-wired feature: tapping a
+   *  Version card already opened the History tab, but always landed on
+   *  the top of the list with no indication of which entry the card was
+   *  even about -- on a chat with any real history you'd have to
+   *  manually scan for it). Forwarded into ChatVersionsTab so it can
+   *  actually scroll to and expand that exact entry. */
+  jumpToHistoryVersion?: number | null;
   /** Bumped by usePreviewAutoFix every time the preview goes from
    *  unavailable/unknown back to available -- see that hook's comment.
    *  Folded into the iframe's own `key` below so a reconnect (whether
@@ -148,7 +157,7 @@ export function ChatPreviewPanel({
       <div className="flex-1 min-h-0 relative bg-background">
         {tab === 'files' && <ChatFilesTab sessionId={sessionId} />}
         {tab === 'terminal' && <ChatTerminalTab sessionId={sessionId} />}
-        {tab === 'history' && <ChatVersionsTab sessionId={sessionId} />}
+        {tab === 'history' && <ChatVersionsTab sessionId={sessionId} jumpToVersion={jumpToHistoryVersion ?? null} jumpToNonce={jumpToHistoryNonce ?? 0} />}
         {tab === 'browser' && <ChatBrowserTab sessionId={sessionId} />}
 
         {tab === 'preview' && !state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
