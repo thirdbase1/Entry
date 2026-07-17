@@ -14,6 +14,14 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-17',
+    title: 'Fixed broken redirect URLs across the app',
+    items: [
+      'Fixed "Connect" (GitHub/Vercel/Supabase) buttons in Settings erroring instead of redirecting to sign-in.',
+      'Fixed the automatic chat-recovery check that runs on stuck/mid-flight replies -- it was silently failing every time.',
+    ],
+  },
+  {
+    date: '2026-07-17',
     title: 'Streaming, versioning, and cleanup',
     items: [
       'Real-time reply auto-scroll now tracks fast-streaming text smoothly on every chat, including images/screenshots that load in mid-reply.',
