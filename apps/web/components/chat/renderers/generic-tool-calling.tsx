@@ -54,10 +54,12 @@ export function GenericToolCalling({
           <span className="inline-block w-3 h-3 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin shrink-0" />
         )}
         <div className="min-w-0 flex-1">
-          <div className="truncate">
-            {title}
-            {displayTime && <span className="opacity-70"> · {elapsedTime}</span>}
-          </div>
+          {/* Elapsed time itself now lives in the shared ToolStatusBadge
+              (components/ui/tool.tsx, 2026-07-17) -- used to be duplicated
+              here as its own "· Xs" text right next to the title, which
+              after that change just showed the same number twice. `seconds`
+              is kept purely to drive the isLongRunning threshold below. */}
+          <div className="truncate">{title}</div>
           {isLongRunning && (
             <div className="text-[10px] opacity-60 truncate">Still working — bigger tasks can take a bit longer</div>
           )}

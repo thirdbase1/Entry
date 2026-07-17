@@ -21,7 +21,7 @@
  * (packages/db/prisma/schema.prisma) for the two-path (direct vs eve)
  * rationale.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PreviewStatus } from './use-preview-autofix';
 import { ChatFilesTab } from './chat-files-tab';
 import { ChatTerminalTab } from './chat-terminal-tab';
@@ -36,6 +36,7 @@ export function ChatPreviewPanel({
   onRefresh,
   onClose,
   jumpToHistoryNonce,
+  reconnectedNonce,
 }: {
   sessionId: string;
   state: PreviewStatus | null;
@@ -47,10 +48,25 @@ export function ChatPreviewPanel({
    *  Version card in the chat is tapped -- jumps straight to the History
    *  tab. Optional so every other caller of this panel is unaffected. */
   jumpToHistoryNonce?: number;
+  /** Bumped by usePreviewAutoFix every time the preview goes from
+   *  unavailable/unknown back to available -- see that hook's comment.
+   *  Folded into the iframe's own `key` below so a reconnect (whether
+   *  from the self-heal restart, a manual Restart click, or the sandbox
+   *  just coming back on its own) always forces a real reload instead of
+   *  silently keeping whatever stale frame was already sitting there
+   *  under the same unchanged `src` URL. Optional/defaulted so any other
+   *  caller of this panel keeps working unchanged. */
+  reconnectedNonce?: number;
 }) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [tab, setTab] = useState<'preview' | 'files' | 'terminal' | 'history' | 'browser'>('preview');
+  // Tracks "has this preview ever actually loaded" across the whole
+  // panel's lifetime, independent of `reloadKey` (which only bumps on a
+  // manual Reload click) -- the real signal the Starting/Rebuilding copy
+  // below needs.
+  const everAvailableRef = useRef(false);
+  if (state?.available) everAvailableRef.current = true;
 
   useEffect(() => {
     if (jumpToHistoryNonce) setTab('history');
@@ -138,13 +154,24 @@ export function ChatPreviewPanel({
         {tab === 'preview' && !state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
 
         {tab === 'preview' && state && state.available && state.url && (
-          <iframe key={reloadKey} src={state.url} className="w-full h-full border-0" title="App preview" />
+          <iframe key={`${reloadKey}-${reconnectedNonce ?? 0}`} src={state.url} className="w-full h-full border-0" title="App preview" />
         )}
 
         {tab === 'preview' && state && !state.available && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
             <div className="text-sm text-muted-foreground">
-              {state.status === 'error' ? state.error || 'Something went wrong starting the preview.' : 'Starting…'}
+              {state.status === 'error'
+                ? state.error || 'Something went wrong starting the preview.'
+                // "Rebuilding…" vs "Starting…" (2026-07-17, "improve preview"
+                // push) -- these read very differently to a user watching:
+                // a preview that's already been up before and just dipped
+                // (a tool call restarting the dev server, a self-heal
+                // retry) is a normal, reassuring "rebuilding," not the
+                // same blank "starting" a genuinely brand-new sandbox
+                // shows on its very first boot. reloadKey only ever
+                // increments after at least one prior successful load, so
+                // it's a reliable signal for "this has been up before."
+                : everAvailableRef.current ? 'Rebuilding…' : 'Starting…'}
             </div>
             {autoFixing ? (
               <div className="flex items-center gap-2 text-xs text-amber-600">

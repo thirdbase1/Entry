@@ -20,7 +20,7 @@
  * chat/renderers/* already goes through) and direct-chat-interface.tsx's
  * own inline (non-eve) tool-part rendering — see those files' comments.
  */
-import type { ComponentProps, ReactNode } from 'react';
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import {
   CheckCircle2,
   ChevronDown,
@@ -62,11 +62,40 @@ function StatusIcon({ state }: { state: ToolState }) {
   }
 }
 
+/**
+ * Live elapsed-time ticker while a tool is actually running (2026-07-17,
+ * "improve real time streaming" push) -- a tool that takes 20s to run a
+ * shell command previously just sat on a static "Running" badge the
+ * whole time, giving zero feedback that anything is actually happening.
+ * Starts counting from this component's own mount (i.e. the first render
+ * where the part exists at all, which for a running tool is right when
+ * its input starts streaming in) -- not exact vs. the server's own
+ * clock, but accurate enough to convey "this is alive and ticking," which
+ * is the actual goal. Stops/freezes the instant state leaves the running
+ * states so a completed tool's badge doesn't keep counting up forever.
+ */
+function useElapsedSeconds(running: boolean): number {
+  const startRef = useRef<number | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!running) return;
+    if (startRef.current === null) startRef.current = Date.now();
+    const id = setInterval(() => {
+      setElapsed(Math.max(0, Math.round((Date.now() - (startRef.current ?? Date.now())) / 1000)));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [running]);
+  return elapsed;
+}
+
 export function ToolStatusBadge({ state }: { state: ToolState }) {
+  const running = state === 'input-streaming' || state === 'input-available';
+  const elapsed = useElapsedSeconds(running);
   return (
-    <Badge variant={state === 'output-error' ? 'destructive' : 'secondary'} className="rounded-full">
+    <Badge variant={state === 'output-error' ? 'destructive' : 'secondary'} className="rounded-full tabular-nums">
       <StatusIcon state={state} />
       {STATUS_LABEL[state]}
+      {running && elapsed > 0 && <span className="text-muted-foreground/80">· {elapsed}s</span>}
     </Badge>
   );
 }
@@ -80,7 +109,7 @@ export interface ToolHeaderProps {
 
 export function ToolHeader({ title, state, icon, className }: ToolHeaderProps) {
   return (
-    <CollapsibleTrigger className={cn('group flex w-full items-center justify-between gap-2 p-2.5 text-left', className)}>
+    <CollapsibleTrigger data-tool-state={state} className={cn('group flex w-full items-center justify-between gap-2 p-2.5 text-left', className)}>
       <div className="flex min-w-0 items-center gap-2">
         {icon ?? <Wrench className="size-3.5 shrink-0 text-muted-foreground" />}
         <span className="min-w-0 truncate text-xs font-medium text-foreground">{title}</span>

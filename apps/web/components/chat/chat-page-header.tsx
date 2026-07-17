@@ -170,6 +170,7 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
           onRefresh={preview.refresh}
           onClose={() => setPreviewOpen(false)}
           jumpToHistoryNonce={historyRequestNonce}
+          reconnectedNonce={preview.reconnectedNonce}
         />
       )}
     </div>

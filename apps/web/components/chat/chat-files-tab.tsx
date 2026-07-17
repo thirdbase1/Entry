@@ -202,6 +202,15 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
   const [loading, setLoading] = useState(false);
   const [isDirect, setIsDirect] = useState(false);
   const [openFile, setOpenFile] = useState<{ path: string; content?: string; error?: string; loading: boolean; truncatedNotice?: string } | null>(null);
+  // Search/filter box (2026-07-17, "improve files" push) -- a real project
+  // tree can run hundreds of files deep; scanning-by-eye for one file was
+  // the only option before. Filters by substring match against the full
+  // path (not just the filename) so e.g. typing "route" surfaces every
+  // route.ts across the whole app tree, not just top-level matches.
+  const [search, setSearch] = useState('');
+  // Whole-project download (2026-07-17) -- direct/BYOK only, same reason
+  // editing already is: only that path has a live sandbox to archive.
+  const [zipping, setZipping] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -261,6 +270,54 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
     [sessionId]
   );
 
+  // Download the whole project as a .tar.gz (2026-07-17) -- hits the
+  // ?zip=1 endpoint (files/route.ts) and triggers a real browser download
+  // via a throwaway <a>, same trick as downloadFile below. Kept as an
+  // actual fetch + blob (not a plain `<a href>` navigation) so a server
+  // error comes back as a real JSON error this component can show,
+  // instead of the browser just silently landing on a JSON error page.
+  const downloadProject = useCallback(async () => {
+    setZipping(true);
+    try {
+      const res = await fetch(`/api/chats/${sessionId}/files?zip=1`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        setNotice(data?.error || 'Could not create the project archive.');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `project-${sessionId.slice(0, 8)}.tar.gz`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setNotice('Could not create the project archive — try again in a moment.');
+    } finally {
+      setZipping(false);
+    }
+  }, [sessionId]);
+
+  // Download a single open file (2026-07-17) -- reuses the content
+  // already loaded into the editor rather than re-fetching, so it works
+  // instantly and identically on both the direct/BYOK and read-only eve
+  // paths (the latter has no live sandbox to hit a fresh download
+  // endpoint against, but it already has the file's text right here).
+  const downloadFile = useCallback((path: string, content: string) => {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = path.split('/').pop() || path;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, []);
+
   if (openFile) {
     return (
       <div className="flex flex-col h-full">
@@ -269,9 +326,20 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
             <FileIcon name={openFile.path.split('/').pop() || openFile.path} />
             <span className="text-xs font-mono truncate">{openFile.path}</span>
           </div>
-          <button onClick={() => setOpenFile(null)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent shrink-0">
-            Back
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {openFile.content !== undefined && (
+              <button
+                onClick={() => downloadFile(openFile.path, openFile.content!)}
+                className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent"
+                title="Download this file"
+              >
+                Download
+              </button>
+            )}
+            <button onClick={() => setOpenFile(null)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent">
+              Back
+            </button>
+          </div>
         </div>
         {openFile.truncatedNotice && (
           <div className="px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-500/10 border-b border-amber-500/20 shrink-0">
@@ -294,22 +362,56 @@ export function ChatFilesTab({ sessionId }: { sessionId: string }) {
     );
   }
 
-  const tree = entries ? buildTree(entries) : null;
+  // Substring match against the full path, case-insensitive -- a plain
+  // filter of the flat entries list before rebuilding the tree, so every
+  // ancestor directory of a match is still reconstructed correctly by
+  // buildTree() (it derives dir nodes from each surviving file's path
+  // components), while non-matching branches just naturally disappear.
+  const trimmedSearch = search.trim().toLowerCase();
+  const filteredEntries = trimmedSearch ? (entries ?? []).filter(e => e.path.toLowerCase().includes(trimmedSearch)) : entries;
+  const tree = filteredEntries ? buildTree(filteredEntries) : null;
+  const noMatches = Boolean(trimmedSearch) && filteredEntries?.length === 0 && (entries?.length ?? 0) > 0;
 
   return (
     <div className="flex flex-col h-full">
-      <div className="h-9 border-b border-border px-3 flex items-center justify-between shrink-0">
-        <span className="text-xs text-muted-foreground">{entries ? `${entries.length} items` : 'Files'}</span>
-        <button onClick={refresh} disabled={loading} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent disabled:opacity-50">
-          {loading ? 'Refreshing…' : 'Refresh'}
-        </button>
+      <div className="h-9 border-b border-border px-3 flex items-center justify-between shrink-0 gap-2">
+        <span className="text-xs text-muted-foreground shrink-0">
+          {entries ? (trimmedSearch ? `${filteredEntries?.length ?? 0}/${entries.length}` : `${entries.length} items`) : 'Files'}
+        </span>
+        <div className="flex items-center gap-1 shrink-0">
+          {isDirect && entries && entries.length > 0 && (
+            <button
+              onClick={downloadProject}
+              disabled={zipping}
+              className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent disabled:opacity-50"
+              title="Download the whole project as a .tar.gz"
+            >
+              {zipping ? 'Zipping…' : 'Download all'}
+            </button>
+          )}
+          <button onClick={refresh} disabled={loading} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent disabled:opacity-50">
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
       </div>
+      {entries && entries.length > 0 && (
+        <div className="px-2 pt-1.5 pb-1 shrink-0">
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Filter files…"
+            className="w-full text-xs px-2 py-1 rounded-md border border-border bg-background placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/40"
+          />
+        </div>
+      )}
       <div className="flex-1 overflow-auto py-1.5 px-1">
         {!entries && !notice && <div className="text-xs text-muted-foreground px-3 py-2">Loading…</div>}
         {entries && entries.length === 0 && !notice && (
           <div className="text-xs text-muted-foreground px-3 py-2">No files yet.</div>
         )}
         {notice && <div className="text-xs text-muted-foreground px-3 py-2">{notice}</div>}
+        {noMatches && <div className="text-xs text-muted-foreground px-3 py-2">No files match "{search.trim()}".</div>}
         {tree && sortedChildren(tree).map(child => <TreeRow key={child.path} node={child} depth={0} onOpenFile={openFileContent} />)}
       </div>
     </div>

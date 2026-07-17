@@ -126,10 +126,42 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   const isDirect = Boolean(chat.byokModelId || chat.requestedModel);
   const url = new URL(req.url);
   const contentPath = url.searchParams.get('content');
+  const wantZip = url.searchParams.get('zip') === '1';
 
   if (isDirect) {
     try {
       const sandbox = await getSandboxForChat(sessionId);
+
+      // Whole-project download (2026-07-17, "improve files" push -- a
+      // real gap: the tab could view/edit one file at a time but there
+      // was no way to just grab the whole thing to work with locally).
+      // `tar` over `zip` deliberately -- `zip` isn't guaranteed present
+      // on every minimal base image, `tar` always is. Base64-encoded over
+      // stdout rather than written-then-read-as-a-file-content, because
+      // this sandbox's `run()` only ever returns text (see this file's
+      // DirectChatSandbox interface): raw archive bytes decoded as UTF-8
+      // text would silently corrupt on any byte sequence that isn't valid
+      // UTF-8, which real project archives hit immediately (any binary
+      // asset, or even just certain code-point boundaries split across
+      // tar's own block padding). Base64 is pure ASCII the whole way
+      // through, so it survives that trip intact; only decoded back to
+      // real bytes once it's safely out of the text pipe, right here.
+      if (wantZip) {
+        const pruneExpr = EXCLUDED.map(d => `-name ${shellQuote(d)}`).join(' -o ');
+        const cmd = `tar --exclude-vcs -cz $(find . -mindepth 1 -maxdepth 1 \( ${pruneExpr} \) -prune -o -mindepth 1 -maxdepth 1 -print) 2>/dev/null | base64 -w0`;
+        const result = await sandbox.run({ command: cmd });
+        if (result.exitCode !== 0 || !result.stdout.trim()) {
+          return Response.json({ error: result.stderr.slice(0, 300) || 'Could not create the project archive.' }, { status: 500 });
+        }
+        const buffer = Buffer.from(result.stdout.trim(), 'base64');
+        return new Response(buffer, {
+          headers: {
+            'Content-Type': 'application/gzip',
+            'Content-Disposition': `attachment; filename="project-${sessionId.slice(0, 8)}.tar.gz"`,
+            'Content-Length': String(buffer.byteLength),
+          },
+        });
+      }
 
       if (contentPath) {
         // Reject path traversal outright — this reads real files on a

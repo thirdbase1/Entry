@@ -388,18 +388,45 @@ function DirectChatSession({
   // (each token/part append), and only auto-follows when the user is
   // already near the bottom -- so it never yanks the view back down if
   // someone's deliberately scrolled up to reread earlier context.
+  // FIXED (2026-07-17, "improve real time streaming" -- confirmed real
+  // jank watching a fast-streaming reply): the MutationObserver callback
+  // used to call `el.scrollTo({ behavior: 'smooth' })` directly, once per
+  // DOM mutation. During active token/tool streaming that's dozens of
+  // mutations per second, each one kicking off a brand-new ~300ms smooth-
+  // scroll animation that immediately gets superseded (and visually
+  // fights with) the next one a few ms later -- the browser never gets to
+  // finish a single scroll animation, which reads as a stuttery, slightly
+  // seasick jiggle right when the content is moving fastest. Two fixes,
+  // applied together:
+  //  1. Coalesce to at most one scroll per animation frame via
+  //     requestAnimationFrame, instead of one call per raw mutation --
+  //     the DOM can mutate many times within a single frame; only the
+  //     last one before paint actually needs to move the scrollbar.
+  //  2. Use instant ('auto') scrolling for those per-frame follow-ups,
+  //     reserving the smooth animation for the one deliberate "snap to
+  //     bottom" on a genuinely new turn starting. An instant scroll every
+  //     frame tracks perfectly with fast-arriving content with zero
+  //     animation-queue buildup; a smooth one only make sense as a single
+  //     one-off jump, not as a per-frame follow.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const isNearBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    const scrollToBottom = () => el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-    // Always snap to bottom on a genuinely new turn starting.
-    scrollToBottom();
+    // Always snap to bottom (smoothly, once) on a genuinely new turn starting.
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    let rafId: number | null = null;
     const observer = new MutationObserver(() => {
-      if (isNearBottom()) scrollToBottom();
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (isNearBottom()) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' });
+      });
     });
     observer.observe(el, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
   }, [messages.length, showThinkingIndicator]);
 
   const onSend = (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string; images?: ChatImageAttachment[] }) => {
@@ -536,8 +563,17 @@ function DirectChatSession({
                         // badge before), now sharing the exact same
                         // components/ui/tool.tsx primitives as the eve chat
                         // path's GenericToolResult/GenericToolCalling.
+                        // Auto-open while actively running (2026-07-17,
+                        // "improve real time streaming") -- Radix
+                        // Collapsible's `defaultOpen` only applies at this
+                        // element's own first render, which for a tool
+                        // part is the moment its input starts arriving, so
+                        // this reliably opens right as a call starts and
+                        // simply stays however the user last left it once
+                        // it completes -- no forced re-collapse fighting a
+                        // manual expand/collapse click later.
                         return (
-                          <Tool key={i} className="my-1">
+                          <Tool key={i} className="my-1" defaultOpen={state === 'input-streaming' || state === 'input-available'}>
                             <ToolHeader title={toolName} state={state} />
                             <ToolContent>
                               {errorText ? (

@@ -48,11 +48,20 @@ export type PreviewStatus = {
   requiresAgentAction: boolean;
 };
 
-const POLL_INTERVAL_MS = 4000;
+// Tightened 4000ms -> 1500ms (2026-07-17, "improve preview" push) -- the
+// preview badge/panel is meant to reflect the live sandbox in close to
+// real time; 4s was a very noticeable lag between a restart/rebuild
+// actually finishing and the UI catching up to it. 1.5s is still cheap
+// (one lightweight GET) but reads as essentially live.
+const POLL_INTERVAL_MS = 1500;
 // Consecutive unavailable polls before attempting the silent self-heal
-// restart (direct/BYOK only) -- 24s, enough that a normal boot gap never
-// triggers it.
-const STUCK_THRESHOLD = 6;
+// restart (direct/BYOK only) -- scaled up from 6 to 16 so the actual
+// wall-clock budget (16 * 1500ms = 24s) matches exactly what it was
+// before this file tightened POLL_INTERVAL_MS (6 * 4000ms = 24s also).
+// Only the UI's reaction latency should get faster here, not how
+// trigger-happy the self-heal restart is -- that threshold was already
+// deliberately tuned to survive a normal boot gap.
+const STUCK_THRESHOLD = 16;
 // Grace period after the chat's first-ever turn starts before the stuck
 // counter is even allowed to run -- a fresh sandbox/dev-server on a
 // brand-new chat needs real time to exist at all, let alone boot.
@@ -60,6 +69,19 @@ const INITIAL_GRACE_MS = 45 * 1000;
 
 export function usePreviewAutoFix(sessionId: string | undefined) {
   const [state, setState] = useState<PreviewStatus | null>(null);
+  // Bumped every time availability transitions false/null -> true
+  // (2026-07-17, "improve preview" push -- confirmed real bug: an iframe
+  // pointed at the SAME url both before and after a restart never
+  // actually reloads on its own, since React only re-fetches an iframe's
+  // src when the src string itself changes, not just because the parent
+  // re-rendered. A user who'd been staring at a dead/stale preview during
+  // a restart kept seeing that exact same stale frame afterward too,
+  // looking like the restart silently did nothing even though the
+  // sandbox was genuinely back. ChatPreviewPanel folds this into its own
+  // iframe `key` so a reconnect always forces a real reload, without
+  // this hook needing to know anything about iframes itself.
+  const [reconnectedNonce, setReconnectedNonce] = useState(0);
+  const wasAvailableRef = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unavailableStreakRef = useRef(0);
   const selfHealAttemptedRef = useRef(false);
@@ -88,10 +110,13 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
       setState(data);
 
       if (data.available) {
+        if (!wasAvailableRef.current) setReconnectedNonce(n => n + 1);
+        wasAvailableRef.current = true;
         unavailableStreakRef.current = 0;
         selfHealAttemptedRef.current = false;
         return;
       }
+      wasAvailableRef.current = false;
 
       // A turn is actively streaming right now -- a tool call legitimately
       // rebuilding/restarting the dev server is expected downtime, not a
@@ -128,5 +153,5 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
     };
   }, [sessionId, hasMessages, poll]);
 
-  return { state, autoFixing: false, manualRestart: restart, refresh: poll };
+  return { state, autoFixing: false, manualRestart: restart, refresh: poll, reconnectedNonce };
 }
