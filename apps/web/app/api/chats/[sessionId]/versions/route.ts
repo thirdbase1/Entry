@@ -38,9 +38,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   const beforeParam = url.searchParams.get('before');
   const before = beforeParam ? Number(beforeParam) : undefined;
   const q = url.searchParams.get('q')?.trim() || undefined;
+  // "Reverts only" filter (2026-07-17) -- no schema change needed, just
+  // an extra predicate on the already-existing `revertedFromVersionNumber`
+  // column. Useful on a chat with a long, noisy history to quickly answer
+  // "when did I actually roll something back" without scrolling past
+  // every ordinary turn.
+  const onlyReverts = url.searchParams.get('onlyReverts') === '1';
 
   const where: Record<string, unknown> = { chatId: sessionId };
   if (before && Number.isInteger(before)) where.versionNumber = { lt: before };
+  if (onlyReverts) where.revertedFromVersionNumber = { not: null };
   if (q) {
     const asNumber = Number(q);
     // Also matches by touched file path (2026-07-17) -- "find the
@@ -62,10 +69,22 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
     ];
   }
 
-  const [versions, headVersion] = await Promise.all([
+  // Aggregate totals (2026-07-17) -- deliberately a SEPARATE query over
+  // the chat's FULL history (chatId only, no pagination/search/onlyReverts
+  // predicate), so the header stat is always "this whole chat's history",
+  // not "whatever happens to be on the currently loaded/filtered page" --
+  // a single cheap aggregate, not N+1, and completely unaffected by the
+  // `where` built above.
+  const [versions, headVersion, totals] = await Promise.all([
     prisma.chatVersion.findMany({ where, orderBy: { versionNumber: 'desc' }, take: PAGE_SIZE + 1 }),
     prisma.chatVersion.findFirst({ where: { chatId: sessionId }, orderBy: { versionNumber: 'desc' } }),
+    prisma.chatVersion.aggregate({
+      where: { chatId: sessionId },
+      _count: { _all: true },
+      _sum: { linesAdded: true, linesRemoved: true },
+    }),
   ]);
+  const revertCount = await prisma.chatVersion.count({ where: { chatId: sessionId, revertedFromVersionNumber: { not: null } } });
 
   const hasMore = versions.length > PAGE_SIZE;
   const page = hasMore ? versions.slice(0, PAGE_SIZE) : versions;
@@ -76,6 +95,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
     canRevertLive,
     hasMore,
     headVersionNumber,
+    totals: {
+      versions: totals._count._all,
+      linesAdded: totals._sum.linesAdded ?? 0,
+      linesRemoved: totals._sum.linesRemoved ?? 0,
+      reverts: revertCount,
+    },
     versions: page.map(v => ({
       versionNumber: v.versionNumber,
       summary: v.summary,

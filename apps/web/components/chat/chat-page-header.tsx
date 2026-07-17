@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import { useLibraryStore, useAllItems, type Chat } from '@/store/library';
 import { cn } from '@/lib/utils';
 import { ChatPreviewPanel } from './chat-preview-panel';
@@ -27,11 +28,36 @@ export function ChatPageHeader({ sessionId }: { sessionId: string }) {
   // chat-panel-context.tsx's file comment for why this needs a context
   // instead of a direct prop (the panel and the message list are siblings,
   // not parent/child).
-  const { historyRequestNonce, historyRequestVersion } = useChatPanel();
+  const { historyRequestNonce, historyRequestVersion, requestOpenHistory } = useChatPanel();
   useEffect(() => {
     if (historyRequestNonce > 0) setPreviewOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyRequestNonce]);
+
+  // Shareable version deep link (2026-07-17, "improve versioning/revert/
+  // history x6" push, closes the loop with the existing in-chat Version
+  // card + History tab's own jump/scroll-to behavior): a chat URL like
+  // `?version=7` now opens straight to that version, same as tapping its
+  // card would -- so a version can actually be linked/shared outside the
+  // chat itself, not just tapped from inside it. Read once on mount only
+  // (no dependency on the value changing later) and the param is then
+  // stripped from the URL so a manual refresh doesn't keep re-triggering
+  // the same jump forever.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  useEffect(() => {
+    const raw = searchParams.get('version');
+    const versionNumber = raw ? Number(raw) : NaN;
+    if (!Number.isInteger(versionNumber)) return;
+    setPreviewOpen(true);
+    requestOpenHistory(versionNumber);
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete('version');
+    const rest = params.toString();
+    router.replace(rest ? `${pathname}?${rest}` : pathname, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Reverted (2026-07-15, explicit user request: "no leave the preview
   // and the share") -- the immediately-preceding change had folded Share

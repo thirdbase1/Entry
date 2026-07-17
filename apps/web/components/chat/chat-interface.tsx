@@ -17,6 +17,8 @@ import { VersionCard, type VersionCardData } from './renderers/version-card';
 import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
 import { toast } from '@/lib/toast';
 import { useOnlineStatus } from './use-online-status';
+import { useStreamingAutoScroll } from './use-streaming-autoscroll';
+import { ThinkingIndicator } from './chat-thinking-indicator';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -711,6 +713,14 @@ function ChatInterfaceInner({
   // with no assistant reply after it is what that situation looks like
   // from a fresh mount, independent of `agent.status`.
   const pendingTurn = !isBusy && messages.length > 0 && messages[messages.length - 1]?.role === 'user';
+  // "Thinking…" latency placeholder (2026-07-17, parity with
+  // direct-chat-interface.tsx's own showThinkingIndicator) -- visible
+  // from send until the assistant reply actually has something to show
+  // (text, a tool call, or reasoning), then gets out of the way the
+  // instant real content starts arriving.
+  const lastMessageForThinking = messages[messages.length - 1];
+  const showThinkingIndicator =
+    isBusy && (!lastMessageForThinking || lastMessageForThinking.role !== 'assistant' || lastMessageForThinking.parts.length === 0);
 
   // Report live turn state up to the parent's recovery effect -- see its
   // own comment for why this replaced a stale mount-time snapshot
@@ -734,18 +744,25 @@ function ChatInterfaceInner({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [scrollRef]);
 
-  // Auto-scroll on new messages, and manage down-arrow visibility
+  // Real-time, image-load-aware auto-follow (2026-07-17) -- see
+  // use-streaming-autoscroll.ts's file comment. Continuously tracks the
+  // bottom as THIS message's own content streams in (not just once per
+  // whole new message), and only while already near the bottom.
+  useStreamingAutoScroll(scrollRef, messages.length);
+
+  // Down-arrow visibility on new messages (separate from the above --
+  // this is purely the "should the manual scroll-to-bottom button be
+  // showing" signal, unrelated to whether auto-follow itself is active).
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     if (isAtBottom) {
-      scrollToBottom();
       downArrowRef.current?.hide();
     } else {
       downArrowRef.current?.show();
     }
-  }, [messages.length, scrollToBottom]);
+  }, [messages.length]);
 
   // Track scroll position to show/hide down arrow
   useEffect(() => {
@@ -847,6 +864,11 @@ function ChatInterfaceInner({
                     ))}
                 </Fragment>
               ))}
+              {showThinkingIndicator && (
+                <div className="flex justify-start">
+                  <ThinkingIndicator />
+                </div>
+              )}
             </div>
           </div>
           <DownArrow

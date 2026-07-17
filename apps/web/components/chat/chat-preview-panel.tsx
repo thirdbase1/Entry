@@ -24,7 +24,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { PreviewStatus } from './use-preview-autofix';
 import { ChatFilesTab } from './chat-files-tab';
-import { ChatTerminalTab } from './chat-terminal-tab';
 import { ChatVersionsTab } from './chat-versions-tab';
 import { ChatBrowserTab } from './chat-browser-tab';
 
@@ -69,7 +68,7 @@ export function ChatPreviewPanel({
 }) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [tab, setTab] = useState<'preview' | 'files' | 'terminal' | 'history' | 'browser'>('preview');
+  const [tab, setTab] = useState<'preview' | 'files' | 'history' | 'browser'>('preview');
   // Tracks "has this preview ever actually loaded" across the whole
   // panel's lifetime, independent of `reloadKey` (which only bumps on a
   // manual Reload click) -- the real signal the Starting/Rebuilding copy
@@ -107,12 +106,6 @@ export function ChatPreviewPanel({
             className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'files' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
           >
             Files
-          </button>
-          <button
-            onClick={() => setTab('terminal')}
-            className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'terminal' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
-          >
-            Terminal
           </button>
           <button
             onClick={() => setTab('history')}
@@ -156,7 +149,6 @@ export function ChatPreviewPanel({
 
       <div className="flex-1 min-h-0 relative bg-background">
         {tab === 'files' && <ChatFilesTab sessionId={sessionId} />}
-        {tab === 'terminal' && <ChatTerminalTab sessionId={sessionId} />}
         {tab === 'history' && <ChatVersionsTab sessionId={sessionId} jumpToVersion={jumpToHistoryVersion ?? null} jumpToNonce={jumpToHistoryNonce ?? 0} />}
         {tab === 'browser' && <ChatBrowserTab sessionId={sessionId} />}
 

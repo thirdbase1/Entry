@@ -195,6 +195,11 @@ function LandingContent({ onGetStarted }: { onGetStarted: () => void }) {
             </a>
           </div>
         </div>
+        <div className={styles.footerLinks}>
+          <a href="/changelog" className={styles.footerLink}>
+            Changelog
+          </a>
+        </div>
         <div className={styles.footerCopyright}>
           <p>© 2025 Entry, All Rights Reserved</p>
         </div>

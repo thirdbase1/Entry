@@ -30,10 +30,28 @@ export function AIReasoningCard({ text, loading = false }: { text: string; loadi
     return () => clearInterval(interval);
   }, [loading]);
 
+  // RAF-coalesced instead of an instant scrollTop snap on every token
+  // (2026-07-17, "improve streaming x5" -- consistency fix, same root
+  // pattern as use-streaming-autoscroll.ts's file comment): reasoning
+  // content can stream many chunks per second, and firing a synchronous
+  // scrollTop write on every single one is wasted layout work competing
+  // with the surrounding page's own scroll-follow -- coalescing to once
+  // per paint removes that redundant thrash without changing the visible
+  // behavior (still tracks the bottom of the expanded pane in real time).
+  const reasoningRafRef = useRef<number | null>(null);
   useEffect(() => {
-    if (loading && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight;
-    }
+    if (!loading || !contentRef.current) return;
+    if (reasoningRafRef.current !== null) return;
+    reasoningRafRef.current = requestAnimationFrame(() => {
+      reasoningRafRef.current = null;
+      if (contentRef.current) contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    });
+    return () => {
+      if (reasoningRafRef.current !== null) {
+        cancelAnimationFrame(reasoningRafRef.current);
+        reasoningRafRef.current = null;
+      }
+    };
   }, [text, loading]);
 
   if (!text) return null;

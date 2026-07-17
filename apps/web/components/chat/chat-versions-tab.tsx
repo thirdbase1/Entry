@@ -83,6 +83,29 @@ interface RevertPreview {
   noop: boolean;
 }
 
+interface VersionTotals {
+  versions: number;
+  linesAdded: number;
+  linesRemoved: number;
+  reverts: number;
+}
+
+/** Date-grouping header label (2026-07-17) -- "Today" / "Yesterday" /
+ *  a short date, same convention most chat/activity timelines use, so a
+ *  long history reads as scannable day-chunks instead of one undivided
+ *  scroll of entries with no sense of when a cluster of activity
+ *  actually happened. */
+function dayLabel(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+}
+
 function timeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diffMs / 60000);
@@ -266,6 +289,17 @@ function VersionEntry({
   const [summary, setSummary] = useState(version.summary);
   const [zipping, setZipping] = useState(false);
 
+  // Passive "how far behind current" note (2026-07-17) -- reuses the
+  // same read-only planRevert GET the Revert button's confirm-preview
+  // already calls, just fired on EXPAND instead of gated behind clicking
+  // Revert, and shown for every chat type (planRevert is pure DB, no
+  // live sandbox needed -- see revert/route.ts's GET) not just the ones
+  // that can currently revert live. A separate state from `revertPreview`
+  // (that one's still exactly the confirm-dialog's own fetch) so the two
+  // don't clobber each other.
+  const [driftPreview, setDriftPreview] = useState<RevertPreview | null>(null);
+  const [loadingDrift, setLoadingDrift] = useState(false);
+
   const toggle = useCallback(async () => {
     if (expanded) {
       setExpanded(false);
@@ -282,7 +316,19 @@ function VersionEntry({
         setLoadingFiles(false);
       }
     }
-  }, [expanded, files, sessionId, version.versionNumber]);
+    if (!version.isHead && driftPreview === null && !loadingDrift) {
+      setLoadingDrift(true);
+      try {
+        const res = await fetch(`/api/chats/${sessionId}/versions/${version.versionNumber}/revert`);
+        const data = await res.json();
+        if (res.ok && !data.error) setDriftPreview(data);
+      } catch {
+        // best-effort, informational only
+      } finally {
+        setLoadingDrift(false);
+      }
+    }
+  }, [expanded, files, sessionId, version.versionNumber, version.isHead, driftPreview, loadingDrift]);
 
   // Deep-link jump (2026-07-17) -- see file comment #4.
   useEffect(() => {
@@ -394,6 +440,24 @@ function VersionEntry({
     }
   }, [sessionId, version.versionNumber]);
 
+  // Copy shareable deep link (2026-07-17) -- pairs with
+  // chat-page-header.tsx's `?version=N` handling above; this is the
+  // other half, letting a user actually PRODUCE that link instead of
+  // only ever consuming one someone else made.
+  const [linkCopied, setLinkCopied] = useState(false);
+  const copyLink = useCallback(async () => {
+    const url = new URL(window.location.href);
+    url.search = '';
+    url.searchParams.set('version', String(version.versionNumber));
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 1500);
+    } catch {
+      setNotice('Could not copy the link — your browser may be blocking clipboard access.');
+    }
+  }, [version.versionNumber]);
+
   const isRevert = version.revertedFromVersionNumber != null;
   // Undo-this-revert (2026-07-17) -- a revert-created version's own
   // "before" state is always exactly versionNumber - 1 (sequential
@@ -460,6 +524,13 @@ function VersionEntry({
 
         <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
+            onClick={copyLink}
+            className="text-[11px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-accent"
+            title="Copy a shareable link to this version"
+          >
+            {linkCopied ? 'Copied!' : 'Copy link'}
+          </button>
+          <button
             onClick={downloadSnapshot}
             disabled={zipping}
             className="text-[11px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-accent disabled:opacity-50"
@@ -520,6 +591,11 @@ function VersionEntry({
 
       {expanded && (
         <div className="mt-2 pl-1">
+          {!version.isHead && (loadingDrift || driftPreview) && (
+            <div className="text-[11px] text-muted-foreground/80 mb-1.5">
+              {loadingDrift && !driftPreview ? 'Checking drift from current…' : driftPreview && !driftPreview.noop ? `${driftPreview.totalChanges} file${driftPreview.totalChanges === 1 ? '' : 's'} differ from current` : 'Matches current — nothing to restore'}
+            </div>
+          )}
           {loadingFiles && <div className="text-[11px] text-muted-foreground py-1">Loading files…</div>}
           {files && files.map(f => (
             <FileRow
@@ -559,6 +635,9 @@ export function ChatVersionsTab({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [totals, setTotals] = useState<VersionTotals | null>(null);
+  const [onlyReverts, setOnlyReverts] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [search, setSearch] = useState('');
   // Debounced value actually sent to the server -- avoids firing a
   // request on every keystroke while typing a search term.
@@ -577,7 +656,10 @@ export function ChatVersionsTab({
   const refresh = useCallback(async (opts: { silent?: boolean } = {}) => {
     if (!opts.silent) setLoading(true);
     try {
-      const qs = debouncedSearch ? `?q=${encodeURIComponent(debouncedSearch)}` : '';
+      const params = new URLSearchParams();
+      if (debouncedSearch) params.set('q', debouncedSearch);
+      if (onlyReverts) params.set('onlyReverts', '1');
+      const qs = params.toString() ? `?${params.toString()}` : '';
       const res = await fetch(`/api/chats/${sessionId}/versions${qs}`);
       const data = await res.json();
       if (data.error) setError(data.error);
@@ -586,13 +668,14 @@ export function ChatVersionsTab({
         setVersions(data.versions);
         setCanRevertLive(Boolean(data.canRevertLive));
         setHasMore(Boolean(data.hasMore));
+        if (data.totals) setTotals(data.totals);
       }
     } catch {
       if (!opts.silent) setError('Could not load version history — try again in a moment.');
     } finally {
       if (!opts.silent) setLoading(false);
     }
-  }, [sessionId, debouncedSearch]);
+  }, [sessionId, debouncedSearch, onlyReverts]);
 
   useEffect(() => {
     refresh();
@@ -627,8 +710,10 @@ export function ChatVersionsTab({
     setLoadingMore(true);
     try {
       const oldest = versions[versions.length - 1].versionNumber;
-      const qs = debouncedSearch ? `&q=${encodeURIComponent(debouncedSearch)}` : '';
-      const res = await fetch(`/api/chats/${sessionId}/versions?before=${oldest}${qs}`);
+      const params = new URLSearchParams({ before: String(oldest) });
+      if (debouncedSearch) params.set('q', debouncedSearch);
+      if (onlyReverts) params.set('onlyReverts', '1');
+      const res = await fetch(`/api/chats/${sessionId}/versions?${params.toString()}`);
       const data = await res.json();
       if (!data.error) {
         setVersions(prev => [...(prev ?? []), ...data.versions]);
@@ -637,18 +722,60 @@ export function ChatVersionsTab({
     } finally {
       setLoadingMore(false);
     }
-  }, [sessionId, versions, debouncedSearch]);
+  }, [sessionId, versions, debouncedSearch, onlyReverts]);
+
+  // Export full history (2026-07-17) -- see export/route.ts. A plain GET
+  // download, not JSON-fetched-then-blobbed like the per-version zip,
+  // since there's no auth-sensitive post-processing needed beyond the
+  // route's own session check, which a plain navigation still carries
+  // cookies for -- but using fetch+blob here too keeps error handling
+  // consistent with downloadSnapshot elsewhere in this file.
+  const exportHistory = useCallback(async () => {
+    setExporting(true);
+    try {
+      const res = await fetch(`/api/chats/${sessionId}/versions/export`);
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `history-${sessionId.slice(0, 8)}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  }, [sessionId]);
 
   return (
     <div className="flex flex-col h-full">
       <div className="h-9 border-b border-border px-3 flex items-center justify-between shrink-0">
         <span className="text-xs text-muted-foreground">{versions ? `${versions.length}${hasMore ? '+' : ''} version${versions.length === 1 ? '' : 's'}` : 'Versions'}</span>
-        <button onClick={() => refresh()} disabled={loading} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent disabled:opacity-50">
-          {loading ? 'Refreshing…' : 'Refresh'}
-        </button>
+        <div className="flex items-center gap-1">
+          <button onClick={exportHistory} disabled={exporting} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent disabled:opacity-50" title="Download this chat's full version history as a Markdown file">
+            {exporting ? '…' : 'Export'}
+          </button>
+          <button onClick={() => refresh()} disabled={loading} className="text-xs text-muted-foreground hover:text-foreground px-2 py-0.5 rounded hover:bg-accent disabled:opacity-50">
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
-      <div className="px-2 pt-1.5 pb-1 shrink-0 border-b border-border">
+      {/* Aggregate stats (2026-07-17) -- always over the FULL chat
+         history, unaffected by pagination/search, see route.ts's
+         dedicated aggregate query. */}
+      {totals && totals.versions > 0 && (
+        <div className="px-3 py-1 text-[11px] text-muted-foreground border-b border-border shrink-0 flex items-center gap-2.5 flex-wrap">
+          <span>{totals.versions} total</span>
+          {totals.linesAdded > 0 && <span className="font-mono text-emerald-600 dark:text-emerald-400">+{totals.linesAdded}</span>}
+          {totals.linesRemoved > 0 && <span className="font-mono text-red-600 dark:text-red-400">-{totals.linesRemoved}</span>}
+          {totals.reverts > 0 && <span>{totals.reverts} revert{totals.reverts === 1 ? '' : 's'}</span>}
+        </div>
+      )}
+
+      <div className="px-2 pt-1.5 pb-1 shrink-0 border-b border-border flex items-center gap-1.5">
         <input
           type="text"
           value={search}
@@ -657,8 +784,15 @@ export function ChatVersionsTab({
             setPendingJump(null);
           }}
           placeholder="Search by label, version #, or file name…"
-          className="w-full text-xs px-2 py-1 rounded-md border border-border bg-background placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/40"
+          className="flex-1 text-xs px-2 py-1 rounded-md border border-border bg-background placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/40"
         />
+        <button
+          onClick={() => setOnlyReverts(v => !v)}
+          className={`text-[11px] px-2 py-1 rounded-md border shrink-0 ${onlyReverts ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400' : 'border-border text-muted-foreground hover:text-foreground hover:bg-accent'}`}
+          title="Show only versions created by a revert"
+        >
+          Reverts
+        </button>
       </div>
 
       {versions && !canRevertLive && (
@@ -680,16 +814,30 @@ export function ChatVersionsTab({
         {versions && versions.length > 0 && (
           <div className="relative">
             <div className="absolute top-1 bottom-1 left-[5px] w-px bg-border" />
-            {versions.map(v => (
-              <VersionEntry
-                key={v.versionNumber}
-                sessionId={sessionId}
-                version={v}
-                canRevertLive={canRevertLive}
-                onReverted={() => refresh()}
-                autoOpen={pendingJump === v.versionNumber}
-              />
-            ))}
+            {versions.map((v, i) => {
+              // Date-grouped headers (2026-07-17) -- "Today" / "Yesterday"
+              // / a short date whenever this entry's day differs from the
+              // previous (newer) one in the list, so a long history reads
+              // as scannable day-chunks instead of one undivided scroll.
+              const prev = i > 0 ? versions[i - 1] : null;
+              const showDateHeader = !prev || dayLabel(prev.createdAt) !== dayLabel(v.createdAt);
+              return (
+                <div key={v.versionNumber}>
+                  {showDateHeader && (
+                    <div className="pl-5 pb-1.5 pt-1 first:pt-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                      {dayLabel(v.createdAt)}
+                    </div>
+                  )}
+                  <VersionEntry
+                    sessionId={sessionId}
+                    version={v}
+                    canRevertLive={canRevertLive}
+                    onReverted={() => refresh()}
+                    autoOpen={pendingJump === v.versionNumber}
+                  />
+                </div>
+              );
+            })}
           </div>
         )}
 
