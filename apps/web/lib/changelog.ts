@@ -55,6 +55,15 @@ export const CHANGELOG: ChangelogEntry[] = [
   },
   {
     date: '2026-07-17',
+    title: 'Fixed GitHub Connect push permissions',
+    items: [
+      'Fixed \'git push\' via a connected GitHub account failing with a misleading 403 even when the account had write access -- the git URL now uses the required "x-access-token" username for GitHub App tokens instead of the token alone.',
+      'Fixed newly-connected GitHub accounts ending up as identity-only (sign-in only, no actual repo access) -- connecting GitHub now requests the app-installation step (repo picker + write permission) up front.',
+      'If you connected GitHub before this fix, reconnect it once from Settings > Integrations to pick up real repo write access.',
+    ],
+  },
+  {
+    date: '2026-07-17',
     title: 'History & revert improvements',
     items: [
       'Single-file revert -- roll back just one changed file instead of a whole version.',

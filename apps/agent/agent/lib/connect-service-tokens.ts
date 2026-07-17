@@ -32,7 +32,7 @@
  * already pasted a token, or who wants to use a different account than
  * the one they OAuth'd with, isn't broken.
  */
-import { getToken, startAuthorization, revokeToken, UserAuthorizationRequiredError } from '@vercel/connect';
+import { getToken, startAuthorization, revokeToken, UserAuthorizationRequiredError, ConnectorInstallationRequiredError } from '@vercel/connect';
 import { getCredential } from './credential-vault.js';
 
 export const CONNECT_CONNECTORS: Record<string, string> = {
@@ -84,9 +84,20 @@ export async function startConnectAuthorization(userId: string, service: string,
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) throw new Error(`No Vercel Connect connector configured for "${service}".`);
   const scopes = CONNECT_DEFAULT_SCOPES[service];
+  // GitHub specifically needs to go through the App INSTALLATION step (repo picker + permission
+  // grant), not just OAuth sign-in -- see file header comment. Requesting it here means the consent
+  // URL Connect returns takes the user through "Install & Authorize" instead of a bare "Authorize".
+  const authorizationDetails =
+    service === 'github'
+      ? ([{ type: 'github_app_installation' as const, permissions: ['contents'], repositories: 'all' as const }])
+      : undefined;
   const { url } = await startAuthorization(
     connector,
-    { subject: { type: 'user', id: userId }, ...(scopes ? { scopes } : {}) },
+    {
+      subject: { type: 'user', id: userId },
+      ...(scopes ? { scopes } : {}),
+      ...(authorizationDetails ? { authorizationDetails } : {}),
+    },
     { callbackUrl }
   );
   return url;
@@ -133,6 +144,17 @@ export async function resolveServiceCredential(
     const token = await getToken(connector, { subject: { type: 'user', id: userId } });
     return { value: token, source: 'connect' };
   } catch (e) {
+    if (e instanceof ConnectorInstallationRequiredError) {
+      return {
+        error:
+          `The user connected their ${service} identity but never completed the app-installation step ` +
+          `(picking repos + granting write access), so this token has no actual repo permissions -- any ` +
+          `push/write will 403 regardless of what we request. Ask them to go to Settings > Integrations ` +
+          `and click "Connect ${service}" again to redo it through the install flow (it now requests the ` +
+          `installation grant, not just sign-in).`,
+        needsConnect: true,
+      };
+    }
     if (e instanceof UserAuthorizationRequiredError) {
       return {
         error: `The user hasn't connected their ${service} account yet. Ask them to connect it in Settings > Integrations (there's a real "Connect ${service}" button there now — no token needed).`,

@@ -43,16 +43,22 @@ export const injectCredentialTool = {
     'environment variable, without the value ever being written to disk, persisted for later commands, ' +
     'or shown to you. Use this instead of asking the user to paste a secret into a shell command, and ' +
     'instead of save_credential + a separate bash call. Reference the variable by the `envVarName` you ' +
-    'choose inside `command` (e.g. envVarName "GITHUB_TOKEN", command \'git push https://$GITHUB_TOKEN@' +
-    "github.com/user/repo.git'). This only affects this single command — it does NOT persist for any " +
-    'later bash call, by design.',
+    'choose inside `command` (e.g. envVarName "GITHUB_TOKEN", command \'git push https://x-access-token:' +
+    "$GITHUB_TOKEN@github.com/user/repo.git'). IMPORTANT for github specifically: the credential is a " +
+    'GitHub App user-access token (ghu_...), which git will silently reject with a 403 "Permission denied" ' +
+    'unless the URL username is the literal string "x-access-token" — NOT the token itself as the username ' +
+    '(i.e. use https://x-access-token:$GITHUB_TOKEN@..., never https://$GITHUB_TOKEN@...). This only ' +
+    'affects this single command — it does NOT persist for any later bash call, by design.',
   inputSchema: z.object({
     service: z.string().describe('Which saved credential to use, e.g. "github", "vercel"'),
     label: z.string().optional().describe('Only needed if more than one credential is saved for this service. Defaults to "default".'),
     envVarName: z.string().describe('The environment variable name to expose it as for this one command, e.g. "GITHUB_TOKEN"'),
     command: z.string().describe(
-      'The single shell command to run with that env var set, e.g. \'git push https://$GITHUB_TOKEN@github.com/user/repo.git\'. ' +
-      'Reference the credential only via $envVarName — never type the literal secret value.'
+      'The single shell command to run with that env var set. For github pushes/clones use the literal ' +
+      'username "x-access-token", e.g. \'git push https://x-access-token:$GITHUB_TOKEN@github.com/user/repo.git\' ' +
+      '— using the token alone as the username (no "x-access-token:" prefix) returns a misleading 403 ' +
+      'Permission-denied even when the underlying grant has write access. Reference the credential only ' +
+      'via $envVarName — never type the literal secret value.'
     ),
   }),
   async execute(
