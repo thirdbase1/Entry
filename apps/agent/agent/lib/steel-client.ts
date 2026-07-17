@@ -18,6 +18,17 @@ import { chromium, type Browser } from 'playwright-core';
  * whole SDK for that. `playwright-core` (already added as a dependency)
  * IS needed since driving the actual remote browser requires a real CDP
  * client, not just HTTP.
+ *
+ * UPDATED (2026-07-16, live keys provisioned -- verified directly against
+ * Steel's current docs before shipping): the live-embed field is
+ * `debugUrl`, not `sessionViewerUrl`. Steel's docs are explicit that
+ * `debugUrl` is the new WebRTC-based headful live view ("low-latency,
+ * high-fidelity... 25fps") -- exactly the "no latency issues" the user
+ * asked for -- while `sessionViewerUrl` (still returned, still a valid
+ * field on the Session object, kept here only as a fallback) is the
+ * older viewer this replaced. `?interactive=false` is appended so the
+ * embed is watch-only -- the agent drives it, not whoever's looking at
+ * the chat.
  */
 
 const BASE_URL = 'https://api.steel.dev/v1';
@@ -30,7 +41,8 @@ function apiKey(): string {
 
 export interface SteelSession {
   id: string;
-  sessionViewerUrl: string | null;
+  /** The low-latency WebRTC live-embed URL (Steel's `debugUrl`, falling back to `sessionViewerUrl`), `?interactive=false` already appended. */
+  liveUrl: string | null;
   websocketUrl: string;
 }
 
@@ -57,9 +69,13 @@ export async function createSteelSession(): Promise<SteelSession> {
   }
   const websocketUrl = String(json.websocketUrl ?? '');
   if (!websocketUrl) throw new Error('Steel session response was missing websocketUrl.');
+  const rawLiveUrl =
+    (typeof json.debugUrl === 'string' && json.debugUrl) ||
+    (typeof json.sessionViewerUrl === 'string' && json.sessionViewerUrl) ||
+    null;
   return {
     id: String(json.id ?? ''),
-    sessionViewerUrl: typeof json.sessionViewerUrl === 'string' ? json.sessionViewerUrl : null,
+    liveUrl: rawLiveUrl ? `${rawLiveUrl}${rawLiveUrl.includes('?') ? '&' : '?'}interactive=false` : null,
     websocketUrl,
   };
 }

@@ -34,7 +34,7 @@ import { createSteelSession, connectSteelBrowser } from '../steel-client.js';
  *     used. One lane (slot 1, STEEL_API_KEY).
  *
  * Both expose a genuine embeddable live view (Browser Use's `liveUrl`,
- * Steel's `sessionViewerUrl`) -- persisted to ChatBrowserSession the
+ * Steel's `debugUrl`, see steel-client.ts) -- persisted to ChatBrowserSession the
  * moment a session is created, which is what lets the Browser tab in the
  * chat UI show the live iframe independent of this tool call's own
  * lifetime. Steel's `websocketUrl` (needed to reattach to the same live
@@ -341,17 +341,17 @@ export const browserUse = {
 
     // --- Steel lane ---
     let websocketUrl: string;
-    let sessionViewerUrl: string | null;
+    let liveUrl: string | null;
 
     if (row) {
       const meta = (row.metadata ?? {}) as { websocketUrl?: string };
       if (!meta.websocketUrl) throw new Error(`Browser session "${row.id}" is missing its Steel connection info -- start a new session instead.`);
       websocketUrl = meta.websocketUrl;
-      sessionViewerUrl = row.liveUrl;
+      liveUrl = row.liveUrl;
     } else {
       const session = await createSteelSession();
       websocketUrl = session.websocketUrl;
-      sessionViewerUrl = session.sessionViewerUrl;
+      liveUrl = session.liveUrl;
       row = await prisma.chatBrowserSession.create({
         data: {
           chatId,
@@ -361,7 +361,7 @@ export const browserUse = {
           metadata: { websocketUrl },
           task,
           status: 'running',
-          liveUrl: sessionViewerUrl,
+          liveUrl,
         },
       });
     }
