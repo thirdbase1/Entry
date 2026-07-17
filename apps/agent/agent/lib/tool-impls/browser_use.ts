@@ -229,23 +229,55 @@ const SteelActionSchema = z.object({
   success: z.boolean().optional().describe('When done=true: whether the task actually succeeded.'),
   summary: z.string().optional().describe('When done=true: concise markdown summary of the outcome, for the end user.'),
   stepDescription: z.string().describe('One short sentence describing this step (shown in the UI).'),
-  action: z.enum(['goto', 'click', 'fill', 'press', 'scroll_down', 'scroll_up', 'wait_ms']).optional().describe('The single next action. Omit only when done=true.'),
+  action: z
+    .enum(['goto', 'click', 'fill', 'press', 'scroll_down', 'scroll_up', 'wait_ms', 'switch_tab'])
+    .optional()
+    .describe('The single next action. Omit only when done=true.'),
   selector: z
     .string()
     .optional()
     .describe('Playwright locator string for click/fill (e.g. "text=Submit", "role=button[name=\'Log in\']", "css=#email"). Required for click/fill.'),
-  value: z.string().optional().describe('Payload: URL for goto, text to fill, key name for press, ms amount for scroll/wait_ms.'),
+  value: z
+    .string()
+    .optional()
+    .describe('Payload: URL for goto, text to fill, key name for press, ms amount for scroll/wait_ms, tab index (0-based, newest last) for switch_tab.'),
 });
 type SteelAction = z.infer<typeof SteelActionSchema>;
 
-async function decideSteelAction(params: { llmModel: Parameters<typeof generateObject>[0]['model']; task: string; history: string[]; pageText: string; url: string }) {
+/**
+ * UPDATED (2026-07-17, "improve the whole browser to be better x3"):
+ * decisions are now VISION-based (a live screenshot is sent alongside the
+ * text) instead of text-only. Text-only decisions were genuinely brittle
+ * -- no sense of layout, visibility, what's actually clickable vs. just
+ * present in the DOM, dismissible overlays/cookie banners sitting on top
+ * of the target element, etc. -- exactly the kind of thing a screenshot
+ * makes obvious at a glance. Deliberately pinned to an explicit
+ * vision-capable Gateway alias (openai/gpt-4o-mini) for this call rather
+ * than the shared fast-default resolver in gateway.ts, since that
+ * default (claude-3.5-haiku) does NOT support image input at all --
+ * confirmed against Anthropic's own model card before wiring this up, to
+ * avoid silently shipping a call that 400s on every single image it's
+ * given. Still honors ctx.byokModel when set (see browser_use.ts's call
+ * site), so a user's own configured model is used first if they have one.
+ */
+async function decideSteelAction(params: {
+  llmModel: Parameters<typeof generateObject>[0]['model'];
+  task: string;
+  history: string[];
+  pageText: string;
+  url: string;
+  tabCount: number;
+  screenshotBase64: string;
+}) {
   const MAX_ATTEMPTS = 3;
   let lastBadText = '';
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const base =
       `Task: ${params.task}\n\nSteps so far (${params.history.length}): ${params.history.join('; ') || '(none yet)'}\n\n` +
-      `Current URL: ${params.url}\nVisible page text (truncated):\n${params.pageText.slice(0, 4000)}`;
-    const content =
+      `Current URL: ${params.url}\nOpen tabs: ${params.tabCount}\nVisible page text (truncated):\n${params.pageText.slice(0, 4000)}\n\n` +
+      'A screenshot of the current page state is attached -- use it to judge what is actually visible/clickable ' +
+      '(watch for cookie banners, modals, or popups covering the target) rather than relying on the text alone.';
+    const textContent =
       attempt === 0
         ? base
         : `${base}\n\nIMPORTANT: your previous response was not valid JSON matching the schema. Respond with ONLY strict JSON, no markdown fences, no commentary.${lastBadText ? `\n\nYour last (invalid) response: ${lastBadText.slice(0, 500)}` : ''}`;
@@ -255,11 +287,21 @@ async function decideSteelAction(params: { llmModel: Parameters<typeof generateO
         schema: SteelActionSchema,
         system:
           'You control a real remote web browser one action at a time via Playwright locators. You are given the task, ' +
-          'steps taken so far, the current URL, and the visible text of the current page. Decide the SINGLE next action ' +
-          'needed to make progress, using a Playwright locator string for selector (text=, role=, css=, id=). Only set ' +
-          'done=true once the task is genuinely complete, or cannot be completed after reasonable attempts (then ' +
-          'success=false and explain why).',
-        messages: [{ role: 'user', content }],
+          'steps taken so far, the current URL, number of open tabs, the visible text of the current page, AND a screenshot ' +
+          'of what the page actually looks like right now. Decide the SINGLE next action needed to make progress, using a ' +
+          'Playwright locator string for selector (text=, role=, css=, id=). If a new tab opened (e.g. after clicking a link ' +
+          'that opens target=_blank) and open tabs > 1, use switch_tab with the tab index to move to the new tab before ' +
+          'continuing. Only set done=true once the task is genuinely complete, or cannot be completed after reasonable ' +
+          'attempts (then success=false and explain why).',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: textContent },
+              { type: 'file', data: params.screenshotBase64, mediaType: 'image/png' },
+            ],
+          },
+        ],
       });
       return { ok: true as const, action: object };
     } catch (err) {
@@ -288,16 +330,58 @@ async function runSteelLane(params: {
   let steps = params.priorSteps;
   try {
     const context = browser.contexts()[0];
-    const page = context.pages()[0] ?? (await context.newPage());
+    // Track every tab as it opens (e.g. target=_blank links) instead of
+    // only ever driving the tab the session started on -- popups used to
+    // just get silently ignored since `page` was captured once and never
+    // updated, so a task that opened a new tab would stall watching a
+    // background page while the actual content loaded somewhere else.
+    let tabs: import('playwright-core').Page[] = [...context.pages()];
+    if (tabs.length === 0) tabs = [await context.newPage()];
+    let activeIdx = tabs.length - 1;
+    context.on('page', newPage => {
+      tabs.push(newPage);
+      activeIdx = tabs.length - 1;
+    });
+    const currentPage = () => tabs[activeIdx] ?? tabs[tabs.length - 1];
+
     const history: string[] = [];
     let outcome: { done: boolean; success?: boolean; summary?: string } = { done: false };
 
+    async function captureScreenshotBase64(): Promise<string> {
+      try {
+        const buf = await currentPage().screenshot({ timeout: 5000 });
+        return buf.toString('base64');
+      } catch {
+        return '';
+      }
+    }
+
+    async function captureAndUploadScreenshot(): Promise<string | null> {
+      try {
+        const buf = await currentPage().screenshot({ timeout: 5000 });
+        const blob = await put(`browser-steel/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`, buf, { access: 'public', contentType: 'image/png' });
+        return blob.url;
+      } catch {
+        return null;
+      }
+    }
+
+    let screenshotBase64 = await captureScreenshotBase64();
+
     for (let i = 0; i < MAX_STEEL_STEPS; i++) {
-      const pageText = await page
+      const pageText = await currentPage()
         .locator('body')
         .innerText({ timeout: 5000 })
         .catch(() => '');
-      const decision = await decideSteelAction({ llmModel: params.llmModel, task: params.task, history, pageText, url: page.url() });
+      const decision = await decideSteelAction({
+        llmModel: params.llmModel,
+        task: params.task,
+        history,
+        pageText,
+        url: currentPage().url(),
+        tabCount: tabs.length,
+        screenshotBase64,
+      });
       if (!decision.ok) {
         outcome = { done: true, success: false, summary: `Browser automation stopped: the controlling model kept returning invalid responses (${decision.reason}).` };
         steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
@@ -306,9 +390,10 @@ async function runSteelLane(params: {
       }
       const next: SteelAction = decision.action;
       if (next.done) {
+        const finalShotUrl = await captureAndUploadScreenshot();
         outcome = { done: true, success: next.success, summary: next.summary };
         steps = appendSteps(steps, [
-          { role: 'ai', summary: next.summary || (next.success ? 'Task completed.' : 'Task did not complete.'), screenshotUrl: null, at: new Date().toISOString() },
+          { role: 'ai', summary: next.summary || (next.success ? 'Task completed.' : 'Task did not complete.'), screenshotUrl: finalShotUrl, at: new Date().toISOString() },
         ]);
         await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
         break;
@@ -317,26 +402,47 @@ async function runSteelLane(params: {
       try {
         switch (next.action) {
           case 'goto':
-            if (next.value) await page.goto(next.value, { waitUntil: 'domcontentloaded', timeout: 20000 });
+            if (next.value) await currentPage().goto(next.value, { waitUntil: 'domcontentloaded', timeout: 20000 });
             break;
-          case 'click':
-            if (next.selector) await page.locator(next.selector).first().click({ timeout: 8000 });
+          case 'click': {
+            if (next.selector) {
+              // Scroll-into-view-then-retry once: the single most common
+              // cause of a click failing outright wasn't a bad selector,
+              // it was the element existing but sitting off-screen or
+              // under a sticky header/overlay -- worth one cheap retry
+              // before giving up and reporting the step as failed.
+              const locator = currentPage().locator(next.selector).first();
+              try {
+                await locator.click({ timeout: 8000 });
+              } catch (firstErr) {
+                await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+                await locator.click({ timeout: 5000, force: true }).catch(() => {
+                  throw firstErr;
+                });
+              }
+            }
             break;
+          }
           case 'fill':
-            if (next.selector && next.value !== undefined) await page.locator(next.selector).first().fill(next.value, { timeout: 8000 });
+            if (next.selector && next.value !== undefined) await currentPage().locator(next.selector).first().fill(next.value, { timeout: 8000 });
             break;
           case 'press':
-            if (next.value) await page.keyboard.press(next.value);
+            if (next.value) await currentPage().keyboard.press(next.value);
             break;
           case 'scroll_down':
-            await page.mouse.wheel(0, Number(next.value) || 500);
+            await currentPage().mouse.wheel(0, Number(next.value) || 500);
             break;
           case 'scroll_up':
-            await page.mouse.wheel(0, -(Number(next.value) || 500));
+            await currentPage().mouse.wheel(0, -(Number(next.value) || 500));
             break;
           case 'wait_ms':
-            await page.waitForTimeout(Number(next.value) || 1000);
+            await currentPage().waitForTimeout(Number(next.value) || 1000);
             break;
+          case 'switch_tab': {
+            const idx = Number(next.value);
+            if (Number.isInteger(idx) && idx >= 0 && idx < tabs.length) activeIdx = idx;
+            break;
+          }
         }
         history.push(next.stepDescription);
         stepText = next.stepDescription;
@@ -345,11 +451,21 @@ async function runSteelLane(params: {
         history.push(failText);
         stepText = failText;
       }
+
+      // Screenshot AFTER the action so both (a) this step's entry in the
+      // live feed shows the resulting page state, matching the visual
+      // parity Browser Use's own message stream already had, and (b) the
+      // very same capture is reused as the NEXT iteration's "what does
+      // the page look like right now" input -- one screenshot per loop
+      // tick, not two.
+      const stepShotUrl = await captureAndUploadScreenshot();
+      screenshotBase64 = await captureScreenshotBase64();
+
       // Persisted live, one entry per action, so the Browser tab's step
       // feed updates in near-real-time while this loop is still running
       // (previously the whole steps history only ever showed up once the
       // entire tool call had already finished).
-      steps = appendSteps(steps, [{ role: 'ai', summary: stepText, screenshotUrl: null, at: new Date().toISOString() }]);
+      steps = appendSteps(steps, [{ role: 'ai', summary: stepText, screenshotUrl: stepShotUrl, at: new Date().toISOString() }]);
       await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
 
       if (i === MAX_STEEL_STEPS - 1 && !outcome.done) {
@@ -359,7 +475,7 @@ async function runSteelLane(params: {
 
     let screenshotUrl: string | null = null;
     try {
-      const buffer = await page.screenshot();
+      const buffer = await currentPage().screenshot();
       const blob = await put(`browser-steel/${Date.now()}.png`, buffer, { access: 'public', contentType: 'image/png' });
       screenshotUrl = blob.url;
     } catch {
@@ -531,7 +647,9 @@ export const browserUse = {
       })) as SessionRow;
     }
 
-    const llmModel = await model(undefined, ctx?.byokModel);
+    // Pinned to a vision-capable alias -- see decideSteelAction's doc
+    // comment for why the shared fast-default resolver can't be used here.
+    const llmModel = await model('openai/gpt-4o-mini', ctx?.byokModel);
     const laneResult = await runSteelLane({ task, websocketUrl, llmModel, rowId: row.id, priorSteps: row.steps });
 
     row = (await prisma.chatBrowserSession.update({
