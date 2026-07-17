@@ -57,6 +57,13 @@ const nextConfig: NextConfig = {
   // anything). Capping to 1 worker serializes page-data collection —
   // slower, but bounded, predictable memory use that fits the box.
   experimental: {
+    // NOTE: trustHostHeader is NOT settable here -- next/dist/build/index.js
+    // bakes `experimental.trustHostHeader` into the standalone server.js's
+    // embedded runtime config straight from ci-info's `hasNextSupport`
+    // (NOW_BUILDER env var), unconditionally overriding whatever this
+    // config says. See scripts/build-vercel-output.sh's NOW_BUILDER=1 for
+    // the actual fix -- that's the one that matters, this comment is just
+    // here so nobody re-adds a dead `trustHostHeader: true` line here again.
     cpus: 1,
     // Switched from child_process forking (workerThreads: false) to
     // worker_threads (true): a real `vercel build`/`vercel --prod` run

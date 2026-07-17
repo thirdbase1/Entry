@@ -15,6 +15,22 @@
 # touch env vars).
 set -euo pipefail
 
+# NOW_BUILDER=1 tells Next's own ci-info detection (next/dist/server/ci-info.js:
+# `isZeitNow = !!process.env.NOW_BUILDER`) that this build has genuine Vercel
+# platform support -- which is actually true, just via our own hand-assembled
+# Build Output API v3 path instead of Vercel's build orchestrator. Without
+# this, next/dist/build/index.js bakes `experimental.trustHostHeader: false`
+# into the standalone server.js's embedded config UNCONDITIONALLY (ignoring
+# whatever next.config.ts's own experimental block says -- confirmed by
+# reading build/index.js's minimal-config assembly directly), which makes
+# every route handler's req.nextUrl.origin / req.url resolve to Next's
+# internal placeholder base ('http://n') instead of the real domain at
+# runtime, since our custom vercel-launcher.js hands NextServer's request
+# handler a raw req without ever setting fetchHostname/port either. Setting
+# this before the build (not just at runtime) is required -- it's baked in
+# at build time, not read per-request.
+export NOW_BUILDER=1
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
