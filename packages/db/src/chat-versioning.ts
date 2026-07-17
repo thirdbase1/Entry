@@ -341,6 +341,84 @@ export async function captureVersionFromSandboxDiff(
  * show up immediately -- the version is still fully there in the History
  * page / diff API, never silently lost.
  */
+/**
+ * REAL BUG FIXED (2026-07-16, user-reported: "the sandbox had been wiped
+ * again between turns... the file was gone entirely... had to recreate
+ * it" + separately "the whole versioning system is not working"). Root
+ * cause, confirmed by reading both sandbox-creation call sites end to
+ * end: E2B sandboxes have no persistent disk across an eviction/kill
+ * (idle timeout, org concurrency limit, a genuinely wedged VM, anything)
+ * -- `Sandbox.connect(existingId)` just throws, and BOTH the eve-default
+ * path (e2b-backend.ts's `create()`) and the BYOK path
+ * (direct-chat/sandbox.ts's `getSandboxForChat`) silently fell back to
+ * `Sandbox.create()` from the bare shared template with ZERO restoration
+ * of whatever files were actually there before -- no error surfaced
+ * anywhere, so it looked exactly like "the agent randomly deleted my
+ * files" from the user's side. It also silently broke versioning: a
+ * fresh sandbox has no git repo, so captureVersionFromSandboxDiff just
+ * re-initializes a brand new empty baseline and reports nothing changed,
+ * even though the whole project just vanished.
+ *
+ * Fix: this project's own ChatVersionFile rows are ALREADY a complete,
+ * durable, full-content snapshot of every tracked path as of the latest
+ * version -- exactly what's needed to rebuild a blank sandbox's
+ * filesystem. Call this immediately after creating any fallback/fresh
+ * sandbox (both call sites, see their own comments) so an eviction costs
+ * a few seconds of re-materializing files instead of losing them. Then
+ * re-initializes the git baseline against the restored state so the next
+ * captureVersionFromSandboxDiff call diffs from here, not from empty (an
+ * empty baseline would otherwise re-report every restored file as a
+ * brand new "added" change on the very next turn).
+ *
+ * Best-effort, same philosophy as everything else in this file: a
+ * restore failure here should never throw and break the sandbox handoff
+ * itself -- worst case is the same pre-fix behavior (blank sandbox), not
+ * a new failure mode.
+ */
+export async function restoreLatestFilesToSandbox(chatId: string, sandbox: VersionCaptureSandbox): Promise<number> {
+  try {
+    const latest = await prisma.$queryRaw<Array<{ path: string; change_type: string; content: string | null }>>`
+      SELECT DISTINCT ON (path) path, change_type, content
+      FROM chat_version_files
+      WHERE chat_id = ${chatId}
+      ORDER BY path, version_number DESC
+    `;
+    const live = latest.filter(r => r.change_type !== 'deleted' && r.content != null);
+    if (live.length === 0) return 0;
+
+    // Batched into chunks (not one file per round trip, not one giant
+    // command) -- keeps this fast (the actual "agent is slow" complaint
+    // elsewhere) while staying well under any single-command length
+    // limit even for a project with hundreds of tracked files.
+    const CHUNK_SIZE = 25;
+    for (let i = 0; i < live.length; i += CHUNK_SIZE) {
+      const chunk = live.slice(i, i + CHUNK_SIZE);
+      const cmds = chunk.map(file => {
+        const b64 = Buffer.from(file.content ?? '', 'utf8').toString('base64');
+        const safePath = JSON.stringify(file.path);
+        return `mkdir -p "$(dirname ${safePath})" && printf '%s' ${JSON.stringify(b64)} | base64 -d > ${safePath}`;
+      });
+      await sandbox.run({ command: cmds.join(' && ') });
+    }
+
+    await sandbox.run({
+      command: [
+        'git init -q',
+        'git config user.email "agent@entry.internal"',
+        'git config user.name "Entry Agent"',
+        `printf '%s' ${JSON.stringify(GIT_IGNORE_CONTENTS)} > .gitignore`,
+        'git add -A',
+        'git commit -q -m "restored baseline" --allow-empty',
+      ].join(' && '),
+    });
+
+    return live.length;
+  } catch (err) {
+    console.error('[chat-versioning] restoreLatestFilesToSandbox failed', chatId, err);
+    return 0;
+  }
+}
+
 async function appendVersionCardMessage(
   chatId: string,
   info: { versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number; revertedFromVersionNumber?: number },

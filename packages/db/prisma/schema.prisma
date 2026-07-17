@@ -665,6 +665,14 @@ model ChatPreview {
   port         Int?
   status       String   @default("stopped") @db.VarChar // starting | live | stopped | error
   errorMessage String?  @map("error_message") @db.Text
+  // Last command the bash tool ran that looked like it started a
+  // backgrounded long-running process (`nohup ... &` / trailing `&` --
+  // see lib/tool-impls/bash.ts's own capture comment). Lets a "Restart"
+  // click replay the SAME dev server command on the SAME sandbox instead
+  // of needing a fresh sandbox to have something to run at all — see
+  // restartSandboxForChat's file comment for the real bug this closes
+  // (2026-07-16: restart was destroying the entire sandbox filesystem).
+  lastServeCommand String? @map("last_serve_command") @db.Text
   updatedAt    DateTime @updatedAt @map("updated_at")
 
   @@map("chat_previews")
@@ -725,6 +733,49 @@ model ChatSandbox {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("chat_sandboxes")
+}
+
+// Cloud browser sessions (2026-07-16, explicit user request: "agent uses a
+// real cloud browser, not the sandbox; I want to SEE it live; the browser
+// should stay active; agent can stop/start it") -- backed by Browser Use
+// Cloud (browser-use.com), not the old agent-browser-in-sandbox approach
+// (see browser_use.ts's own file comment for why that never had a live
+// view at all, only after-the-fact screenshots).
+//
+// Two BROWSER_USE_API_KEY[_2] secrets are configured specifically so two
+// sessions can run genuinely in parallel per chat (explicit user request:
+// "use both at the same time so it can work in parallel") -- `slot`
+// records which key/quota a given row is using. Rows are never deleted on
+// stop, only status-flipped, so the Browser tab can still show "last
+// session" state (final output, recording) after it ends -- same
+// history-over-deletion pattern as ChatVersion below.
+model ChatBrowserSession {
+  id                 String    @id @default(uuid()) @db.VarChar
+  chatId             String    @map("chat_id") @db.VarChar
+  // "browser_use" (Browser Use Cloud, agent-driven) or "steel" (raw CDP
+  // browser, driven by our own decide/act loop -- see browser_use.ts's
+  // steel branch). Added 2026-07-16 when a real Steel key arrived
+  // alongside the two Browser Use keys, extending the original 2-slot
+  // "which BROWSER_USE_API_KEY" model to a 3-lane "provider + slot" one
+  // so all three keys can genuinely run in parallel per chat.
+  provider           String    @default("browser_use") @db.VarChar
+  slot               Int // which key within `provider` this session used (1/2 for browser_use, 1 for steel)
+  providerSessionId  String    @map("provider_session_id") @db.VarChar
+  // Provider-specific extra data needed to reconnect/manage a session --
+  // currently just Steel's websocketUrl (needed to reattach via
+  // Playwright connectOverCDP on a follow-up call; Browser Use Cloud
+  // needs nothing extra here since its REST API is stateless per call).
+  metadata           Json?     @map("metadata")
+  task               String    @db.Text
+  status             String    @default("running") @db.VarChar // running | idle | stopped | failed
+  liveUrl            String?   @map("live_url") @db.VarChar
+  output             String?   @db.Text
+  isTaskSuccessful   Boolean?  @map("is_task_successful")
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([chatId])
+  @@map("chat_browser_sessions")
 }
 
 // Custom, app-native version history (2026-07-16, explicit user request:

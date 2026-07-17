@@ -43,6 +43,7 @@ import type {
  * eve/dist/src/shared/sandbox-backend.d.ts (`{ readonly reused: boolean }`). */
 type SandboxBackendPrewarmResult = { readonly reused: boolean };
 import { prisma } from '@entry/db';
+import { restoreLatestFilesToSandbox } from '@entry/db/chat-versioning';
 
 export interface E2BBackendOptions {
   /** Falls back to process.env.E2B_API_KEY. */
@@ -399,14 +400,32 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
       const existingSandboxId = (input.existingMetadata?.sandboxId as string | undefined) ?? undefined;
 
       let sandbox: E2BSandbox;
+      let restoredFromEviction = false;
       if (existingSandboxId) {
         try {
           sandbox = await withRetry('Sandbox.connect', () => E2BSandbox.connect(existingSandboxId, { apiKey }));
         } catch {
           sandbox = await createFromTemplate(input, apiKey, options);
+          restoredFromEviction = true;
         }
       } else {
         sandbox = await createFromTemplate(input, apiKey, options);
+      }
+
+      // See chat-versioning.ts's restoreLatestFilesToSandbox for the full
+      // bug this closes ("sandbox wiped between turns" / files gone
+      // after an eviction). `tags.sessionId` is the real chat/session id
+      // (confirmed against eve's own context/providers/sandbox.js — same
+      // value ctx.session.id resolves to everywhere else), always set
+      // regardless of which branch above ran.
+      const chatIdForRestore = input.tags?.sessionId;
+      if (restoredFromEviction && chatIdForRestore) {
+        await restoreLatestFilesToSandbox(chatIdForRestore, {
+          run: async ({ command }) => {
+            const r = await sandbox.commands.run(command, { timeoutMs: 60_000 });
+            return { exitCode: r.exitCode ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+          },
+        }).catch(() => {});
       }
 
       const refreshTimeoutMs = options.timeoutMs ?? 5 * 60 * 1000;

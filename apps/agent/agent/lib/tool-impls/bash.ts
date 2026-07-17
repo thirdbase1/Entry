@@ -1,7 +1,39 @@
 import { z } from 'zod';
+import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+
+/**
+ * Best-effort capture of "the command that's actually serving something
+ * long-running" (2026-07-16, real bug: clicking Restart in the preview
+ * panel used to destroy the whole sandbox filesystem just to have SOME
+ * sandbox left to run a dev server in -- see restartSandboxForChat's file
+ * comment in apps/web/lib/direct-chat/sandbox.ts for the full fix). A
+ * command backgrounded with `nohup ... &` / a trailing `&` is exactly the
+ * pattern this codebase already tells the model to use for dev servers
+ * (see this tool's own description below), so it's a reliable-enough
+ * signal without trying to pattern-match specific frameworks (npm run
+ * dev, vite, next dev, python -m http.server, etc. all look different).
+ * Last one wins -- if the model restarts a server with a new command,
+ * that's the one worth replaying next time, not the first one it ever
+ * tried.
+ */
+const BACKGROUNDED_COMMAND = /nohup\s|&\s*$/;
+async function maybeRememberServeCommand(chatId: string, command: string): Promise<void> {
+  if (!BACKGROUNDED_COMMAND.test(command.trim())) return;
+  await prisma.chatPreview
+    .upsert({
+      where: { chatId },
+      create: { chatId, status: 'stopped', lastServeCommand: command },
+      update: { lastServeCommand: command },
+    })
+    .catch(() => {
+      // Best-effort — a missed capture just means a future Restart click
+      // can't auto-replay this particular command; never worth failing
+      // the actual bash call over.
+    });
+}
 
 /**
  * Custom tool-impl (not eve's native `defineBashTool`) so the direct-model
@@ -50,6 +82,7 @@ export const bash = {
     // is no longer any credential-bearing dotfile for a plain `bash`
     // call to source, intentionally. Do not reintroduce this pattern.
     const sandbox = await ctx.getSandbox();
+    void maybeRememberServeCommand(ctx.session.id, command);
     const t = withTimeoutSignal(ctx.abortSignal, TIMEOUT_MS, 'bash');
     try {
       const result = await sandbox.run({ command, signal: t.signal });

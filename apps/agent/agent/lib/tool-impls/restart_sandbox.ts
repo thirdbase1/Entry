@@ -43,6 +43,11 @@ export const restartSandboxTool = {
       // can't await them. Caller should follow up with get_preview_url
       // once it's had a moment to bind its port.
       await sandbox.run({ command: `nohup ${command} > /tmp/.devserver.log 2>&1 & sleep 1` });
+      // Remembered so a future restart (this tool, or the preview panel's
+      // own Restart button on the BYOK path — see restartSandboxForChat)
+      // can replay the same command without the model needing to repeat
+      // itself. Best-effort; never worth failing the restart over.
+      await prisma.chatPreview.update({ where: { chatId }, data: { lastServeCommand: command } }).catch(() => {});
     }
 
     return {

@@ -1,366 +1,387 @@
-import { generateObject, NoObjectGeneratedError } from 'ai';
 import { z } from 'zod';
+import { generateObject, NoObjectGeneratedError } from 'ai';
+import { prisma } from '@entry/db';
 import { put } from '@vercel/blob';
 import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import {
+  createOrDispatchBrowserUseTask,
+  getBrowserUseSession,
+  type BrowserUseSlot,
+  type BrowserUseSessionResult,
+} from '../browser-use-cloud-client.js';
+import { createSteelSession, connectSteelBrowser } from '../steel-client.js';
 
 /**
- * REWRITTEN (2026-07-11) — the previous implementation shelled out to
- * `agent-browser --session <id> chat "<task>" --json`. Confirmed by
- * reading agent-browser's own real CLI reference (`agent-browser skills
- * get core`, installed v0.31.1): there is no `chat` subcommand at all.
- * agent-browser is a deliberately LOW-LEVEL, step-by-step CLI (open,
- * snapshot, click, fill, screenshot, ...) meant to be driven turn-by-turn
- * by an agent loop — not a one-shot "give it a task, get a result" API
- * like browser-use.com (which is what the old renderer's output shape —
- * currentStatus/stepsInfo/finalGif — was actually ported from). Every
- * call to the old implementation failed outright (unknown subcommand),
- * which is the real, confirmed cause of "browser use doesn't work".
+ * REWRITTEN (2026-07-16, explicit user request: "agent uses a real cloud
+ * browser, not that Vercel/sandbox use browser -- and the UI should
+ * actually display the live browser and I'm seeing what it's doing
+ * realtime. Browser should stay active. Agent should be able to stop and
+ * start it. Use both [providers], or use both at the same time so it can
+ * work in parallel."). Replaced the old approach (agent-browser CLI
+ * driven step-by-step inside this chat's own sandbox, screenshots
+ * uploaded after each action -- never a real-time view, only stale
+ * after-the-fact images) with two REAL cloud browser providers, each a
+ * genuinely independent lane so tasks can run in parallel:
  *
- * This is a real fix, not a patch: it implements the missing agent loop
- * itself, right here, using the same fast/cheap model plumbing every
- * other internal sub-generation tool in this file already uses (see
- * gateway.ts's `model()`).
+ *   - Browser Use Cloud (browser-use.com): fully agentic -- give it a
+ *     task, its OWN agent plans and executes the whole thing server-side.
+ *     Two lanes (slot 1/2, one per BROWSER_USE_API_KEY[_2]).
+ *   - Steel (steel.dev): a raw remote Chrome over CDP -- WE drive it, via
+ *     the decide/act loop below (Playwright + a cheap deciding model),
+ *     same one-real-action-per-step shape the old sandbox implementation
+ *     used. One lane (slot 1, STEEL_API_KEY).
  *
- * Loop, each iteration:
- *   1. Take a snapshot of the current page (`snapshot -i --json`) — gives
- *      the deciding model real, current `@eN` refs to act on.
- *   2. Ask the model (structured output) for exactly one next action, or
- *      to declare the task done/failed with a final summary.
- *   3. Execute that one action as a real agent-browser command.
- *   4. Take a screenshot after every action and upload it to Vercel Blob
- *      (same storage already used for avatars/copilot files — see
- *      @entry/copilot's own `put()` usage) so the chat UI can actually
- *      render it (a temp-dir local path on the sandbox is not reachable
- *      by the browser at all — this was ALSO silently broken in the
- *      renderer's assumptions before, since it expected a `screenshot`/
- *      `gif` field to already be a fetchable URL).
- *   5. Feed the step + screenshot into the running `steps` list returned
- *      to the model/UI, and loop until the model reports done/failed or
- *      MAX_STEPS is hit (hard safety cap — this is real browser
- *      automation against the live web, not a bounded local script).
+ * Both expose a genuine embeddable live view (Browser Use's `liveUrl`,
+ * Steel's `sessionViewerUrl`) -- persisted to ChatBrowserSession the
+ * moment a session is created, which is what lets the Browser tab in the
+ * chat UI show the live iframe independent of this tool call's own
+ * lifetime. Steel's `websocketUrl` (needed to reattach to the same live
+ * browser on a follow-up call) is stashed in `metadata` since it's not
+ * something the UI or Browser Use's lane needs at all.
+ *
+ * pickFreeLane always tries Browser Use's two slots before Steel's one,
+ * since Browser Use needs zero extra code here (its own agent does the
+ * work) while Steel costs an LLM call per step -- cheaper/faster by
+ * default, but all three genuinely run in parallel across different
+ * chat turns/tasks since each is tracked as its own ChatBrowserSession row.
  */
 
-const MAX_STEPS = 14;
+const POLL_INTERVAL_MS = 3000;
+// How long THIS tool call keeps polling/stepping before reporting back --
+// NOT the browser's own lifetime. Both providers keep the session alive
+// well past this on their own (Browser Use's keepAlive, Steel's
+// timeout/inactivityTimeout), so a long task doesn't get killed just
+// because this loop gave up watching -- exactly "the browser should
+// still be active" from the request. Call back in with session_id to
+// keep going.
+const WALL_CLOCK_BUDGET_MS = 60_000;
+const MAX_STEEL_STEPS = 12;
 
-/**
- * FIXED (2026-07-16, real bug: "agent is timing out while waiting for a
- * tool call"). MAX_STEPS alone does not bound wall-clock time -- each
- * iteration does a sandbox snapshot exec, an LLM decision call, an action
- * exec, and a screenshot exec/upload, which can each take 5-20s+ depending
- * on the page and model. 14 slow steps can comfortably exceed
- * direct/chat/route.ts's 300s maxDuration (Vercel Hobby ceiling) all by
- * itself, even before any other tool call or model turn in the same
- * request -- and a maxDuration kill is a hard platform-level termination,
- * not a catchable error, so nothing gets surfaced to the model or the
- * user at all; it just looks like the agent silently hung. This budget
- * makes the loop always return a normal, graceful (partial) result well
- * before that kill, the same way MAX_STEPS already does for step count.
- */
-const WALL_CLOCK_BUDGET_MS = 180_000;
+type Lane = { provider: 'browser_use'; slot: BrowserUseSlot } | { provider: 'steel'; slot: 1 };
 
-const NextActionSchema = z.object({
-  done: z.boolean().describe('True if the task is fully complete (or has definitively failed) and no more actions are needed.'),
-  success: z.boolean().optional().describe('When done=true: whether the task actually succeeded (vs. failed/gave up).'),
-  summary: z
-    .string()
-    .optional()
-    .describe('When done=true: a concise markdown summary of what was found/accomplished, written for the end user.'),
-  stepDescription: z
-    .string()
-    .describe('One short, human-readable sentence describing this step (e.g. "Opening the login page", "Clicking Submit"). Shown directly in the UI.'),
-  action: z
-    .enum([
-      'open',
-      'click',
-      'fill',
-      'type',
-      'press',
-      'select',
-      'check',
-      'uncheck',
-      'hover',
-      'scroll_down',
-      'scroll_up',
-      'find_text_click',
-      'go_back',
-      'wait_text',
-      'wait_ms',
-    ])
-    .optional()
-    .describe('The single next action to perform. Omit only when done=true.'),
-  ref: z.string().optional().describe('Element ref from the last snapshot, e.g. "@e3" — required for click/fill/type/hover/select/check/uncheck.'),
-  value: z
-    .string()
-    .optional()
-    .describe('Action payload: URL for open, text to fill/type, key name for press, option value for select, text to search for wait_text/find_text_click, ms amount for scroll/wait_ms.'),
-});
-type NextAction = z.infer<typeof NextActionSchema>;
+const LANES: Lane[] = [
+  { provider: 'browser_use', slot: 1 },
+  { provider: 'browser_use', slot: 2 },
+  { provider: 'steel', slot: 1 },
+];
 
-interface StepResult {
-  description: string;
-  screenshotUrl: string | null;
-}
+type SessionRow = {
+  id: string;
+  chatId: string;
+  provider: string;
+  slot: number;
+  providerSessionId: string;
+  metadata: unknown;
+  liveUrl: string | null;
+  output: string | null;
+  isTaskSuccessful: boolean | null;
+};
 
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-/** Maps one structured action into a real agent-browser CLI invocation. */
-function buildCommand(action: NextAction): string | null {
-  const ref = action.ref ? shellQuote(action.ref) : undefined;
-  const val = action.value !== undefined ? shellQuote(action.value) : undefined;
-  switch (action.action) {
-    case 'open':
-      return val ? `open ${val}` : null;
-    case 'click':
-      return ref ? `click ${ref}` : null;
-    case 'fill':
-      return ref && val ? `fill ${ref} ${val}` : null;
-    case 'type':
-      return ref && val ? `type ${ref} ${val}` : null;
-    case 'press':
-      return val ? `press ${val}` : null;
-    case 'select':
-      return ref && val ? `select ${ref} ${val}` : null;
-    case 'check':
-      return ref ? `check ${ref}` : null;
-    case 'uncheck':
-      return ref ? `uncheck ${ref}` : null;
-    case 'hover':
-      return ref ? `hover ${ref}` : null;
-    case 'scroll_down':
-      return `scroll down ${action.value ? shellQuote(action.value) : '500'}`;
-    case 'scroll_up':
-      return `scroll up ${action.value ? shellQuote(action.value) : '500'}`;
-    case 'find_text_click':
-      return val ? `find text ${val} click` : null;
-    case 'go_back':
-      return `back`;
-    case 'wait_text':
-      return val ? `wait --text ${val}` : null;
-    case 'wait_ms':
-      return `wait ${action.value ? shellQuote(action.value) : '1000'}`;
-    default:
-      return null;
+async function pickFreeLane(chatId: string): Promise<Lane> {
+  const active = await prisma.chatBrowserSession.findMany({
+    where: { chatId, status: { in: ['running', 'idle'] } },
+    select: { provider: true, slot: true },
+  });
+  const used = new Set(active.map(a => `${a.provider}:${a.slot}`));
+  for (const lane of LANES) {
+    if (!used.has(`${lane.provider}:${lane.slot}`)) return lane;
   }
+  throw new Error(
+    'All three browser lanes (browser_use slots 1/2, steel slot 1) are already in use for this chat -- call browser_stop on an existing session_id before starting another, or reuse an existing session_id as a follow-up.',
+  );
 }
 
-/**
- * FIXED (2026-07-15, explicit user report: "browser_use failed: No object
- * generated: could not parse the response" after two tool calls, whole
- * page reloaded): `generateObject` had ZERO retry/repair here -- the very
- * first time the deciding model's raw output didn't parse as strict JSON
- * matching NextActionSchema (extremely common with faster/cheaper BYOK
- * models: markdown code fences around the JSON, a trailing comment, one
- * missing required field), the AI SDK throws `NoObjectGeneratedError`
- * straight out of this loop. `safeExecute` (see that file) stops that
- * from tearing down the whole in-flight turn, but it still turns EVERY
- * browser_use call into a single hard failure with no chance to
- * self-correct -- exactly what was reported. Real fix: retry a bounded
- * number of times, and on each retry after the first, append the model's
- * own bad raw output (`NoObjectGeneratedError.text`) plus an explicit
- * "that was invalid, fix it" instruction -- the same repair pattern the
- * AI SDK docs themselves recommend for this exact error
- * (ai-sdk.dev/docs/reference/ai-sdk-errors/ai-no-object-generated-error).
- * Only after every retry is exhausted does this now return a normal
- * "step failed, stopping cleanly" outcome instead of throwing -- so a
- * genuinely uncooperative model degrades the browser_use call to "gave up
- * gracefully with an explanation" rather than "crashed."
- */
-async function generateNextAction(params: {
-  llmModel: Parameters<typeof generateObject>[0]['model'];
-  system: string;
-  task: string;
-  steps: StepResult[];
-  pageState: string;
-}): Promise<{ ok: true; next: NextAction } | { ok: false; reason: string }> {
+function isDone(result: BrowserUseSessionResult): boolean {
+  return result.isTaskSuccessful !== null && result.isTaskSuccessful !== undefined;
+}
+
+function outputToText(output: unknown): string | null {
+  if (output == null) return null;
+  return typeof output === 'string' ? output : JSON.stringify(output);
+}
+
+// --- Browser Use Cloud lane -------------------------------------------------
+
+async function runBrowserUseLane(params: { task: string; slot: BrowserUseSlot; providerSessionId?: string }): Promise<{
+  providerSessionId: string;
+  liveUrl: string | null;
+  output: string | null;
+  screenshotUrl: string | null;
+  isTaskSuccessful: boolean | null;
+  stillRunning: boolean;
+}> {
+  const result = await createOrDispatchBrowserUseTask(params.slot, { task: params.task, sessionId: params.providerSessionId, keepAlive: true });
+  let finalResult = result;
+  let stillRunning = !isDone(finalResult);
+  const startedAt = Date.now();
+  while (stillRunning && Date.now() - startedAt < WALL_CLOCK_BUDGET_MS) {
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+    try {
+      finalResult = await getBrowserUseSession(params.slot, result.id);
+    } catch {
+      break;
+    }
+    stillRunning = !isDone(finalResult);
+  }
+  return {
+    providerSessionId: result.id,
+    liveUrl: finalResult.liveUrl,
+    output: outputToText(finalResult.output) ?? finalResult.lastStepSummary,
+    screenshotUrl: finalResult.screenshotUrl,
+    isTaskSuccessful: finalResult.isTaskSuccessful,
+    stillRunning,
+  };
+}
+
+// --- Steel lane (we drive it ourselves) -------------------------------------
+
+const SteelActionSchema = z.object({
+  done: z.boolean().describe('True once the task is fully complete or has definitively failed.'),
+  success: z.boolean().optional().describe('When done=true: whether the task actually succeeded.'),
+  summary: z.string().optional().describe('When done=true: concise markdown summary of the outcome, for the end user.'),
+  stepDescription: z.string().describe('One short sentence describing this step (shown in the UI).'),
+  action: z.enum(['goto', 'click', 'fill', 'press', 'scroll_down', 'scroll_up', 'wait_ms']).optional().describe('The single next action. Omit only when done=true.'),
+  selector: z
+    .string()
+    .optional()
+    .describe('Playwright locator string for click/fill (e.g. "text=Submit", "role=button[name=\'Log in\']", "css=#email"). Required for click/fill.'),
+  value: z.string().optional().describe('Payload: URL for goto, text to fill, key name for press, ms amount for scroll/wait_ms.'),
+});
+type SteelAction = z.infer<typeof SteelActionSchema>;
+
+async function decideSteelAction(params: { llmModel: Parameters<typeof generateObject>[0]['model']; task: string; history: string[]; pageText: string; url: string }) {
   const MAX_ATTEMPTS = 3;
   let lastBadText = '';
-  let lastErrorMessage = '';
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const baseContent =
-      `Task: ${params.task}\n\n` +
-      `Steps so far (${params.steps.length}): ${params.steps.map((s, idx) => `${idx + 1}. ${s.description}`).join('; ') || '(none yet)'}\n\n` +
-      `Current page snapshot:\n${params.pageState}`;
+    const base =
+      `Task: ${params.task}\n\nSteps so far (${params.history.length}): ${params.history.join('; ') || '(none yet)'}\n\n` +
+      `Current URL: ${params.url}\nVisible page text (truncated):\n${params.pageText.slice(0, 4000)}`;
     const content =
       attempt === 0
-        ? baseContent
-        : `${baseContent}\n\n` +
-          `IMPORTANT: your previous response could not be parsed as valid JSON matching the required schema. ` +
-          `Respond with ONLY strict, valid JSON matching the schema -- no markdown code fences, no commentary, ` +
-          `no trailing text before or after the JSON object.` +
-          (lastBadText ? `\n\nYour last (invalid) response was:\n${lastBadText.slice(0, 500)}` : '');
+        ? base
+        : `${base}\n\nIMPORTANT: your previous response was not valid JSON matching the schema. Respond with ONLY strict JSON, no markdown fences, no commentary.${lastBadText ? `\n\nYour last (invalid) response: ${lastBadText.slice(0, 500)}` : ''}`;
     try {
-      const { object: next } = await generateObject({
+      const { object } = await generateObject({
         model: params.llmModel,
-        schema: NextActionSchema,
-        system: params.system,
+        schema: SteelActionSchema,
+        system:
+          'You control a real remote web browser one action at a time via Playwright locators. You are given the task, ' +
+          'steps taken so far, the current URL, and the visible text of the current page. Decide the SINGLE next action ' +
+          'needed to make progress, using a Playwright locator string for selector (text=, role=, css=, id=). Only set ' +
+          'done=true once the task is genuinely complete, or cannot be completed after reasonable attempts (then ' +
+          'success=false and explain why).',
         messages: [{ role: 'user', content }],
       });
-      return { ok: true, next };
+      return { ok: true as const, action: object };
     } catch (err) {
       if (NoObjectGeneratedError.isInstance(err)) {
         lastBadText = err.text ?? '';
-        lastErrorMessage = err.message;
-        continue; // retry with the repair prompt above
+        continue;
       }
-      // Any other error (network, provider outage, auth) isn't something a
-      // repair prompt can fix -- no point burning retries on it.
-      lastErrorMessage = err instanceof Error ? err.message : String(err);
-      break;
+      return { ok: false as const, reason: err instanceof Error ? err.message : String(err) };
     }
   }
-  return { ok: false, reason: lastErrorMessage || 'model did not return a valid next action' };
+  return { ok: false as const, reason: 'model did not return a valid next action' };
 }
+
+async function runSteelLane(params: { task: string; websocketUrl: string; llmModel: Parameters<typeof generateObject>[0]['model'] }): Promise<{
+  output: string | null;
+  screenshotUrl: string | null;
+  isTaskSuccessful: boolean | null;
+}> {
+  const browser = await connectSteelBrowser(params.websocketUrl);
+  try {
+    const context = browser.contexts()[0];
+    const page = context.pages()[0] ?? (await context.newPage());
+    const history: string[] = [];
+    let outcome: { done: boolean; success?: boolean; summary?: string } = { done: false };
+
+    for (let i = 0; i < MAX_STEEL_STEPS; i++) {
+      const pageText = await page
+        .locator('body')
+        .innerText({ timeout: 5000 })
+        .catch(() => '');
+      const decision = await decideSteelAction({ llmModel: params.llmModel, task: params.task, history, pageText, url: page.url() });
+      if (!decision.ok) {
+        outcome = { done: true, success: false, summary: `Browser automation stopped: the controlling model kept returning invalid responses (${decision.reason}).` };
+        break;
+      }
+      const next: SteelAction = decision.action;
+      if (next.done) {
+        outcome = { done: true, success: next.success, summary: next.summary };
+        break;
+      }
+      try {
+        switch (next.action) {
+          case 'goto':
+            if (next.value) await page.goto(next.value, { waitUntil: 'domcontentloaded', timeout: 20000 });
+            break;
+          case 'click':
+            if (next.selector) await page.locator(next.selector).first().click({ timeout: 8000 });
+            break;
+          case 'fill':
+            if (next.selector && next.value !== undefined) await page.locator(next.selector).first().fill(next.value, { timeout: 8000 });
+            break;
+          case 'press':
+            if (next.value) await page.keyboard.press(next.value);
+            break;
+          case 'scroll_down':
+            await page.mouse.wheel(0, Number(next.value) || 500);
+            break;
+          case 'scroll_up':
+            await page.mouse.wheel(0, -(Number(next.value) || 500));
+            break;
+          case 'wait_ms':
+            await page.waitForTimeout(Number(next.value) || 1000);
+            break;
+        }
+        history.push(next.stepDescription);
+      } catch (err) {
+        history.push(`${next.stepDescription} — FAILED: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300));
+      }
+      if (i === MAX_STEEL_STEPS - 1 && !outcome.done) {
+        outcome = { done: true, success: false, summary: `Stopped after ${MAX_STEEL_STEPS} steps without the task reporting completion.` };
+      }
+    }
+
+    let screenshotUrl: string | null = null;
+    try {
+      const buffer = await page.screenshot();
+      const blob = await put(`browser-steel/${Date.now()}.png`, buffer, { access: 'public', contentType: 'image/png' });
+      screenshotUrl = blob.url;
+    } catch {
+      // A failed final screenshot shouldn't fail the whole task result.
+    }
+
+    return { output: outcome.summary ?? (outcome.success ? 'Task completed.' : 'The task did not complete successfully.'), screenshotUrl, isTaskSuccessful: outcome.success ?? false };
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+// --- Tool --------------------------------------------------------------------
 
 export const browserUse = {
   description:
-    'Autonomously drive a real Chrome browser to complete a task: navigate, click, fill forms, ' +
-    'read page content, take screenshots. Give it a natural-language task description; it plans ' +
-    'and executes the necessary browser steps itself (one real page snapshot + action per step) ' +
-    'and returns a markdown summary plus screenshots of every step taken.',
+    'Drive a real cloud browser to complete a task: navigate, click, fill forms, read pages, extract data. Give it a ' +
+    "natural-language task; it runs in a live, watchable cloud browser (the chat UI's Browser tab shows it in real " +
+    "time) and returns a summary when done. The browser stays alive after the task finishes -- pass the returned " +
+    'session_id back in to send a FOLLOW-UP task in the SAME browser (same cookies/tabs/page state) instead of ' +
+    'starting fresh. Call browser_stop when genuinely finished with a session. Up to three sessions can run in ' +
+    'parallel for this chat, across two different cloud browser providers.',
   inputSchema: z.object({
-    task: z.string().describe('Natural-language description of what the browser should accomplish'),
-    startUrl: z.string().optional().describe('Optional URL to open first, if known — saves the model a step.'),
+    task: z.string().describe('Natural-language description of what the browser should do next.'),
+    session_id: z
+      .string()
+      .optional()
+      .describe(
+        'An existing browser session id (returned by a previous browser_use call) to send this task as a follow-up in the SAME live browser. Omit to start a brand new session.',
+      ),
   }),
-  async execute({ task, startUrl }: { task: string; startUrl?: string }, ctx: ToolExecCtx) {
-    const sandbox = await ctx.getSandbox();
-    const session = `browser-use-${sandbox.id}`;
+  async execute({ task, session_id }: { task: string; session_id?: string }, ctx: ToolExecCtx) {
+    const chatId = ctx.session.id;
+
+    let row: SessionRow | null = null;
+    let lane: Lane;
+
+    if (session_id) {
+      const existing = await prisma.chatBrowserSession.findUnique({ where: { id: session_id } });
+      if (!existing || existing.chatId !== chatId) throw new Error(`No browser session "${session_id}" found for this chat.`);
+      if (existing.status === 'stopped') throw new Error(`Browser session "${session_id}" was already stopped -- omit session_id to start a new one.`);
+      row = existing;
+      lane = existing.provider === 'steel' ? { provider: 'steel', slot: 1 } : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
+    } else {
+      lane = await pickFreeLane(chatId);
+    }
+
+    if (lane.provider === 'browser_use') {
+      const laneResult = await runBrowserUseLane({ task, slot: lane.slot, providerSessionId: row?.providerSessionId });
+
+      row = row
+        ? await prisma.chatBrowserSession.update({
+            where: { id: row.id },
+            data: {
+              task,
+              status: laneResult.stillRunning ? 'running' : 'idle',
+              liveUrl: laneResult.liveUrl ?? row.liveUrl,
+              output: laneResult.output ?? row.output,
+              isTaskSuccessful: laneResult.isTaskSuccessful ?? row.isTaskSuccessful,
+            },
+          })
+        : await prisma.chatBrowserSession.create({
+            data: {
+              chatId,
+              provider: 'browser_use',
+              slot: lane.slot,
+              providerSessionId: laneResult.providerSessionId,
+              task,
+              status: laneResult.stillRunning ? 'running' : 'idle',
+              liveUrl: laneResult.liveUrl,
+              output: laneResult.output,
+              isTaskSuccessful: laneResult.isTaskSuccessful,
+            },
+          });
+
+      const markdown = laneResult.stillRunning
+        ? `Still working in a live browser (session \`${row.id}\`) -- it keeps running even though this tool call is reporting back now. Call browser_use again with session_id "${row.id}" to check progress or continue, or browser_stop to end it.`
+        : laneResult.output || (laneResult.isTaskSuccessful ? 'Task completed.' : 'The task did not complete successfully.');
+
+      return {
+        status: laneResult.stillRunning ? 'running' : laneResult.isTaskSuccessful === false ? 'failed' : 'finished',
+        steps: [],
+        screenshotUrl: laneResult.screenshotUrl,
+        markdown,
+        sessionId: row.id,
+        liveUrl: row.liveUrl,
+        provider: 'browser_use',
+      };
+    }
+
+    // --- Steel lane ---
+    let websocketUrl: string;
+    let sessionViewerUrl: string | null;
+
+    if (row) {
+      const meta = (row.metadata ?? {}) as { websocketUrl?: string };
+      if (!meta.websocketUrl) throw new Error(`Browser session "${row.id}" is missing its Steel connection info -- start a new session instead.`);
+      websocketUrl = meta.websocketUrl;
+      sessionViewerUrl = row.liveUrl;
+    } else {
+      const session = await createSteelSession();
+      websocketUrl = session.websocketUrl;
+      sessionViewerUrl = session.sessionViewerUrl;
+      row = await prisma.chatBrowserSession.create({
+        data: {
+          chatId,
+          provider: 'steel',
+          slot: 1,
+          providerSessionId: session.id,
+          metadata: { websocketUrl },
+          task,
+          status: 'running',
+          liveUrl: sessionViewerUrl,
+        },
+      });
+    }
+
     const llmModel = await model(undefined, ctx?.byokModel);
-    const steps: StepResult[] = [];
-    let finalStatus: 'finished' | 'failed' = 'finished';
-    let finalMarkdown = '';
-    const startedAt = Date.now();
+    const laneResult = await runSteelLane({ task, websocketUrl, llmModel });
 
-    // FIXED (2026-07-15, confirmed live against a real E2B sandbox): every
-    // single browser_use call was failing with "Auto-launch failed: CDP
-    // command timed out: Page.enable" -- 100% reproduction rate, first
-    // call onward, not something that only shows up after N calls. Root
-    // cause: agent-browser launches Chrome with its normal (sandboxed)
-    // process model by default, and Chrome's own internal setuid/user-ns
-    // sandbox cannot initialize inside E2B's container (confirmed:
-    // launching the same Chrome binary manually with --no-sandbox
-    // responds to CDP immediately; without it, CDP never comes up).
-    // agent-browser exposes exactly one documented escape hatch for this
-    // ("--args", or its env-var form) -- this is the standard
-    // headless-Chrome-in-a-container fix (same flags Puppeteer's own
-    // Docker docs recommend), not anything specific to this app.
-    const AGENT_BROWSER_ENV = {
-      AGENT_BROWSER_ARGS: '--no-sandbox,--disable-dev-shm-usage,--disable-gpu',
-    };
-
-    async function runCli(args: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-      const res = await sandbox.run({
-        command: `agent-browser --session ${shellQuote(session)} ${args}`,
-        env: AGENT_BROWSER_ENV,
-      });
-      return { ok: res.exitCode === 0, stdout: res.stdout, stderr: res.stderr };
-    }
-
-    async function takeScreenshot(): Promise<string | null> {
-      try {
-        const fname = `/tmp/${session}-${Date.now()}.png`;
-        const shot = await runCli(`screenshot ${shellQuote(fname)}`);
-        if (!shot.ok) return null;
-        const b64res = await sandbox.run({ command: `base64 -w0 ${shellQuote(fname)}` });
-        if (b64res.exitCode !== 0 || !b64res.stdout.trim()) return null;
-        const buffer = Buffer.from(b64res.stdout.trim(), 'base64');
-        const blob = await put(`browser-screenshots/${session}-${Date.now()}.png`, buffer, {
-          access: 'public',
-          contentType: 'image/png',
-        });
-        return blob.url;
-      } catch {
-        // A failed screenshot upload should never abort the whole browser
-        // task — just render that one step without an image.
-        return null;
-      }
-    }
-
-    if (startUrl) {
-      await runCli(`open ${shellQuote(startUrl)}`);
-      const shot = await takeScreenshot();
-      steps.push({ description: `Opened ${startUrl}`, screenshotUrl: shot });
-    }
-
-    for (let i = 0; i < MAX_STEPS; i++) {
-      if (Date.now() - startedAt > WALL_CLOCK_BUDGET_MS) {
-        finalStatus = 'failed';
-        finalMarkdown = `Stopped after running out of time (${Math.round(WALL_CLOCK_BUDGET_MS / 1000)}s budget) before the task reported completion. Completed ${steps.length} step(s).`;
-        break;
-      }
-      const snap = await runCli('snapshot -i --json');
-      const pageState = snap.ok ? snap.stdout.slice(0, 6000) : `(snapshot failed: ${snap.stderr.slice(0, 500)})`;
-
-      const decision = await generateNextAction({
-        llmModel,
-        system:
-          'You control a real web browser one action at a time via a CLI. You will be given the ' +
-          'overall task, the history of steps already taken, and the current page snapshot (JSON with ' +
-          '"refs" mapping @eN -> {name, role} and a readable "snapshot" tree). Decide the SINGLE next ' +
-          'action needed to make progress. Only set done=true once the task is genuinely complete, and ' +
-          'include a clear summary of the outcome. If the task cannot be completed after reasonable ' +
-          "attempts, set done=true, success=false, and explain why in summary. Prefer find_text_click " +
-          "when a ref is not obviously the right target. Never invent a ref that is not present in the " +
-          "snapshot's refs map.",
-        task,
-        steps,
-        pageState,
-      });
-
-      if (!decision.ok) {
-        // Every repair attempt failed -- stop cleanly instead of throwing
-        // (see generateNextAction's own comment). The caller/model still
-        // gets a normal, informative result instead of a crashed turn.
-        finalStatus = 'failed';
-        finalMarkdown = `Browser automation stopped: the controlling model kept returning an invalid response and could not be repaired (${decision.reason}). ${steps.length ? `Completed ${steps.length} step(s) before stopping.` : ''}`;
-        break;
-      }
-      const next = decision.next;
-
-      if (next.done) {
-        finalStatus = next.success === false ? 'failed' : 'finished';
-        finalMarkdown = next.summary || (finalStatus === 'failed' ? 'The task could not be completed.' : 'Task completed.');
-        break;
-      }
-
-      const cmd = buildCommand(next);
-      let stepDescription = next.stepDescription;
-      if (cmd) {
-        const result = await runCli(cmd);
-        if (!result.ok) {
-          // FIXED (2026-07-13): a failed action (bad ref, element not
-          // clickable, navigation error, ...) used to be silently
-          // swallowed — the loop just moved on to the next iteration as
-          // if nothing happened, so the model never learned its action
-          // didn't work and would often repeat the same failing action
-          // until MAX_STEPS ran out. Surface the real stderr in the step
-          // description so it flows into next iteration's "Steps so far"
-          // context and the model can actually self-correct.
-          stepDescription = `${stepDescription} — FAILED: ${result.stderr.slice(0, 300) || 'no output'}`;
-        }
-      } else {
-        // buildCommand returned null: the model picked an action but
-        // omitted a required field (e.g. "click" with no ref). Previously
-        // this also just silently did nothing for a full step.
-        stepDescription = `${stepDescription} — SKIPPED: action "${next.action}" was missing a required ref/value, nothing was executed.`;
-      }
-      const shot = await takeScreenshot();
-      steps.push({ description: stepDescription, screenshotUrl: shot });
-
-      if (i === MAX_STEPS - 1) {
-        finalStatus = 'failed';
-        finalMarkdown = `Stopped after ${MAX_STEPS} steps without the task reporting completion. Last state: ${stepDescription}`;
-      }
-    }
+    row = await prisma.chatBrowserSession.update({
+      where: { id: row.id },
+      data: { task, status: 'idle', output: laneResult.output, isTaskSuccessful: laneResult.isTaskSuccessful },
+    });
 
     return {
-      status: finalStatus,
-      steps: steps.map(s => ({ description: s.description, screenshotUrl: s.screenshotUrl })),
-      screenshotUrl: steps.length ? steps[steps.length - 1].screenshotUrl : null,
-      markdown: finalMarkdown,
+      status: laneResult.isTaskSuccessful === false ? 'failed' : 'finished',
+      steps: [],
+      screenshotUrl: laneResult.screenshotUrl,
+      markdown: laneResult.output,
+      sessionId: row.id,
+      liveUrl: row.liveUrl,
+      provider: 'steel',
     };
   },
 };

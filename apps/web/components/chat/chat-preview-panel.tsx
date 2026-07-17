@@ -26,6 +26,7 @@ import type { PreviewStatus } from './use-preview-autofix';
 import { ChatFilesTab } from './chat-files-tab';
 import { ChatTerminalTab } from './chat-terminal-tab';
 import { ChatVersionsTab } from './chat-versions-tab';
+import { ChatBrowserTab } from './chat-browser-tab';
 
 export function ChatPreviewPanel({
   sessionId,
@@ -49,7 +50,7 @@ export function ChatPreviewPanel({
 }) {
   const [restarting, setRestarting] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [tab, setTab] = useState<'preview' | 'files' | 'terminal' | 'history'>('preview');
+  const [tab, setTab] = useState<'preview' | 'files' | 'terminal' | 'history' | 'browser'>('preview');
 
   useEffect(() => {
     if (jumpToHistoryNonce) setTab('history');
@@ -95,6 +96,13 @@ export function ChatPreviewPanel({
           >
             History
           </button>
+          <button
+            onClick={() => setTab('browser')}
+            className={`text-xs px-2.5 py-1 rounded-sm ${tab === 'browser' ? 'bg-background shadow-sm font-medium' : 'text-muted-foreground'}`}
+            title="Live cloud browser — watch the agent browse in real time"
+          >
+            Browser
+          </button>
         </div>
         <div className="flex items-center gap-2">
           {tab === 'preview' && state?.available && (
@@ -125,6 +133,7 @@ export function ChatPreviewPanel({
         {tab === 'files' && <ChatFilesTab sessionId={sessionId} />}
         {tab === 'terminal' && <ChatTerminalTab sessionId={sessionId} />}
         {tab === 'history' && <ChatVersionsTab sessionId={sessionId} />}
+        {tab === 'browser' && <ChatBrowserTab sessionId={sessionId} />}
 
         {tab === 'preview' && !state && <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">Checking…</div>}
 

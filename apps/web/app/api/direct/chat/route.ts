@@ -88,6 +88,17 @@ import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
 import { compactMessagesIfNeeded } from '@/lib/direct-chat/compact-messages';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
+
+// Providers confirmed (from live prod error logs) to reliably 400 on the
+// step-2+ request of an agentic turn -- i.e. their relay can't handle a
+// follow-up call that carries a tool result back to the model, even
+// though the initial tool-calling request itself works fine. Rather than
+// remove/disable these (explicit user request: keep them usable for
+// plain chat), direct-chat's prepareStep drops tool availability after
+// the first step for anyone in this set -- see that callsite's comment
+// for the full incident writeup. Keyed by providerLabel (exact,
+// case-sensitive match to what resolveByokModel returns).
+const FLAKY_PROVIDERS_DROP_TOOLS_AFTER_STEP_1 = new Set(['Woino']);
 import type { ToolExecCtx } from '@entry/agent/tool-impls/types';
 
 import { choose } from '@entry/agent/tool-impls/choose';
@@ -99,6 +110,7 @@ import { pythonCoding } from '@entry/agent/tool-impls/python_coding';
 import { writeFileTool } from '@entry/agent/tool-impls/write_file';
 import { editFileTool } from '@entry/agent/tool-impls/edit_file';
 import { browserUse } from '@entry/agent/tool-impls/browser_use';
+import { browserStop } from '@entry/agent/tool-impls/browser_stop';
 import { listFilesTool } from '@entry/agent/tool-impls/list_files';
 import { bash } from '@entry/agent/tool-impls/bash';
 import { saveCredentialTool } from '@entry/agent/tool-impls/save_credential';
@@ -339,7 +351,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     browser_use: tool({
       description: browserUse.description,
       inputSchema: browserUse.inputSchema,
-      execute: (input: { task: string }) => browserUse.execute(input, execCtx),
+      execute: (input: { task: string; session_id?: string }) => browserUse.execute(input, execCtx),
+    }),
+    browser_stop: tool({
+      description: browserStop.description,
+      inputSchema: browserStop.inputSchema,
+      execute: (input: { session_id: string }) => browserStop.execute(input, execCtx),
     }),
     list_files: tool({
       description: listFilesTool.description,
@@ -424,6 +441,28 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // file's earlier investigation), so no per-model capability check is
     // needed here anymore either.
     reasoning: 'provider-default',
+    // FIXED (2026-07-16, confirmed live from production error logs): the
+    // "Woino" relay (api.woino.app, a known-flaky third-party proxy --
+    // already flagged once before as unreliable) 400s on the step-2+
+    // request of every single agentic turn -- specifically the request
+    // that carries a completed tool call + its result back for the model
+    // to continue. Step 1 (the request that produces the tool call in the
+    // first place) always succeeds; it's only the follow-up that their
+    // relay can't handle, 100% reproducible across 6/6 recent turns in
+    // prod logs. The user explicitly does not want this provider removed
+    // or disabled, so instead of a hard crash on every tool-using turn:
+    // drop tool availability from step 2 onward for this specific
+    // known-flaky provider. This trades "no more tool calls after the
+    // first one" for "the turn actually finishes instead of dying" --
+    // by far the better trade for an unreliable relay we don't control.
+    // Keyed off providerLabel (exact match) rather than baseUrl since
+    // that's what's already resolved and logged for every turn.
+    prepareStep({ stepNumber }) {
+      if (stepNumber > 0 && FLAKY_PROVIDERS_DROP_TOOLS_AFTER_STEP_1.has(providerLabel)) {
+        return { activeTools: [] };
+      }
+      return {};
+    },
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
       logError({ source: 'direct-chat-streamtext', error, userId, chatId, context: { providerLabel, modelId } });

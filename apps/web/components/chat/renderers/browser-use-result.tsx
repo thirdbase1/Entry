@@ -35,10 +35,12 @@ interface ParsedBrowserResult {
   currentScreenshot: string | null;
   markdown: string | null;
   steps: Step[];
+  liveUrl: string | null;
+  provider: string | null;
 }
 
 function parseBrowserOutput(raw: unknown): ParsedBrowserResult {
-  const empty: ParsedBrowserResult = { status: 'finished', currentScreenshot: null, markdown: null, steps: [] };
+  const empty: ParsedBrowserResult = { status: 'finished', currentScreenshot: null, markdown: null, steps: [], liveUrl: null, provider: null };
   if (!raw || typeof raw !== 'object') return empty;
   const obj = raw as Record<string, unknown>;
 
@@ -53,6 +55,12 @@ function parseBrowserOutput(raw: unknown): ParsedBrowserResult {
       currentScreenshot: (obj.screenshotUrl as string | null | undefined) ?? steps[steps.length - 1]?.screenshotUrl ?? null,
       markdown: (obj.markdown as string | null | undefined) ?? null,
       steps,
+      // ADDED (2026-07-16) alongside the Browser Use Cloud / Steel
+      // rewrite -- see that tool-impl's returned shape. `liveUrl` is what
+      // lets this renderer point at the SAME live view the chat's
+      // Browser tab shows, straight from the tool result itself.
+      liveUrl: (obj.liveUrl as string | null | undefined) ?? null,
+      provider: (obj.provider as string | null | undefined) ?? null,
     };
   }
 
@@ -68,6 +76,8 @@ function parseBrowserOutput(raw: unknown): ParsedBrowserResult {
       description: String(item.next_goal ?? item.goal ?? item.url ?? ''),
       screenshotUrl: null,
     })),
+    liveUrl: null,
+    provider: null,
   };
 }
 
@@ -221,6 +231,19 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
       }
     >
       <div className="max-h-150 overflow-y-auto">
+        {parsed.liveUrl && (status === 'running' || status === 'idle') && (
+          <div className="px-4 pt-3">
+            <a
+              href={parsed.liveUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shrink-0" />
+              Watch live{parsed.provider ? ` (${parsed.provider === 'steel' ? 'Steel' : 'Browser Use'})` : ''} — also visible in the Browser tab
+            </a>
+          </div>
+        )}
         {activeShot && (
           <div className="p-4 not-prose space-y-2">
             {/* eslint-disable-next-line @next/next/no-img-element */}

@@ -51,43 +51,99 @@ async function probeAllPorts(sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox
 
 type TunnelProvider = 'cloudflared' | 'localtunnel';
 
-/** Idempotent: if a tunnel for this exact port+provider is already
- *  running (e.g. the model calls this tool twice in a row), reuse it
- *  instead of spawning a second one — parse its already-logged URL back
- *  out rather than trusting process liveness alone.
+/**
+ * Idempotent: if a tunnel for this exact port+provider is already
+ * running (e.g. the model calls this tool twice in a row), reuse it
+ * instead of spawning a second one.
  *
- *  FIXED 2026-07-15: the existing-log-check and the pgrep liveness check
- *  used to be two separate sandbox.run() round-trips; now one combined
- *  command does both and reports back in a single round-trip. */
+ * REWRITTEN (2026-07-16, real bug confirmed live end to end against a
+ * real E2B sandbox: "preview url still failed 100%"). Two independent,
+ * compounding root causes, both reproduced directly:
+ *
+ * 1. cloudflared was never installed in the shared base template, so
+ *    `command -v cloudflared` always failed and this ALWAYS fell through
+ *    to localtunnel — whose public loca.lt relay reliably hands back a
+ *    URL string that then just hangs and times out on every real
+ *    request (confirmed live: curl against a freshly-minted loca.lt URL
+ *    never connected at all). cloudflared's free "quick tunnel" actually
+ *    works (confirmed live: 200 OK in <0.5s) and is a ~25MB static
+ *    binary installable on first use in a couple seconds, so it's now
+ *    the primary (and, in practice, only-needed) provider.
+ *
+ * 2. The liveness check (and the old kill-stale-process step) used
+ *    `pgrep -f "<pattern>"` / `pkill -f "<pattern>"` where `<pattern>`
+ *    is a literal substring of the SAME shell command that runs the
+ *    check — e.g. `sh -c 'pgrep -f "cloudflared tunnel --url ..." ...'`
+ *    has that exact text sitting right there in its OWN command line,
+ *    which `-f` matches against in full. Confirmed live: this made
+ *    `pkill -f` kill the very shell invocation trying to launch the
+ *    tunnel (a same-line self-kill, surfacing as a bare "signal:
+ *    terminated" with the tunnel never actually starting), and made
+ *    `pgrep -f`'s liveness check spuriously report "still alive" purely
+ *    because of the pattern text appearing in its own invocation — which
+ *    would then keep re-serving a stale/broken cached URL from the log
+ *    file forever instead of ever relaunching. Replaced entirely with a
+ *    PID-file (`kill -0 $(cat pidfile)`), which only ever matches the
+ *    actual tracked process, never text inside whatever shell command
+ *    happens to be checking it.
+ */
 async function startTunnel(
   sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>,
   port: number,
   provider: TunnelProvider
 ): Promise<string | null> {
   const logFile = `/tmp/.preview-tunnel-${provider}-${port}.log`;
+  const pidFile = `/tmp/.preview-tunnel-${provider}-${port}.pid`;
   const urlPattern = provider === 'cloudflared' ? /https:\/\/[^\s]+\.trycloudflare\.com/ : /https:\/\/[^\s]+\.loca\.lt/;
-  const processPattern = provider === 'cloudflared' ? `cloudflared tunnel --url http://localhost:${port}` : `localtunnel --port ${port}`;
 
   const status = await sandbox.run({
-    command: `cat ${logFile} 2>/dev/null || true; echo __SPLIT__; pgrep -f ${JSON.stringify(processPattern)} > /dev/null && echo YES || echo NO`,
+    command: `cat ${logFile} 2>/dev/null || true; echo __SPLIT__; test -f ${pidFile} && kill -0 "$(cat ${pidFile})" 2>/dev/null && echo YES || echo NO`,
   });
   const [existingLogOut, aliveOut] = status.stdout.split('__SPLIT__');
   const existingMatch = (existingLogOut ?? '').match(urlPattern);
   if (existingMatch && (aliveOut ?? '').includes('YES')) return existingMatch[0];
 
-  const startCmd =
-    provider === 'cloudflared'
-      ? `command -v cloudflared > /dev/null 2>&1 && (` +
-        `pkill -f ${JSON.stringify(processPattern)} 2>/dev/null; ` +
-        `nohup cloudflared tunnel --url http://localhost:${port} > ${logFile} 2>&1 & ` +
-        `sleep 5)`
-      : `pkill -f ${JSON.stringify(processPattern)} 2>/dev/null; ` + `nohup npx --yes localtunnel --port ${port} > ${logFile} 2>&1 & ` + `sleep 4`;
+  // Stop whatever stale process this pidfile pointed at (if any) — a
+  // plain PID kill, no text-pattern matching involved, so no self-kill
+  // risk regardless of what the launch command below looks like.
+  await sandbox.run({ command: `test -f ${pidFile} && kill "$(cat ${pidFile})" 2>/dev/null; rm -f ${pidFile}; true` });
 
-  const started = await sandbox.run({ command: startCmd });
-  if (provider === 'cloudflared' && started.exitCode !== 0) return null; // cloudflared binary missing — let the fallback try
-  const log = await sandbox.run({ command: `cat ${logFile} 2>/dev/null || true` });
-  const match = log.stdout.match(urlPattern);
-  return match ? match[0] : null;
+  if (provider === 'cloudflared') {
+    const install = await sandbox.run({
+      command: `command -v cloudflared > /dev/null 2>&1 || (curl -fsSL -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared)`,
+    });
+    if (
+      install.exitCode !== 0 &&
+      !(await sandbox.run({ command: 'command -v cloudflared > /dev/null 2>&1 && echo YES || echo NO' })).stdout.includes('YES')
+    ) {
+      return null; // genuinely couldn't install (no egress?) — let the localtunnel fallback try
+    }
+    // `echo $!` captures the just-backgrounded process's real PID in the
+    // SAME shell invocation that started it — the one thing a plain
+    // `pkill -f <pattern>` guess could never reliably give us.
+    await sandbox.run({
+      command: `nohup cloudflared tunnel --url http://localhost:${port} > ${logFile} 2>&1 & echo $! > ${pidFile}; sleep 2`,
+    });
+  } else {
+    await sandbox.run({
+      command: `nohup npx --yes localtunnel --port ${port} > ${logFile} 2>&1 & echo $! > ${pidFile}; sleep 2`,
+    });
+  }
+
+  // FIXED (2026-07-16, confirmed live): a single fixed sleep before
+  // reading the log raced the tunnel's own URL-registration write often
+  // enough to matter — reproduced directly (URL landed in the log at the
+  // ~5s mark while the old code only waited exactly 5s once). Polling a
+  // few times with short waits is both more reliable AND usually faster
+  // in the common case where the URL is ready well before the old fixed
+  // delay would have checked.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const log = await sandbox.run({ command: `cat ${logFile} 2>/dev/null || true` });
+    const match = log.stdout.match(urlPattern);
+    if (match) return match[0];
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+  return null;
 }
 
 export const getPreviewUrlTool = {

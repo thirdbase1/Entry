@@ -41,6 +41,7 @@
  */
 import { Sandbox as E2BSandbox, RateLimitError as E2BRateLimitError } from 'e2b';
 import { prisma } from '@entry/db';
+import { restoreLatestFilesToSandbox } from '@entry/db/chat-versioning';
 
 export interface DirectChatSandbox {
   id: string;
@@ -154,6 +155,7 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
   const existing = await prisma.chatSandbox.findUnique({ where: { chatId } });
 
   let sandbox: E2BSandbox;
+  let restoredFromEviction = false;
   if (existing) {
     try {
       sandbox = await withRetry('Sandbox.connect', () => E2BSandbox.connect(existing.sandboxId, { apiKey }));
@@ -166,10 +168,23 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
       // hard-failing the tool call.
       sandbox = await createFreshSandbox(apiKey);
       await persistSandboxId(chatId, sandbox.sandboxId);
+      restoredFromEviction = true;
     }
   } else {
     sandbox = await createFreshSandbox(apiKey);
     await persistSandboxId(chatId, sandbox.sandboxId);
+  }
+
+  // See chat-versioning.ts's restoreLatestFilesToSandbox for the full bug
+  // this closes ("sandbox wiped between turns" — an eviction used to
+  // silently hand back a blank sandbox with zero restoration).
+  if (restoredFromEviction) {
+    await restoreLatestFilesToSandbox(chatId, {
+      run: async ({ command }) => {
+        const r = await sandbox.commands.run(command, { timeoutMs: 60_000 });
+        return { exitCode: r.exitCode ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+      },
+    }).catch(() => {});
   }
 
   const id = sandbox.sandboxId;
@@ -229,26 +244,72 @@ export async function getPreviewForChat(chatId: string): Promise<
 }
 
 /**
- * "Agent can restart it itself in case of an error." Kills the current
- * sandbox outright (a stuck/wedged VM needs more than idle-resume) so the
- * NEXT getSandboxForChat/getPreviewForChat call creates a fresh one from
- * the shared snapshot. Filesystem state is NOT preserved across a restart
- * (E2B has no stop/resume-with-same-disk primitive like Vercel Sandbox
- * did) — this is a deliberate, documented trade-off: a genuinely wedged
- * sandbox needs a clean slate anyway, and the shared snapshot means the
- * fresh one is immediately usable (tooling intact), not a bare box.
+ * "Restart" button in the preview panel — what the user actually wants
+ * from this is "my dev server is stuck/showing stale content, kick it",
+ * NEVER "wipe every file I've built so far." FIXED (2026-07-16, real bug
+ * reported directly: "the sandbox file's everything inside reset when I
+ * click the restart button in the preview" — confirmed by reading the
+ * previous version of this function, which killed the sandbox outright
+ * and created a brand new one from the shared snapshot on every single
+ * click, discarding all real work unconditionally, every time, even for
+ * an ordinary "the preview looks stuck" click).
+ *
+ * Now mirrors exactly what the eve-default path's own `restart_sandbox`
+ * tool already does safely (apps/agent/agent/lib/tool-impls/
+ * restart_sandbox.ts): reconnect to the SAME existing sandbox, kill stuck
+ * dev-server/tunnel processes only, then replay whatever command last
+ * looked like it started one (`ChatPreview.lastServeCommand` — captured
+ * by lib/tool-impls/bash.ts every time a backgrounded command runs).
+ * Filesystem state is fully preserved. Recreating from the shared
+ * snapshot is now strictly the FALLBACK path, only reached when the
+ * existing sandbox is genuinely unreachable (expired/evicted/killed) —
+ * exactly the case where there is nothing left to preserve anyway.
  */
 export async function restartSandboxForChat(chatId: string): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const apiKey = resolveApiKey();
     const existing = await prisma.chatSandbox.findUnique({ where: { chatId } });
+    const preview = await prisma.chatPreview.findUnique({ where: { chatId } });
+
     if (existing) {
-      await E2BSandbox.connect(existing.sandboxId, { apiKey })
-        .then(sandbox => sandbox.kill())
-        .catch(() => {});
+      try {
+        const sandbox = await E2BSandbox.connect(existing.sandboxId, { apiKey });
+        await sandbox.setTimeout(IDLE_TIMEOUT_MS).catch(() => {});
+        // Same kill list as restart_sandbox.ts's tool version — stuck dev
+        // server + tunnel processes only, never anything filesystem-wide.
+        await sandbox.commands.run(
+          'pkill -f localtunnel 2>/dev/null; pkill -f cloudflared 2>/dev/null; ' +
+            'pkill -f "npm run dev" 2>/dev/null; pkill -f "npm start" 2>/dev/null; ' +
+            'pkill -f vite 2>/dev/null; pkill -f "next dev" 2>/dev/null; true',
+          { timeoutMs: 15_000 },
+        );
+        if (preview?.lastServeCommand) {
+          await sandbox.commands.run(`nohup ${preview.lastServeCommand} > /tmp/.devserver.log 2>&1 & sleep 1`, {
+            timeoutMs: 15_000,
+          });
+        }
+        return { ok: true };
+      } catch {
+        // Existing sandbox is genuinely unreachable (expired/evicted) —
+        // fall through to the from-scratch path below. This is the ONLY
+        // case that should ever lose file state, and it's already lost
+        // (the sandbox is gone) regardless of what this function does.
+      }
     }
+
     const fresh = await createFreshSandbox(apiKey);
     await persistSandboxId(chatId, fresh.sandboxId);
+    await restoreLatestFilesToSandbox(chatId, {
+      run: async ({ command }) => {
+        const r = await fresh.commands.run(command, { timeoutMs: 60_000 });
+        return { exitCode: r.exitCode ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+      },
+    }).catch(() => {});
+    if (preview?.lastServeCommand) {
+      await fresh.commands
+        .run(`nohup ${preview.lastServeCommand} > /tmp/.devserver.log 2>&1 & sleep 1`, { timeoutMs: 15_000 })
+        .catch(() => {});
+    }
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
