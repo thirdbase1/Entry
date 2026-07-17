@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-17',
+    title: "Fixed the Files tab dumping ~3000 sandbox junk files in a brand new chat",
+    items: [
+      "A new chat's Files tab was showing the sandbox's own pre-loaded tooling cache (npm cache, Playwright browsers, shell rc files, etc.) instead of an empty project -- capped at 3000 entries, which is exactly what was showing up. Now excluded by name so only real project files ever appear.",
+    ],
+  },
+  {
+    date: '2026-07-17',
     title: 'Real GitHub/Vercel/Supabase OAuth, and the agent now actually uses it',
     items: [
       'Connect GitHub, Vercel, or Supabase in Settings > Integrations with one click -- a real OAuth grant, no personal token needed. Verified live end-to-end for all three, including a full Supabase sign-in handoff.',

@@ -20,7 +20,29 @@ import { safeExecute } from './safe-execute.js';
  * returns tens of thousands of entries, which would be both slow to
  * generate and useless to render as a tree.
  */
-const EXCLUDED = ['node_modules', '.git', '.next', 'dist', 'build', '.eve', '.vercel', '.turbo', '__pycache__', '.cache'];
+// (2026-07-17, user-reported "why does a new chat have 2999 files") the
+// find below defaults `target` to `.` = the sandbox's actual cwd, which
+// for a BRAND NEW chat (no project scaffolded yet) is a fresh sandbox's
+// home directory -- pre-loaded by the base image with global tooling
+// caches/dotfiles (npm's cache, Playwright's downloaded browsers, shell
+// rc files, etc.) so the FIRST real `npm install`/`bash` in a session is
+// fast. None of that is ever a project file, but the old EXCLUDED list
+// only covered per-project build artifacts (node_modules, .next, dist...)
+// -- it had never been extended to cover the base image's OWN home-dir
+// clutter, so a chat where the model hadn't created anything yet showed
+// the raw contents of that home dir instead of an empty tree. Named
+// explicitly (not "hide all dotfiles") so real project dotfiles a scaffold
+// legitimately creates -- .env, .gitignore, .github, .vscode, .eslintrc,
+// .prettierrc, .npmrc -- still show up once there IS a project.
+const EXCLUDED = [
+  'node_modules', '.git', '.next', 'dist', 'build', '.eve', '.vercel', '.turbo', '__pycache__', '.cache',
+  // base-image tooling caches/state, never project files
+  '.npm', '.config', '.local', '.cargo', '.rustup', '.nvm', '.pyenv', '.agent-browser', 'browsers',
+  '_cacache', '_logs', '_update-notifier-last-checked',
+  // base-image shell/session dotfiles
+  '.bashrc', '.bash_logout', '.bash_history', '.profile', '.sudo_as_admin_successful',
+  '.wget-hsts', '.lesshst', '.viminfo', '.ssh', '.gnupg',
+];
 
 export const listFilesTool = {
   description:
