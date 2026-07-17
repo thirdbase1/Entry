@@ -50,12 +50,21 @@ export async function createSteelSession(): Promise<SteelSession> {
   const res = await fetch(`${BASE_URL}/sessions`, {
     method: 'POST',
     headers: { 'Steel-Api-Key': apiKey(), 'Content-Type': 'application/json' },
-    // Generous timeout + release-on-idle so a chat that goes quiet for a
-    // while doesn't leave a Steel session (and its per-minute billing)
-    // running forever -- matches keepAlive's spirit on the Browser Use
-    // lane without a literal keepAlive flag (Steel's model is simpler:
-    // the session just lives until timeout/inactivityTimeout/release).
-    body: JSON.stringify({ timeout: 1_800_000, inactivityTimeout: 900_000 }),
+    // Release-on-idle so a chat that goes quiet for a while doesn't leave
+    // a Steel session (and its per-minute billing) running forever --
+    // matches keepAlive's spirit on the Browser Use lane without a
+    // literal keepAlive flag (Steel's model is simpler: the session just
+    // lives until timeout/inactivityTimeout/release).
+    //
+    // FIXED (2026-07-17): this used to request timeout: 1_800_000 (30min),
+    // which the current Steel account plan flatly rejects with a 400
+    // ("Requested timeout exceeds the maximum for your plan (15 min)") --
+    // confirmed live against the real account, this was the actual
+    // reason "Steel doesn't work", not an env/key issue. 15 minutes
+    // (900_000ms) is that plan's real ceiling; inactivityTimeout must be
+    // comfortably under it so an idle release can actually fire before
+    // the hard timeout would anyway.
+    body: JSON.stringify({ timeout: 900_000, inactivityTimeout: 300_000 }),
   });
   const text = await res.text();
   let json: Record<string, unknown> = {};

@@ -11,15 +11,15 @@
  * docs.browser-use.com/cloud/browser/live-preview), which is the whole
  * point of this switch.
  *
- * Two API keys (BROWSER_USE_API_KEY / BROWSER_USE_API_KEY_2) are
- * configured on purpose -- explicit user request: "use both at the same
- * time so it can work in parallel". Each is a fully independent
- * account/quota, so keying every request off an explicit `slot` (1 or 2)
- * is what actually gets two simultaneous live browsers instead of both
- * competing for one account's concurrency limit. Callers (tool-impls)
- * decide which slot a given browser session uses and persist that
- * choice in ChatBrowserSession.slot so follow-ups/stops hit the same
- * key the session was created under.
+ * REMOVED (2026-07-17, explicit user request: "remove that browser slot
+ * 2... I remember we only have two browsers"): this used to support a
+ * second Browser Use Cloud key (BROWSER_USE_API_KEY_2) as an extra
+ * parallel lane. That second key was never actually provisioned in
+ * production (confirmed live: process.env.BROWSER_USE_API_KEY_2 is
+ * simply absent there), so the "3-lane" model was really only ever a
+ * 2-lane one in practice (Browser Use slot 1 + Steel) -- the type below
+ * is now a plain `1` rather than `1 | 2` to match reality instead of
+ * silently offering a slot that can never work.
  *
  * No SDK dependency added -- the REST surface used here (create/dispatch,
  * get, stop, list messages) is small and stable (confirmed field-by-field
@@ -45,7 +45,7 @@
 
 const BASE_URL = 'https://api.browser-use.com/api/v3';
 
-export type BrowserUseSlot = 1 | 2;
+export type BrowserUseSlot = 1;
 
 export interface BrowserUseSessionResult {
   id: string;
@@ -68,10 +68,10 @@ export interface BrowserUseMessage {
   screenshotUrl: string | null;
 }
 
-function apiKeyForSlot(slot: BrowserUseSlot): string {
-  const key = slot === 1 ? process.env.BROWSER_USE_API_KEY : process.env.BROWSER_USE_API_KEY_2;
+function apiKeyForSlot(_slot: BrowserUseSlot): string {
+  const key = process.env.BROWSER_USE_API_KEY;
   if (!key) {
-    throw new Error(`BROWSER_USE_API_KEY${slot === 2 ? '_2' : ''} is not set -- cannot use browser slot ${slot}.`);
+    throw new Error('BROWSER_USE_API_KEY is not set -- cannot use the Browser Use Cloud lane.');
   }
   return key;
 }

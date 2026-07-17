@@ -42,11 +42,21 @@ import { createSteelSession, connectSteelBrowser } from '../steel-client.js';
  * browser on a follow-up call) is stashed in `metadata` since it's not
  * something the UI or Browser Use's lane needs at all.
  *
- * pickFreeLane always tries Browser Use's two slots before Steel's one,
- * since Browser Use needs zero extra code here (its own agent does the
- * work) while Steel costs an LLM call per step -- cheaper/faster by
- * default, but all three genuinely run in parallel across different
- * chat turns/tasks since each is tracked as its own ChatBrowserSession row.
+ * pickFreeLane always tries Browser Use before Steel, since Browser Use
+ * needs zero extra code here (its own agent does the work) while Steel
+ * costs an LLM call per step -- both genuinely run in parallel across
+ * different chat turns/tasks since each is tracked as its own
+ * ChatBrowserSession row.
+ *
+ * REMOVED (2026-07-17, explicit user request: "remove that browser slot
+ * 2... I remember we only have two browsers"): the second Browser Use
+ * Cloud slot never actually had a key provisioned in production, so it
+ * was a lane that could never really work -- down to the two lanes that
+ * are actually real: one Browser Use Cloud key, one Steel key. Also
+ * fixed the real cause of "Steel doesn't work" (see steel-client.ts):
+ * Steel was being asked for a 30-minute session timeout, which the
+ * account's actual plan caps at 15 -- every session create was failing
+ * outright on a 400 before it ever got anywhere near the UI.
  *
  * UPDATED (2026-07-17, "make the whole browser feature 3x better"):
  *   - Both lanes now persist a live, incrementally-growing `steps` feed
@@ -83,7 +93,6 @@ type Lane = { provider: 'browser_use'; slot: BrowserUseSlot } | { provider: 'ste
 
 const LANES: Lane[] = [
   { provider: 'browser_use', slot: 1 },
-  { provider: 'browser_use', slot: 2 },
   { provider: 'steel', slot: 1 },
 ];
 
@@ -120,7 +129,7 @@ async function pickFreeLane(chatId: string): Promise<Lane> {
     if (!used.has(`${lane.provider}:${lane.slot}`)) return lane;
   }
   throw new Error(
-    'All three browser lanes (browser_use slots 1/2, steel slot 1) are already in use for this chat -- call browser_stop on an existing session_id before starting another, or reuse an existing session_id as a follow-up.',
+    'Both browser lanes (browser_use, steel) are already in use for this chat -- call browser_stop on an existing session_id before starting another, or reuse an existing session_id as a follow-up.',
   );
 }
 
@@ -362,7 +371,7 @@ export const browserUse = {
     "time, plus a live step-by-step feed of what it's doing) and returns a summary when done. The browser stays alive " +
     'after the task finishes -- pass the returned session_id back in to send a FOLLOW-UP task in the SAME browser ' +
     '(same cookies/tabs/page state) instead of starting fresh. Call browser_stop when genuinely finished with a ' +
-    'session. Up to three sessions can run in parallel for this chat, across two different cloud browser providers.',
+    'session. Up to two sessions can run in parallel for this chat, one per cloud browser provider.',
   inputSchema: z.object({
     task: z.string().describe('Natural-language description of what the browser should do next.'),
     session_id: z
