@@ -53,20 +53,33 @@ async function maybeRememberServeCommand(chatId: string, command: string): Promi
  * the model or the user — the exact same class of bug already fixed for
  * code_artifact/python_coding/task_analysis via with-timeout-signal.ts,
  * just never applied here even though bash is the tool most likely to
- * actually run long. 120s leaves genuine headroom under 300s even as a
- * later tool call in a multi-step turn, while still being long enough for
- * a real `npm install`/`pip install` — anything longer should be
- * backgrounded with `nohup ... &` (see restart_sandbox.ts for the pattern
- * this codebase already uses elsewhere) rather than foregrounded here.
+ * actually run long.
+ *
+ * BUMPED 120s -> 240s (2026-07-18, user-reported: a real clone+install+
+ * audit+build+commit pipeline run as ONE command legitimately needed more
+ * than 120s and kept hitting this ceiling, forcing the model into a
+ * nohup-background-and-poll workaround just to get a normal `npm
+ * install` to finish — and the user correctly pointed out the actual
+ * platform ceiling is 300s (Vercel Hobby plan's maxDuration, see
+ * direct/chat/route.ts), not 120s. 240s keeps a real 60s buffer under
+ * that 300s ceiling for model overhead and any other tool call in the
+ * same turn, while giving genuine multi-step pipelines roughly double
+ * the previous headroom. The underlying sandbox itself already supports
+ * up to 300s per command as a separate, lower-priority safety net (see
+ * direct-chat/sandbox.ts's own `run()`) — this constant was the actual
+ * artificial ceiling, not the sandbox. Anything that still needs more
+ * than this should keep using `nohup ... &` (see restart_sandbox.ts for
+ * the pattern this codebase already uses elsewhere) rather than pushing
+ * this number any closer to 300s.
  */
-const TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = 240_000;
 
 export const bash = {
   description:
     'Execute a shell command in a persistent sandbox (same one browser_use runs in). ' +
     'Use this to actually run code — e.g. `python3 script.py` after drafting it with ' +
     'python_coding, install packages with pip3/npm, inspect files, run curl, etc. ' +
-    'Returns real stdout/stderr/exitCode from actual execution. Commands have a 120s ceiling — ' +
+    'Returns real stdout/stderr/exitCode from actual execution. Commands have a 240s ceiling — ' +
     'for anything longer-running (dev servers, long builds), background it with `nohup cmd > /tmp/out.log 2>&1 &` ' +
     'instead of running it directly.',
   inputSchema: z.object({

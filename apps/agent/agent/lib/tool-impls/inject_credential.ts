@@ -81,10 +81,43 @@ export const injectCredentialTool = {
     const value = resolved.value;
 
     const sandbox = await ctx.getSandbox();
+    // GITHUB 403-DESPITE-CORRECT-PERMS FIX (2026-07-18, real bug reported:
+    // a full clone/install/audit/build/push pipeline completed cleanly —
+    // the model's own permissions probe against the GitHub API even came
+    // back {admin:true, push:true, ...} for this exact token — yet the
+    // `git push` in that same command still 403'd, and the model
+    // concluded from that combination that "GitHub Connect is read-only
+    // at the platform level," which is wrong: this tool's own description
+    // already documents the actual cause below it never reliably follows
+    // step by step several commands into one long generated script --
+    // GitHub's App user-access tokens (ghu_...) need the URL username to
+    // be the literal string "x-access-token", and a git remote URL typed
+    // as https://$TOKEN@github.com/... (token as the username, no
+    // "x-access-token:" prefix) gets a 403 from git's own auth handling
+    // even though the SAME token has real write access — which is
+    // exactly why the permissions probe (a plain Authorization-header API
+    // call, unaffected by this) can report push:true while git itself
+    // still rejects it. Rather than keep relying on the model to type the
+    // URL in the one exact required shape every single time (proven
+    // unreliable across a whole saga of these), force-apply the
+    // credential via git's own `http.extraheader` config through extra
+    // env vars alongside the model's chosen one -- this is honored by any
+    // git subcommand automatically (no --global, nothing written to
+    // disk) and OVERRIDES whatever auth the URL itself does or doesn't
+    // have, so it now works regardless of the exact URL shape the model
+    // generates.
+    const githubExtraEnv: Record<string, string> =
+      service.toLowerCase() === 'github'
+        ? {
+            GIT_CONFIG_COUNT: '1',
+            GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+            GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${value}`).toString('base64')}`,
+          }
+        : {};
     // Scoped to THIS call only — see file comment above. Never persisted
     // to ~/.entry_env or any other file, never exported into the
     // sandbox's ambient/default env.
-    const result = await sandbox.run({ command, env: { [envVarName]: value } });
+    const result = await sandbox.run({ command, env: { [envVarName]: value, ...githubExtraEnv } });
 
     // Defense in depth: scrub the literal secret out of anything that
     // comes back, in case a CLI/API echoed it (e.g. in a printed URL or
