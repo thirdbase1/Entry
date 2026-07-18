@@ -130,6 +130,40 @@ function ToolPart({
   }
 }
 
+/**
+ * FIXED (2026-07-18, real perf bug found while chasing "streaming feels
+ * janky" reports again after the transport-level pass didn't fully
+ * resolve it -- different layer entirely). `memo()`'s default shallow
+ * prop comparison was doing NOTHING here: `allMessages` is `useChat`'s
+ * live `messages` array, which gets a brand-new array reference on every
+ * single streamed token (confirmed in @ai-sdk/react's `AbstractChat` --
+ * `pushMessage`/`replaceMessage` both do `this.state.messages = [...]`).
+ * That meant every token forced React to re-render EVERY message
+ * component in the whole thread, not just the one actually streaming --
+ * in a long chat (50-200+ messages/parts is normal for a coding agent)
+ * this gets progressively more expensive as the conversation grows,
+ * independent of anything on the network/server side.
+ *
+ * Fix: custom comparator that ignores `allMessages`'/`onSend`'s
+ * reference churn and only compares what actually matters for THIS
+ * message: its own `message` object (stable across renders where it
+ * hasn't changed -- only the actively-mutated message gets a new
+ * reference per the same `replaceMessage` call above) and `isStreaming`.
+ * `choose` and `needsConnect` cards are the only parts that read
+ * `allMessages` themselves (scanning for a later resolving message) --
+ * they can only ever change when a NEW message is appended after them,
+ * so comparing `allMessages.length` (cheap) is sufficient for exactly
+ * those, without reintroducing a full-array identity check that would
+ * defeat the whole point of this fix.
+ */
+function messagePropsAreEqual(prev: MessageRendererProps, next: MessageRendererProps): boolean {
+  if (prev.message !== next.message) return false;
+  if (prev.isStreaming !== next.isStreaming) return false;
+  const prevLen = prev.allMessages?.length ?? 0;
+  const nextLen = next.allMessages?.length ?? 0;
+  return prevLen === nextLen;
+}
+
 export const MessageRenderer = memo(function MessageRenderer({
   message,
   isStreaming = false,
@@ -186,4 +220,4 @@ export const MessageRenderer = memo(function MessageRenderer({
       {text}
     </div>
   );
-});
+}, messagePropsAreEqual);

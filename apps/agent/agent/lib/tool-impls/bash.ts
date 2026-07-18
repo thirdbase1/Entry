@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CommandExitError } from 'e2b';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
@@ -112,6 +113,33 @@ export const bash = {
       const result = await withPeriodicVersionCapture(ctx.session.id, sandbox, () => sandbox.run({ command, signal: t.signal }), 10_000);
       return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
     } catch (err) {
+      // FIXED (2026-07-18, real bug: "signal: terminated" surfacing as a
+      // bare, unexplained error with stdout/stderr silently dropped).
+      // E2B's own `commands.run()` (see node_modules/e2b's Commands.run ->
+      // CommandHandle.wait()) throws `CommandExitError` for ANY non-zero
+      // exit code -- not just crashes, but completely ordinary shell
+      // control flow too (`grep` finding nothing, a failing `test`, a
+      // linter reporting issues, etc.). Every one of those was silently
+      // losing its actual stdout/stderr and collapsing into a generic
+      // "bash failed: <message>" the model had zero ability to reason
+      // about -- it never even saw what the command printed before
+      // failing. Root-caused the specific "signal: terminated" variant
+      // too: that exact string is Go's `os.ProcessState.String()` format
+      // for a process killed by SIGTERM (confirmed via e2b's envd being
+      // Go-based) -- i.e. the sandbox's own supervisor killed the
+      // process mid-run, most likely hitting the 2GB template's memory
+      // ceiling on a heavy chained command (`a && b && c`), since our own
+      // 240s tool timeout already gets a distinct, friendly message via
+      // `t.rethrow` before this branch is ever reached.
+      if (err instanceof CommandExitError) {
+        const killedBySignal = /^signal:/i.test(err.error ?? '');
+        const note = killedBySignal
+          ? `\n[process terminated by signal -- likely killed for using too much memory (2GB sandbox limit) or an internal timeout. ` +
+            `If this was a chained command (a && b && c), split it into separate bash calls run one at a time instead of one long chain -- ` +
+            `that way a failure doesn't wipe out the output of the steps that already ran, and each step gets its own resource headroom.]`
+          : '';
+        return { stdout: err.stdout, stderr: (err.stderr ?? '') + note, exitCode: err.exitCode };
+      }
       throw t.rethrow(err);
     } finally {
       t.clear();
