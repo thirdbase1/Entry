@@ -31,7 +31,31 @@ import { getChatSession } from '@entry/copilot';
 import { prisma } from '@entry/db';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 
-const EXCLUDED = ['node_modules', '.git', '.next', 'dist', 'build', '.eve', '.vercel', '.turbo', '__pycache__', '.cache'];
+// (2026-07-18, user-reported "why am I seeing npm file and sudo in the
+// files of a new chat" -- direct/BYOK path specifically) `find .` here
+// walks the sandbox's actual cwd, which for a brand-new chat with no
+// project scaffolded yet is a fresh sandbox's HOME directory --
+// pre-loaded by the base image with global tooling caches/dotfiles
+// (npm's cache, shell rc files, etc.) so the first real npm
+// install/bash in a session is fast. None of that is ever a project
+// file. This list was already fixed for the eve-default path's
+// list_files.ts tool on 2026-07-17 (see that file's own comment for the
+// full story) but never ported over to THIS route, which is the
+// direct/BYOK path's equivalent -- so BYOK chats kept showing the raw
+// home-dir clutter this whole time while eve-default chats didn't.
+// Named explicitly (not "hide all dotfiles") so real project dotfiles a
+// scaffold legitimately creates -- .env, .gitignore, .github, .vscode,
+// .eslintrc, .prettierrc, .npmrc -- still show up once there IS a
+// project.
+const EXCLUDED = [
+  'node_modules', '.git', '.next', 'dist', 'build', '.eve', '.vercel', '.turbo', '__pycache__', '.cache',
+  // base-image tooling caches/state, never project files
+  '.npm', '.config', '.local', '.cargo', '.rustup', '.nvm', '.pyenv', '.agent-browser', 'browsers',
+  '_cacache', '_logs', '_update-notifier-last-checked',
+  // base-image shell/session dotfiles
+  '.bashrc', '.bash_logout', '.bash_history', '.profile', '.sudo_as_admin_successful',
+  '.wget-hsts', '.lesshst', '.viminfo', '.ssh', '.gnupg',
+];
 const PREVIEW_TRUNCATE_BYTES = 8 * 1024 * 1024;
 const SAVE_LIMIT_BYTES = 8 * 1024 * 1024;
 
