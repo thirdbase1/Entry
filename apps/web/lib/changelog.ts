@@ -14,6 +14,15 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Paste-a-config BYOK import + auto model add + auto-verify',
+    items: [
+      "Adding a BYOK provider now accepts a pasted config block (Codex CLI's config.toml shape, JSON, or plain key=value) and fills in the label, base URL, and API shape (chat vs. Responses API) for you -- covers aggregators like Fireworks, Portkey, AIHubMix, ZenMux, and aerolink.lat that all hand out this same block.",
+      "The model named in a pasted config is now added automatically once you save -- no more retyping it into \"add a model id manually\" right after.",
+      "If you pasted an API key too, the newly-added model is now auto-verified with a real test call the moment it's saved, so you see pass/fail immediately instead of a blank untested row.",
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Faster first response + safer bash + npm integration',
     items: [
       "Fixed a real time-to-first-token regression: the new working-memory lookup was blocking in front of the model call instead of running alongside the other setup work already in flight -- now overlaps instead of stacking, shaving a full extra database round-trip off every single turn's response time.",

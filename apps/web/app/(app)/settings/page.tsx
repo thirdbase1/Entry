@@ -16,6 +16,7 @@ import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
 import { AutoSaveField, Toggle, safeJson } from '@/components/settings/shared';
 import { IntegrationsSection } from '@/components/settings/integrations-section';
+import { parseByokConfigSnippet } from '@/lib/byok/parse-config-snippet';
 
 type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES';
 
@@ -68,6 +69,44 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Import-from-config (2026-07-18, "improve the whole BYOK adding flow"
+  // request) -- see parse-config-snippet.ts's file comment for the exact
+  // real-world shape this covers (Codex CLI's own config.toml block, which
+  // several real aggregators -- Fireworks, Portkey, AIHubMix, ZenMux,
+  // aerolink.lat among them -- hand users verbatim). `pastedConfig` is only
+  // local textarea state; parsing is instant/client-side and never sent
+  // anywhere until the user hits "Parse" -- nothing is auto-applied on
+  // every keystroke, so a half-typed paste can't clobber fields mid-edit.
+  const [pastedConfig, setPastedConfig] = useState('');
+  const [showImport, setShowImport] = useState(false);
+  const [importedModelId, setImportedModelId] = useState<string | null>(null);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+
+  const applyParsedConfig = useCallback(() => {
+    const parsed = parseByokConfigSnippet(pastedConfig);
+    const applied: string[] = [];
+    if (parsed.label) {
+      setLabel(parsed.label);
+      applied.push('label');
+    }
+    if (parsed.baseUrl) {
+      setBaseUrl(parsed.baseUrl);
+      applied.push('base URL');
+    }
+    if (parsed.compatibility) {
+      setCompatibility(parsed.compatibility);
+      applied.push('API shape');
+    }
+    if (parsed.modelId) {
+      setImportedModelId(parsed.modelId);
+      applied.push(`model "${parsed.modelId}" (added once saved)`);
+    }
+    setImportNotice(
+      applied.length > 0
+        ? `Filled in: ${applied.join(', ')}. Paste your API key below (configs like this never include the real key), then save.`
+        : "Didn't recognize any fields in that -- fill the form in manually below."
+    );
+  }, [pastedConfig]);
 
   const submit = useCallback(async () => {
     if (!label.trim() || !baseUrl.trim()) {
@@ -84,18 +123,64 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
       });
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error?.message ?? json.error ?? 'Failed to add provider');
-      onCreated({ ...json, models: [] });
+      let provider: Provider = { ...json, models: [] };
+
+      // Auto-add the model the pasted config named, instead of making the
+      // user re-type it into "+ add a model id manually" right after --
+      // closes the loop the import box opened.
+      if (importedModelId) {
+        try {
+          const modelRes = await fetch(`/api/user/byok/providers/${provider.id}/models`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelId: importedModelId }),
+          });
+          const modelJson = await safeJson(modelRes);
+          if (modelRes.ok) {
+            provider = { ...provider, models: [modelJson] };
+            // Auto-verify (2026-07-18): if a key was pasted, immediately
+            // fire the same "Test connection" call the model card's own
+            // button uses, so the very first thing the user sees after
+            // saving is a real pass/fail -- not a blank untested row they
+            // have to remember to click themselves.
+            if (apiKey) {
+              const testRes = await fetch(`/api/user/byok/providers/${provider.id}/models/${modelJson.id}/test`, { method: 'POST' });
+              const testJson = await safeJson(testRes);
+              if (testRes.ok) {
+                provider = {
+                  ...provider,
+                  models: [{
+                    ...modelJson,
+                    lastTestedAt: new Date().toISOString(),
+                    lastTestStatus: testJson.success ? 'success' : 'error',
+                    lastTestError: testJson.error ?? null,
+                  }],
+                };
+              }
+            }
+          }
+        } catch {
+          // Non-fatal -- the provider itself saved fine; the user can still
+          // add/test the model manually from the card below.
+        }
+      }
+
+      onCreated(provider);
       setOpen(false);
       setLabel('');
       setBaseUrl('');
       setApiKey('');
       setCompatibility('OPENAI');
+      setPastedConfig('');
+      setShowImport(false);
+      setImportedModelId(null);
+      setImportNotice(null);
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');
     } finally {
       setSaving(false);
     }
-  }, [label, compatibility, baseUrl, apiKey, onCreated]);
+  }, [label, compatibility, baseUrl, apiKey, importedModelId, onCreated]);
 
   if (!open) {
     return (
@@ -112,6 +197,41 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
   return (
     <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
       <div className="text-sm font-medium text-foreground">New provider connection</div>
+
+      {!showImport ? (
+        <button
+          onClick={() => setShowImport(true)}
+          className="text-xs text-left text-muted-foreground hover:text-foreground underline underline-offset-2 w-fit"
+        >
+          Paste a provider config instead (Codex CLI config.toml, JSON, or similar)
+        </button>
+      ) : (
+        <div className="flex flex-col gap-2 border rounded-md p-3 bg-background">
+          <span className="text-xs text-muted-foreground">
+            Paste the block your provider gave you (e.g. a `[model_providers.*]` config.toml snippet) -- we'll fill in the label, base URL, API shape, and model below. Never paste your API key here; that goes in its own field further down.
+          </span>
+          <textarea
+            value={pastedConfig}
+            onChange={e => setPastedConfig(e.target.value)}
+            placeholder={'[model_providers.example]\nname = "Example"\nbase_url = "https://api.example.com/v1"\nwire_api = "responses"'}
+            rows={5}
+            className="px-3 py-2 rounded-md border bg-background text-foreground text-xs font-mono outline-none focus:border-primary resize-y"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={applyParsedConfig}
+              disabled={!pastedConfig.trim()}
+              className="h-8 px-3 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
+            >
+              Parse
+            </button>
+            <button onClick={() => setShowImport(false)} className="h-8 px-3 rounded-md text-xs text-muted-foreground hover:bg-accent">
+              Hide
+            </button>
+          </div>
+          {importNotice && <span className="text-xs text-muted-foreground">{importNotice}</span>}
+        </div>
+      )}
 
       <label className="flex flex-col gap-1 text-sm">
         <span className="text-muted-foreground text-xs">Label</span>
