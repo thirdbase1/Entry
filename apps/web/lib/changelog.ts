@@ -14,6 +14,22 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Fixed a real data-loss bug: reloading mid-turn could permanently wipe an AI reply',
+    items: [
+      'Root cause: two independent writers could save a chat\'s transcript to the database -- the browser tab\'s own save-on-finish (the complete, correct reply) and a server-side reconciler that reattaches when a reload lands mid-turn (which only re-captures up to 8 seconds of progress). If the reconciler\'s shorter, partial write happened to land AFTER the tab\'s complete one, it silently overwrote the full reply with a partial one -- permanently, once the live session later expired with no way to recover it.',
+      'Fixed with an atomic database-level guard: a chat\'s saved transcript can never shrink, no matter which of the two writers\' saves lands last. Whichever save is fuller always wins.',
+    ],
+  },
+  {
+    date: '2026-07-18',
+    title: 'Agent delegation can now target your own saved custom providers too',
+    items: [
+      'The agent-delegate tool (hand a subtask to a specific model) previously only knew about the public AI Gateway catalog. It can now also target one of YOUR OWN saved custom/BYOK providers from Settings by name -- e.g. a personal relay or endpoint you\'ve connected yourself -- using your own base URL, your own key, and the exact model you registered, the same as picking it in the chat model selector.',
+      'Provider names are now validated instantly against the live Gateway catalog (or your own saved providers) before a delegated task ever runs, with real currently-valid model ids shown right in the tool itself -- no more guessing, no wasted retries picking a model.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Sub-agent delegation can now actually DO things, plus real timeout/cancel handling',
     items: [
       'The sub-agent delegate tool could previously only research (web_search/web_crawl) -- it had no way to actually execute anything, so any delegated task needing real work could only describe what should happen. It can now also use bash, list_files/write_file/edit_file/append_file, code_artifact, python_coding, and browser_use/browser_stop, in the SAME live sandbox as the conversation -- so delegating an actual coding or file-based subtask is now a real thing, not just delegating research.',

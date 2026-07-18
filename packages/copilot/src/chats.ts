@@ -9,6 +9,7 @@
  * conversation via useEveAgent's `initialEvents`/`initialSession`.
  */
 import { prisma } from '@entry/db';
+import { Prisma } from '@entry/db';
 import { jobQueue } from '@entry/queue';
 
 export interface ChatSessionSummary {
@@ -48,20 +49,65 @@ export async function createChatSession(
   });
 }
 
-/** Persist the resumable snapshot — call from useEveAgent's onFinish. */
+/**
+ * Persist the resumable snapshot — call from useEveAgent's onFinish.
+ *
+ * FIXED (2026-07-18, real data-loss bug reported: "sometimes if I reload a
+ * chat I won't see the AI response messages at all, it wipes and never
+ * shows in the chat again"): this is called from TWO independent writers
+ * for the same row -- the original tab's own `onFinish` (the COMPLETE,
+ * correct final event list once a turn genuinely finishes) AND
+ * eve-reconcile.ts's `reconcileEveSession`, triggered server-side by a
+ * page reload landing mid-turn, which re-streams the live eve session for
+ * only up to 8 seconds and persists whatever partial slice of events it
+ * captured in that window. A plain `.update()` here is unconditional
+ * last-write-wins with no ordering guarantee between those two callers --
+ * if the reconciler's (shorter, partial) write happened to land in
+ * Postgres AFTER the tab's own (complete) write, the shorter snapshot
+ * silently became the row's new permanent truth. Since the underlying eve
+ * session itself later expires (confirmed in reconcileEveSession's own
+ * comment), nothing could ever recover the lost tail of that conversation
+ * after that point -- exactly the reported "wipes and never shows again."
+ *
+ * Fix: a single atomic conditional UPDATE that only writes when the
+ * incoming event count is >= what's already persisted for this row --
+ * i.e. this can never shrink the stored transcript, no matter which of
+ * the two callers' writes happens to land last. A no-op WHERE-guard
+ * miss here is silent and safe (the row already holds the longer,
+ * correct version); nothing more needs to happen in that case.
+ */
 export async function saveChatSnapshot(
   userId: string,
   sessionId: string,
-  data: { events: unknown; cursor: unknown; title?: string }
+  data: { events?: unknown; cursor?: unknown; title?: string }
 ): Promise<void> {
-  await prisma.eveChatSession.update({
-    where: { id: sessionId, userId },
-    data: {
-      events: data.events as any,
-      cursor: data.cursor as any,
-      ...(data.title ? { title: data.title } : {}),
-    },
-  });
+  // No `events` at all (e.g. a hypothetical future title-only rename call) --
+  // nothing for the anti-shrink guard below to protect, and matches the
+  // original plain `.update()`'s semantics of leaving untouched fields alone.
+  if (data.events === undefined) {
+    await prisma.eveChatSession.update({
+      where: { id: sessionId, userId },
+      data: {
+        ...(data.cursor !== undefined ? { cursor: data.cursor as any } : {}),
+        ...(data.title ? { title: data.title } : {}),
+      },
+    });
+    return;
+  }
+  const incomingLength = Array.isArray(data.events) ? data.events.length : 0;
+  const eventsJson = JSON.stringify(data.events ?? []);
+  const cursorJson = JSON.stringify(data.cursor ?? null);
+  const titleFragment = data.title ? Prisma.sql`, title = ${data.title}` : Prisma.empty;
+  await prisma.$executeRaw`
+    UPDATE eve_chat_sessions
+    SET events = ${eventsJson}::jsonb,
+        cursor = ${cursorJson}::jsonb,
+        updated_at = now()
+        ${titleFragment}
+    WHERE id = ${sessionId}
+      AND user_id = ${userId}
+      AND (events IS NULL OR jsonb_array_length(events) <= ${incomingLength})
+  `;
   // Mirrors the original's queueChatEmbedding call site (context/resolver.ts) —
   // keep the chat's semantic-search index current on every persisted turn.
   // Debounced implicitly: embedAndStore() replaces prior chunks wholesale each

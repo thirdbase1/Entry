@@ -1,7 +1,8 @@
 import { generateText, tool, stepCountIs, type LanguageModel } from 'ai';
 import { gateway } from '@ai-sdk/gateway';
 import { z } from 'zod';
-import { resolveModelIdForProvider } from '../model-catalog.js';
+import { resolveModelIdForProvider, getCatalogMenu } from '../model-catalog.js';
+import { resolveUserCustomProviderModel, listUserCustomProviderLabels } from '../custom-model-provider.js';
 import { webSearch } from './web_search.js';
 import { webCrawl } from './web_crawl.js';
 import { bash } from './bash.js';
@@ -74,6 +75,28 @@ import type { ToolExecCtx } from './types.js';
  *      browser_use.ts.
  */
 
+/**
+ * IMPROVED (2026-07-18, "agent can specify provider/model on the tool
+ * call, agent sees all the provider and model, do it super simple so
+ * selecting doesn't take time"): fetched ONCE at module load (top-level
+ * await, same established convention as agent.ts's own
+ * `resolveModelIdForProvider('anthropic')` cold-start call) so:
+ *   1. `provider` becomes a REAL `z.enum(...)` of whatever providers the
+ *      live catalog actually has right now -- an invalid provider is
+ *      rejected by schema validation before execute() ever runs, instead
+ *      of failing deep inside a real tool call.
+ *   2. `model`'s description gets an actual menu of concrete, currently-
+ *      valid ids per provider, so the calling model can pick a real one
+ *      directly instead of recalling/inventing a slug that may not exist.
+ *   3. This also warms model-catalog.ts's shared 5-minute cache, so the
+ *      FIRST real delegate call of a cold start (which calls
+ *      `resolveModelIdForProvider` internally) no longer pays a cold
+ *      catalog fetch -- it's already warm from this module-load call.
+ * A cold-start catalog hiccup can't take the tool down: getCatalogMenu()
+ * falls back to a small known-good provider list on any fetch failure.
+ */
+const catalogMenu = await getCatalogMenu();
+
 const AgentDelegateInputSchema = z.object({
   message: z
     .string()
@@ -86,17 +109,24 @@ const AgentDelegateInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'AI provider to delegate to, e.g. "anthropic", "google", "openai", "deepseek", "xai", "moonshotai", "zai". ' +
-        'When given without `model`, automatically picks that provider\'s strongest currently-available model from the live Gateway catalog. ' +
-        'Pick deliberately for the task: e.g. "google" for deep research / large-context reading, "anthropic" for careful planning or precise reasoning, ' +
-        '"openai" for rewriting tone/style. Omit both `provider` and `model` to delegate to a copy of yourself (same model as this turn).'
+      `EITHER a live AI Gateway provider family -- one of: ${catalogMenu.providers.join(', ')} -- OR the label of one of THIS user's own ` +
+        'saved custom/BYOK providers from their settings page (e.g. a personal relay or endpoint they connected themselves, such as ' +
+        '"aerolink") -- both are supported the same way, just pass whichever name applies. For a Gateway family given without `model`, ' +
+        "automatically picks that provider's strongest currently-available model; for a user's own custom provider given without " +
+        "`model`, automatically picks the first model they enabled under it. Pick a Gateway family deliberately for the task: e.g. " +
+        '"google" for deep research / large-context reading, "anthropic" for careful planning or precise reasoning, "openai" for ' +
+        'rewriting tone/style. Omit both `provider` and `model` to delegate to a copy of yourself (same model as this turn).'
     ),
   model: z
     .string()
     .optional()
     .describe(
-      'Exact model to delegate to. Either a full Gateway id ("google/gemini-3-pro-preview") or a bare model name combined with `provider` ' +
-        '("gemini-3-pro-preview" alongside provider "google"). Takes priority over the provider\'s auto-picked default when both resolve to a specific model.'
+      'Exact model to delegate to. For a Gateway `provider`: either a full Gateway id ("google/gemini-3-pro-preview") or a bare model ' +
+        'name combined with `provider` ("gemini-3-pro-preview" alongside provider "google") -- takes priority over the auto-picked ' +
+        "default when both resolve to a specific model. Real, currently-valid Gateway options per provider (pick one of these directly " +
+        `when you want a SPECIFIC model rather than that provider's auto-picked best): ${catalogMenu.menuText}. For a user's own custom ` +
+        'provider: the exact model id/slug they registered it under in settings (e.g. "gpt-5.6-sol") -- omit to auto-pick their first ' +
+        'enabled model under that provider.'
     ),
   maxSteps: z
     .number()
@@ -316,14 +346,15 @@ async function runDelegatedTask(
 export const agentDelegate = {
   description:
     'Delegate a bounded subtask to a sub-agent, optionally on a SPECIFIC provider/model you choose (e.g. hand deep research to a Gemini model, ' +
-    'careful planning to a Claude model, or a rewrite/tone pass to a GPT model) — matching a real multi-model workflow instead of doing everything ' +
-    'on a single model. The sub-agent has its own fresh context (it does NOT see this conversation — pack everything it needs into `message`) but ' +
-    'is NOT limited to just reading/thinking: it can also call web_search/web_crawl, bash, list_files/write_file/edit_file/append_file, ' +
-    'code_artifact, python_coding, and browser_use/browser_stop itself, in the SAME live sandbox as this conversation -- so a coding or ' +
-    'file-based subtask ("read these files and refactor X", "write a script that does Y and run it") is a real thing you can delegate, ' +
-    'not just research. Returns its final result as plain text, plus `truncated: true` if it ran out of steps ' +
-    'before genuinely finishing (re-delegate a continuation using the partial result as context in that case, rather than treating it as complete). ' +
-    'Pass `maxSteps` for a task you expect to be long/involved. Omit `provider`/`model` to delegate to a copy of yourself instead of a different model.',
+    'careful planning to a Claude model, a rewrite/tone pass to a GPT model, or the CURRENT USER\'s own saved custom/BYOK provider from their ' +
+    'settings page) — matching a real multi-model workflow instead of doing everything on a single model. The sub-agent has its own fresh context ' +
+    '(it does NOT see this conversation — pack everything it needs into `message`) but is NOT limited to just reading/thinking: it can also call ' +
+    'web_search/web_crawl, bash, list_files/write_file/edit_file/append_file, code_artifact, python_coding, and browser_use/browser_stop itself, ' +
+    'in the SAME live sandbox as this conversation -- so a coding or file-based subtask ("read these files and refactor X", "write a script that ' +
+    'does Y and run it") is a real thing you can delegate, not just research. Returns its final result as plain text, plus `truncated: true` if it ' +
+    'ran out of steps before genuinely finishing (re-delegate a continuation using the partial result as context in that case, rather than ' +
+    'treating it as complete). Pass `maxSteps` for a task you expect to be long/involved. Omit `provider`/`model` to delegate to a copy of ' +
+    'yourself instead of a different model.',
   inputSchema: AgentDelegateInputSchema,
   outputSchema: AgentDelegateResultSchema,
   async execute(
@@ -333,15 +364,55 @@ export const agentDelegate = {
     let note: string | undefined;
     let modelId: string;
     const budget = maxSteps ?? 15;
+    const userId = ctx?.session?.auth?.current?.principalId;
+
+    // ADDED (2026-07-18, "it can also specify... provider aerolink, model
+    // gpt-5.6-sol" -- a user's own saved custom/BYOK provider from their
+    // settings page, not a Gateway family): tried FIRST, before anything
+    // Gateway-related, and regardless of whether this happens to be a
+    // BYOK top-level turn or not -- unlike a Gateway request, targeting
+    // the user's OWN endpoint with their OWN key never touches (or bills)
+    // the platform's Gateway at all, so there's no cost-isolation reason
+    // to block it on a BYOK turn the way a Gateway request is blocked
+    // below. Only matched when `provider` ISN'T already a live Gateway
+    // family name, so a real family (e.g. "anthropic") always resolves as
+    // Gateway even if a user happened to save a custom provider under a
+    // clashing label.
+    if (provider && userId && !catalogMenu.providers.includes(provider)) {
+      const custom = await resolveUserCustomProviderModel(userId, provider, model).catch(() => null);
+      if (custom) {
+        const { text, steps } = await runDelegatedTask(custom.model, message, budget, ctx);
+        const truncated = isTruncatedFinish(steps, budget);
+        return {
+          result: text,
+          modelUsed: `${custom.providerLabel}/${custom.modelId}`,
+          stepsTaken: steps.length,
+          truncated,
+          note: truncated
+            ? `Ran out of its ${budget}-step budget before finishing on its own — treat "result" as partial progress, not a final answer.`
+            : undefined,
+        };
+      }
+    }
 
     if (ctx?.byokModel) {
       // BYOK turns never touch the Gateway at any depth (same policy as
       // every other sub-generation tool — task_analysis,
       // python_coding, code_artifact) so the platform never
       // foots a Gateway bill on a turn the user is paying for with their
-      // own key. A requested provider/model can't be honored here.
+      // own key. A requested provider/model can't be honored here --
+      // note this only means GATEWAY requests specifically; a named
+      // custom-provider request was already tried just above and would
+      // have returned by now on a match, so reaching here means either no
+      // provider/model was given, or it genuinely didn't resolve as
+      // either a Gateway family or one of the user's own saved providers.
       if (provider || model) {
-        note = `Custom provider/model requests aren't available on BYOK turns — ran on your connected model instead of ${[provider, model].filter(Boolean).join('/')}.`;
+        const custom = userId ? await listUserCustomProviderLabels(userId).catch(() => []) : [];
+        note =
+          `Custom provider/model requests aren't available on BYOK turns — ran on your connected model instead of ${[provider, model].filter(Boolean).join('/')}.` +
+          (provider && custom.length > 0 && !custom.some(l => l.toLowerCase() === provider.toLowerCase())
+            ? ` (If you meant one of your own saved providers, your options are: ${custom.join(', ')}.)`
+            : '');
       }
       const { text, steps } = await runDelegatedTask(ctx.byokModel, message, budget, ctx);
       const truncated = isTruncatedFinish(steps, budget);
@@ -356,6 +427,20 @@ export const agentDelegate = {
               .join(' ')
           : note,
       };
+    }
+
+    if (provider && !catalogMenu.providers.includes(provider)) {
+      // Reached only when the custom-provider attempt above found nothing
+      // -- `provider` isn't a live Gateway family AND isn't one of this
+      // user's own saved providers either. Fail clearly here instead of
+      // letting it fall into resolveModelIdForProvider below, which would
+      // throw a much less actionable "no models found" error.
+      const custom = userId ? await listUserCustomProviderLabels(userId).catch(() => []) : [];
+      throw new Error(
+        `"${provider}" isn't a live Gateway provider (${catalogMenu.providers.join(', ')}) or one of your own saved providers` +
+          (custom.length > 0 ? ` (${custom.join(', ')})` : ' (you have none saved yet)') +
+          '. Check the spelling, or omit `provider` to delegate to a copy of yourself.'
+      );
     }
 
     if (model && model.includes('/')) {
@@ -373,6 +458,24 @@ export const agentDelegate = {
       // No explicit ask -- delegate to a copy of the root's own model
       // family, matching eve's built-in `agent` tool default behavior.
       modelId = await resolveModelIdForProvider('anthropic');
+    }
+
+    // ADDED (2026-07-18, "so selecting doesn't take time"): an explicit
+    // "provider/model" guess (as opposed to a provider-only auto-pick,
+    // which is always resolved from the live catalog and therefore
+    // already guaranteed valid) can still name a real-looking but wrong
+    // id -- a typo, a retired model, a provider prefix that doesn't
+    // actually pair with that model name. Left unchecked, that only
+    // surfaces as an opaque failure deep inside generateText/Gateway
+    // itself. Catch it here instead, immediately, with a clear message
+    // pointing at real alternatives -- skipped entirely if the catalog
+    // menu came up empty (a cold-start fetch hiccup; see getCatalogMenu's
+    // fallback) so a validation-set outage never wrongly blocks a
+    // perfectly valid model.
+    if (model && catalogMenu.allModelIds.size > 0 && !catalogMenu.allModelIds.has(modelId)) {
+      throw new Error(
+        `"${modelId}" isn't in the live Gateway catalog right now. Known options: ${catalogMenu.menuText}.`
+      );
     }
 
     const { text, steps } = await runDelegatedTask(gateway(modelId), message, budget, ctx);
