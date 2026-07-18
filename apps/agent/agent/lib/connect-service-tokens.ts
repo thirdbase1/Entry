@@ -82,7 +82,7 @@ export function hasConnectConnector(service: string): boolean {
  * corresponds to, the first time it's needed, so all following calls use
  * the correct per-user installation instead of the shared default.
  */
-async function resolveGithubInstallationId(userId: string): Promise<string | null> {
+export async function resolveGithubInstallationId(userId: string): Promise<string | null> {
   const existing = await prisma.user.findUnique({ where: { id: userId }, select: { githubInstallationId: true } });
   if (existing?.githubInstallationId) return existing.githubInstallationId;
 
