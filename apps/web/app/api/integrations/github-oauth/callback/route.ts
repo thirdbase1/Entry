@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { saveCredential } from '@entry/agent/lib/credential-vault';
+import { prisma } from '@entry/db';
 
 /**
  * GET /api/integrations/github-oauth/callback
@@ -20,6 +21,19 @@ import { saveCredential } from '@entry/agent/lib/credential-vault';
  * that, so the agent resumes the task with no retyping needed. Falls back
  * to the old /settings redirect when there's no return chat (e.g. someone
  * connecting straight from the Settings page).
+ *
+ * 2026-07-18: start/route.ts now sends users through entry-github's real
+ * install-and-authorize screen (github.com/apps/entry-github/installations/new)
+ * instead of a bare OAuth authorize -- see that file's comment for the
+ * real bug this fixes (users were authorizing but never installing on
+ * any repo, so every push kept 403ing with a valid-looking token and
+ * zero actual repo access). GitHub's redirect back from that screen adds
+ * `installation_id` alongside the usual `code` -- persisted here into
+ * `User.githubInstallationId` (the exact column connect-service-tokens.ts
+ * already reads/writes for the Vercel-Connect path, kept in sync here
+ * too) so any code that checks "does this user have a real installation"
+ * sees the truth regardless of which of the two flows the user went
+ * through.
  */
 export async function GET(req: NextRequest) {
   const origin = req.nextUrl.origin;
@@ -44,6 +58,8 @@ export async function GET(req: NextRequest) {
 
   const code = req.nextUrl.searchParams.get('code');
   const state = req.nextUrl.searchParams.get('state');
+  const installationId = req.nextUrl.searchParams.get('installation_id');
+  const setupAction = req.nextUrl.searchParams.get('setup_action');
   const cookieState = req.cookies.get('github_oauth_state')?.value;
 
   const clearCookies = (res: NextResponse) => {
@@ -81,6 +97,19 @@ export async function GET(req: NextRequest) {
     }
 
     await saveCredential({ userId: session.user.id, service: 'github', value: tokenJson.access_token });
+
+    // Persist the installation the user just picked repos for (or
+    // "updated" -- setup_action=update -- if they revisited an existing
+    // one to add/remove repos). Best-effort: a user who somehow lands
+    // here without an installation_id (shouldn't happen via the
+    // installations/new URL, but keep this robust to a stray direct hit
+    // on this callback) still gets their OAuth token saved above --
+    // just without repo access until they do install it.
+    if (installationId) {
+      await prisma.user
+        .update({ where: { id: session.user.id }, data: { githubInstallationId: installationId } })
+        .catch(err => console.error('[github-oauth callback] failed to persist installationId', session.user.id, setupAction, err));
+    }
 
     return clearCookies(NextResponse.redirect(resultUrl('connected')));
   } catch (e) {
