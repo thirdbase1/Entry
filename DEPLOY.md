@@ -153,6 +153,33 @@ For a release with NO new migrations (verify: `git diff` against
 local migrate step entirely rather than fighting the guard —
 `SKIP_PRODUCTION_MIGRATE_GUARD=1 npm run build`.
 
+**⚠️ Commit and push to GitHub BEFORE building/deploying — never skip this.**
+This project's deploy path builds from a local working tree and ships
+straight to Vercel via `--prebuilt`, entirely bypassing git. Nothing
+about that path requires a commit to exist, which makes it dangerously
+easy to deploy real, working code that was never actually saved anywhere
+durable — confirmed real incident (2026-07-18): a full feature (durable
+per-user memory: new Prisma model/migration, a new tool, persona.ts
+changes, direct/chat wiring) went through multiple build+deploy cycles
+and was live in production while sitting completely uncommitted in a
+scratch working directory, indistinguishable from having never been
+written down at all. It only survived because that scratch directory
+happened not to get cleared before someone noticed — a temp/dev
+directory is never guaranteed to survive between sessions, and any code
+that only exists there and in a deployed Vercel bundle has no real
+backup: it can't be diffed, reviewed, reverted to, or recovered if that
+directory is gone, regardless of how "safe" the deploy itself was.
+
+```bash
+git add -A
+git commit -m "<describe what changed>"
+git push origin main
+```
+
+Do this for EVERY deploy, not just ones that "feel big" — the whole point
+is that there's no reliable way to tell in advance which working
+directory won't survive to the next session.
+
 ```bash
 # One-time, if you haven't already:
 npm i -g vercel
