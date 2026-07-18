@@ -14,6 +14,16 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Faster first response + safer bash + npm integration',
+    items: [
+      "Fixed a real time-to-first-token regression: the new working-memory lookup was blocking in front of the model call instead of running alongside the other setup work already in flight -- now overlaps instead of stacking, shaving a full extra database round-trip off every single turn's response time.",
+      'bash tool no longer silently drops command output when a command exits non-zero (which is completely normal -- a grep with no match, a failing check, etc, not just crashes) -- you now get the real stdout/stderr back either way, plus a clear explanation on the rarer case a command gets killed for using too much memory.',
+      'Fixed long chats getting progressively slower to render while streaming -- a rendering bug was silently causing every message in the whole thread to re-render on every single streamed word instead of just the one being written.',
+      'Added npm as a connectable integration (Settings > Integrations, and inline in chat) -- paste your own npm access token the same way you already can for Pxxl/Sendbyte.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Four more streaming reliability fixes',
     items: [
       "Updated the underlying AI SDK (7.0.28 -> 7.0.31), picking up an upstream fix for compressed response chunks not flushing incrementally in Next.js -- exactly the \"looks like it's not streaming, just appears all at once\" symptom.",

@@ -203,6 +203,22 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // right before the response is returned) so the durability guarantee
   // above is unchanged — only the ORDERING relative to streamText's own
   // network call changed, not whether either one is awaited.
+  // FIXED (2026-07-18, real TTFT regression from the Working Memory
+  // feature): this used to be a plain `await getWorkingMemory(userId)`
+  // sitting well below preSave/compactionResult, so its DB round-trip
+  // ran fully SEQUENTIALLY after those instead of overlapping with
+  // them the way this whole function otherwise carefully avoids (see
+  // preSave's own comment above for the established pattern). Two
+  // independent async DB calls run one after another cost t1+t2; kicked
+  // off together up front and only awaited where actually needed, they
+  // cost max(t1,t2) instead -- a real, direct hit to time-to-first-token
+  // on every single turn, on top of whatever compaction/model-connection
+  // latency was already there. Only the START point moved (now right
+  // alongside preSave, the earliest point userId is known); still fully
+  // awaited before SYSTEM_PROMPT is built below, so behavior is
+  // unchanged -- only the wall-clock overlap improved.
+  const userWorkingMemoryPromise = getWorkingMemory(userId);
+
   const preSave = (async () => {
     const existing = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId } });
     if (!existing) {
@@ -308,7 +324,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // model naturally gives, with no steering either way. `providerLabel`/
   // `modelId` are still resolved above and still used for logging/
   // response headers, just no longer threaded into the prompt.
-  const userWorkingMemory = await getWorkingMemory(userId);
+  const userWorkingMemory = await userWorkingMemoryPromise;
   const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: true, workingMemory: userWorkingMemory });
   const instructions = compactionResult.then(({ summaryText }) => {
     const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
