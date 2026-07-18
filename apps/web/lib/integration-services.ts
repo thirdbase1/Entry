@@ -1,6 +1,6 @@
 /**
  * Single source of truth for the "known" deploy-target integrations
- * (Vercel, GitHub, Supabase, Pxxl, Sendbyte) — shared between the
+ * (Vercel, GitHub, Supabase, Pxxl, Sendbyte, npm) — shared between the
  * Settings > Integrations page and the in-chat connect card
  * (renderers/integration-connect-card.tsx) so the two surfaces never
  * drift apart on name/icon/hint/oauth-vs-token.
@@ -62,6 +62,14 @@ export const KNOWN_SERVICES: KnownService[] = [
     placeholder: 'Paste your Sendbyte API key',
     tokenUrl: 'https://app.sendbyte.africa/keys/',
     icon: '/integration-logos/sendbyte.svg',
+  },
+  {
+    service: 'npm',
+    name: 'npm',
+    hint: 'Access token from your own npm account — used to publish/update packages to the npm registry as you.',
+    placeholder: 'Paste your npm access token',
+    tokenUrl: 'https://docs.npmjs.com/creating-and-viewing-access-tokens',
+    icon: '/integration-logos/npm.svg',
   },
 ];
 
