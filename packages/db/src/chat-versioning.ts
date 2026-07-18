@@ -472,12 +472,14 @@ export async function captureVersionFromSandboxDiff(
  * the same command: this one (every intervalMs while it's in flight) and
  * the per-step one (once it finishes). `inFlight` guards against two
  * overlapping git commits racing each other if a capture happens to
- * still be running when the next interval tick fires. 30s default keeps
- * this well under bash.ts's 240s ceiling (comfortably several capture
- * points per command) without spamming the sandbox with git commands for
- * short/instant ones -- the interval never even fires once for anything
- * that finishes in under 30s, and clearInterval on completion means a
- * fast command has zero extra overhead either way.
+ * still be running when the next interval tick fires. Default tightened
+ * 30s -> 10s (2026-07-18, user-requested further improvement) -- still
+ * comfortably under bash.ts's 240s ceiling (now ~24 possible capture
+ * points across a full-length command instead of ~8) without spamming
+ * the sandbox with git commands for short/instant ones -- the interval
+ * never even fires once for anything that finishes in under 10s, and
+ * clearInterval on completion means a fast command has zero extra
+ * overhead either way.
  *
  * Best-effort throughout, same philosophy as captureVersionFromSandboxDiff
  * itself: a failed background capture is logged and swallowed, never
@@ -488,7 +490,7 @@ export function withPeriodicVersionCapture<T>(
   chatId: string,
   sandbox: VersionCaptureSandbox,
   fn: () => Promise<T>,
-  intervalMs = 30_000,
+  intervalMs = 10_000,
 ): Promise<T> {
   let inFlight = false;
   const timer: ReturnType<typeof setInterval> = setInterval(() => {

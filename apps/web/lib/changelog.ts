@@ -14,6 +14,20 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Sandbox saving tightened to every 10 seconds',
+    items: [
+      "The periodic in-flight save added earlier today (every ~30s during a long-running command) is now every ~10s -- roughly 3x more save points across a full-length command, on top of the per-step saving already in place.",
+    ],
+  },
+  {
+    date: '2026-07-18',
+    title: 'Fixed the GitHub repo-access card missing GitHub\'s most common error message',
+    items: [
+      'The "this repo isn\'t accessible yet" detection had a subtle bug: it required an exact double-space pattern that GitHub\'s single most common error for this case ("remote: Repository not found.") doesn\'t actually have, so the one-click card silently failed to appear for it. Fixed the detection and added a couple more real GitHub error variants (bare 403s, "Write access to repository not granted.") to catch this reliably.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'One-click GitHub repo access, right from chat',
     items: [
       "If the agent hits a push that fails because this specific repo isn't in Entry's GitHub access list yet, chat now shows a one-click \"Manage repo access\" card instead of telling you to go dig through GitHub's own Settings pages manually.",

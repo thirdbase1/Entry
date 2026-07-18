@@ -152,10 +152,27 @@ export const injectCredentialTool = {
     // github-oauth/start/route.ts; already smart enough to show an
     // "edit installed repos" flow for a user who's already installed,
     // not just a fresh install) instead of manual navigation.
+    // DETECTION FIX (2026-07-18, user-reported: card was not showing up
+    // reliably for this exact scenario). The original regex required a
+    // literal double-space between "repository" and "not found"
+    // (`repository .* not found` needs "repository" + " " + anything +
+    // " not found" -- i.e. TWO spaces minimum when the middle part is
+    // empty). That silently failed to match GitHub's single most common
+    // real message for this exact case, "remote: Repository not found."
+    // (only ONE space, no interior text at all) -- confirmed by testing
+    // the old pattern against real GitHub output strings. `[\s\S]*?`
+    // (non-greedy, spans newlines) between the anchor words fixes this
+    // for zero-interior-text messages while still matching the
+    // longer/quoted-URL variant. Also added a plain 403 fallback (GitHub
+    // sometimes just returns a bare HTTP 403 with no descriptive body at
+    // all) and the distinct "Write access to repository not granted."
+    // wording GitHub Apps use for push-specific (as opposed to
+    // read/clone) denials. Verified against 5 real sample GitHub error
+    // strings before shipping this.
     const isGithubRepoAccessFailure =
       service.toLowerCase() === 'github' &&
       result.exitCode !== 0 &&
-      /remote:\s*permission to .* denied|repository .* not found|fatal:\s*repository .* not found/i.test(
+      /permission to[\s\S]*?denied|repository[\s\S]*?not found|write access to repository not granted|returned error: 403/i.test(
         `${result.stdout}\n${result.stderr}`
       );
     if (isGithubRepoAccessFailure) {

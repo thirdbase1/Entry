@@ -103,7 +103,13 @@ export const bash = {
       // saving x6") -- see withPeriodicVersionCapture's own doc comment.
       // Bash is the one tool most likely to run long enough for this to
       // matter (builds, installs, multi-step pipelines run as one call).
-      const result = await withPeriodicVersionCapture(ctx.session.id, sandbox, () => sandbox.run({ command, signal: t.signal }));
+      // Interval tightened 30s -> 10s (2026-07-18, user-requested "x5
+      // improvement" on top of the per-step capture already in place) --
+      // see withPeriodicVersionCapture's own doc comment in
+      // chat-versioning.ts for why this exists at all. A command that
+      // finishes in under 10s still costs nothing extra (the interval
+      // never fires once, cleared immediately on completion either way).
+      const result = await withPeriodicVersionCapture(ctx.session.id, sandbox, () => sandbox.run({ command, signal: t.signal }), 10_000);
       return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
     } catch (err) {
       throw t.rethrow(err);
