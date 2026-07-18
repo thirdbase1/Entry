@@ -221,6 +221,18 @@ function OAuthIntegrationCard({
   const connect = useCallback(async () => {
     setBusy(true);
     setError(null);
+
+    // For github we need a popup (see comment below), and popups must be
+    // opened SYNCHRONOUSLY inside the click handler -- opening it only
+    // after an `await fetch(...)` breaks the "user gesture" chain and
+    // browsers (mobile Safari/Chrome especially) silently block it with
+    // no error and no visible popup at all. So open a blank popup right
+    // now, before any await, then point it at the real URL once we have it.
+    const popup =
+      def.service === 'github'
+        ? window.open('about:blank', 'entry-connect-github', 'width=640,height=800')
+        : null;
+
     try {
       const res = await fetch('/api/integrations/connect/start', {
         method: 'POST',
@@ -234,18 +246,18 @@ function OAuthIntegrationCard({
       // the other connectors use (see connect-service-tokens.ts's
       // startConnectAuthorization) -- Vercel serves its own "you can close
       // this window" page with nowhere to send the browser back to us.
-      // Open it as a popup instead and poll our own status endpoint until
-      // it flips to connected (or the popup gets closed without finishing).
+      // Point the pre-opened popup at it and poll our own status endpoint
+      // until it flips to connected (or the popup gets closed without
+      // finishing).
       if (def.service === 'github') {
-        const popup = window.open(json.url, 'entry-connect-github', 'width=640,height=800');
-        if (!popup) {
-          // Popup blocked -- fall back to a normal top-level navigation.
-          // The user just won't get auto-redirected back; they can
-          // navigate to Settings manually afterwards and this card will
-          // reflect the real status on next load/reload.
+        if (!popup || popup.closed) {
+          // Still blocked (e.g. browser blocks ALL popups regardless of
+          // gesture, or user's popup blocker killed the about:blank one
+          // synchronously) -- fall back to a normal top-level navigation.
           window.location.href = json.url;
           return;
         }
+        popup.location.href = json.url;
         const started = Date.now();
         const poll = setInterval(async () => {
           const timedOut = Date.now() - started > 3 * 60 * 1000;
@@ -273,6 +285,7 @@ function OAuthIntegrationCard({
 
       window.location.href = json.url;
     } catch (e: any) {
+      popup?.close();
       setError(e.message ?? 'Something went wrong');
       setBusy(false);
     }
