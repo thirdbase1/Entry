@@ -17,6 +17,14 @@ interface IntegrationConnectCardProps {
    *  "connected" with no buttons after a real reconnect, instead of
    *  resetting back to the unconnected prompt every time. */
   initialResolved?: 'connected' | 'skipped';
+  /** 2026-07-18: distinguishes "never connected at all" from "connected,
+   *  but this ONE repo isn't in entry-github's installation yet" (see
+   *  inject_credential.ts's isGithubRepoAccessFailure). Same OAuth flow
+   *  under the hood either way (github.com/apps/entry-github/installations/new
+   *  doubles as both install AND edit-installed-repos), just different
+   *  copy/button label so the user isn't told to "connect" something
+   *  that's already connected. */
+  reason?: 'repo_not_installed';
 }
 
 /**
@@ -39,7 +47,7 @@ interface IntegrationConnectCardProps {
  * — no page navigation at all, so no returnTo plumbing needed for this
  * mode.
  */
-export function IntegrationConnectCard({ service, connectMode, toolCallId, onSend, initialResolved }: IntegrationConnectCardProps) {
+export function IntegrationConnectCard({ service, connectMode, toolCallId, onSend, initialResolved, reason }: IntegrationConnectCardProps) {
   const known = getKnownService(service);
   const name = known?.name ?? service.charAt(0).toUpperCase() + service.slice(1);
   const [resolved, setResolved] = useState<'connecting' | 'connected' | 'skipped' | null>(initialResolved ?? null);
@@ -111,7 +119,7 @@ export function IntegrationConnectCard({ service, connectMode, toolCallId, onSen
   if (resolved === 'connected') {
     return (
       <div key={toolCallId} className="rounded-lg border border-border bg-card w-full max-w-sm p-3 text-sm text-foreground">
-        {name} connected.
+        {reason === 'repo_not_installed' ? `${name} repo access updated.` : `${name} connected.`}
       </div>
     );
   }
@@ -124,12 +132,16 @@ export function IntegrationConnectCard({ service, connectMode, toolCallId, onSen
             <Image src={known.icon} alt={name} width={22} height={22} />
           </div>
         )}
-        <div className="text-sm font-medium text-foreground">{name} isn't connected yet</div>
+        <div className="text-sm font-medium text-foreground">
+          {reason === 'repo_not_installed' ? `${name} doesn't have access to this repo yet` : `${name} isn't connected yet`}
+        </div>
       </div>
       <p className="text-sm text-muted-foreground">
-        {connectMode === 'oauth'
-          ? `Connect your ${name} account so the agent can continue.`
-          : `Paste an API token for ${name} so the agent can continue.`}
+        {reason === 'repo_not_installed'
+          ? `This repository isn't in ${name}'s selected-repos list yet. Add it in one click — no need to dig through GitHub's own settings.`
+          : connectMode === 'oauth'
+            ? `Connect your ${name} account so the agent can continue.`
+            : `Paste an API token for ${name} so the agent can continue.`}
       </p>
 
       {connectMode === 'token' && showTokenInput && (
@@ -162,7 +174,7 @@ export function IntegrationConnectCard({ service, connectMode, toolCallId, onSen
             disabled={busy || resolved === 'connecting'}
             className="h-9 px-4 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {resolved === 'connecting' ? 'Connecting…' : `Connect ${name}`}
+            {resolved === 'connecting' ? 'Connecting…' : reason === 'repo_not_installed' ? 'Manage repo access' : `Connect ${name}`}
           </button>
         ) : showTokenInput ? (
           <button

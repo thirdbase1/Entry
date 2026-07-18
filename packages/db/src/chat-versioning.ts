@@ -450,6 +450,59 @@ export async function captureVersionFromSandboxDiff(
  * itself -- worst case is the same pre-fix behavior (blank sandbox), not
  * a new failure mode.
  */
+/**
+ * Runs `fn` (the sandbox's actual long-running work -- a single `bash`
+ * call, most commonly) while periodically calling
+ * captureVersionFromSandboxDiff in the BACKGROUND every `intervalMs`,
+ * not just once fn() finishes.
+ *
+ * REAL GAP THIS CLOSES (2026-07-18, "improve sandbox saving x6"):
+ * per-step/per-turn capture (version-capture.ts's hook, direct/chat's
+ * onStepFinish/onFinish) only ever runs AFTER a step or turn completes.
+ * A SINGLE long-running command -- a clone+install+build pipeline run as
+ * one `bash` call, which is exactly the pattern this codebase's own docs
+ * tell the model to use -- never reaches that point at all if it gets
+ * hard-killed mid-run (bash.ts's own 240s ceiling, or the outer route's
+ * 300s maxDuration hitting first). Everything that command had already
+ * written to disk before the kill was still being silently lost on the
+ * next eviction, even with per-step capture in place, because per-step
+ * capture has nothing to fire after until the step itself resolves.
+ *
+ * Two capture systems now run concurrently against the same sandbox for
+ * the same command: this one (every intervalMs while it's in flight) and
+ * the per-step one (once it finishes). `inFlight` guards against two
+ * overlapping git commits racing each other if a capture happens to
+ * still be running when the next interval tick fires. 30s default keeps
+ * this well under bash.ts's 240s ceiling (comfortably several capture
+ * points per command) without spamming the sandbox with git commands for
+ * short/instant ones -- the interval never even fires once for anything
+ * that finishes in under 30s, and clearInterval on completion means a
+ * fast command has zero extra overhead either way.
+ *
+ * Best-effort throughout, same philosophy as captureVersionFromSandboxDiff
+ * itself: a failed background capture is logged and swallowed, never
+ * surfaced as if `fn` itself (the actual command the user/agent cares
+ * about) had failed.
+ */
+export function withPeriodicVersionCapture<T>(
+  chatId: string,
+  sandbox: VersionCaptureSandbox,
+  fn: () => Promise<T>,
+  intervalMs = 30_000,
+): Promise<T> {
+  let inFlight = false;
+  const timer: ReturnType<typeof setInterval> = setInterval(() => {
+    if (inFlight) return;
+    inFlight = true;
+    captureVersionFromSandboxDiff(chatId, sandbox)
+      .catch(err => console.error('[chat-versioning] periodic capture failed', chatId, err))
+      .finally(() => {
+        inFlight = false;
+      });
+  }, intervalMs);
+  return fn().finally(() => clearInterval(timer));
+}
+
 export async function restoreLatestFilesToSandbox(chatId: string, sandbox: VersionCaptureSandbox): Promise<number> {
   try {
     const latest = await prisma.$queryRaw<Array<{ path: string; change_type: string; content: string | null }>>`

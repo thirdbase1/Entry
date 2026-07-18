@@ -51,11 +51,15 @@ export const injectCredentialTool = {
     '"read-only integration" or platform limitation: this exact repository is not in the GitHub App ' +
     "installation's selected-repositories list (the installation may be scoped to other repos, or to " +
     '"Only select repositories" without this one checked). Do not conclude the integration is broken or ' +
-    'read-only from this — tell the user plainly: go to https://github.com/settings/installations, find ' +
-    'this app, click Configure, and either add this specific repository to the list or switch it to "All ' +
-    'repositories" — then retry. That is the actual fix, and it is something only the user can do (repo ' +
-    'selection lives on GitHub\'s side, not something any token/reconnect on our end can grant). This only ' +
-    'affects this single command — it does NOT persist for any later bash call, by design.',
+    'read-only from this. In the common case this tool result ALREADY includes needsConnect/reason ' +
+    '"repo_not_installed" -- the chat UI renders a one-click "Manage repo access" card from that ' +
+    'automatically, so just tell the user a card appeared above to add this repo, nothing more. Only if ' +
+    'that field is absent (an edge case this detection missed) fall back to telling them plainly: go to ' +
+    'https://github.com/settings/installations, find this app, click Configure, and either add this ' +
+    'specific repository to the list or switch it to "All repositories" -- then retry. Either way this is ' +
+    'something only the user can do (repo selection lives on the GitHub side, not something any ' +
+    'token/reconnect on our end can grant). This only affects this single command -- it does NOT persist ' +
+    'for any later bash call, by design.',
   inputSchema: z.object({
     service: z.string().describe('Which saved credential to use, e.g. "github", "vercel"'),
     label: z.string().optional().describe('Only needed if more than one credential is saved for this service. Defaults to "default".'),
@@ -131,6 +135,41 @@ export const injectCredentialTool = {
     // an error message) — the model must never see the raw value even
     // by accident.
     const redact = (s: string) => (s ? s.split(value).join('[REDACTED]') : s);
+
+    // REPO-NOT-INSTALLED DETECTION (2026-07-18, "user going to GitHub
+    // settings manually to change repo access is a long way round" --
+    // this tool's own description above already told the MODEL what the
+    // real fix is (add the repo to entry-github's installation), but the
+    // model could only ever repeat that back to the user as prose,
+    // pointing at a manual github.com/settings/installations flow. Same
+    // fix as the needsConnect pattern used for a missing credential
+    // entirely (see resolved.error passthrough above): detect GitHub's
+    // characteristic "this token is valid but can't see this repo"
+    // failure signatures and hand the chat UI a structured result
+    // instead, so it can render the SAME IntegrationConnectCard with a
+    // one-click button straight to entry-github's install-and-manage
+    // screen (github.com/apps/entry-github/installations/new -- see
+    // github-oauth/start/route.ts; already smart enough to show an
+    // "edit installed repos" flow for a user who's already installed,
+    // not just a fresh install) instead of manual navigation.
+    const isGithubRepoAccessFailure =
+      service.toLowerCase() === 'github' &&
+      result.exitCode !== 0 &&
+      /remote:\s*permission to .* denied|repository .* not found|fatal:\s*repository .* not found/i.test(
+        `${result.stdout}\n${result.stderr}`
+      );
+    if (isGithubRepoAccessFailure) {
+      return {
+        ok: false,
+        exitCode: result.exitCode,
+        stdout: redact(result.stdout),
+        stderr: redact(result.stderr),
+        needsConnect: true,
+        service: 'github',
+        connectMode: 'oauth' as const,
+        reason: 'repo_not_installed' as const,
+      };
+    }
 
     return {
       ok: result.exitCode === 0,

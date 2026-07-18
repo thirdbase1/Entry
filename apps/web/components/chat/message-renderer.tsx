@@ -83,7 +83,7 @@ function ToolPart({
   // render the shared inline connect card instead of falling through to
   // a generic/textual tool card, regardless of which tool produced it.
   if (part.state === 'output-available' && part.output && typeof part.output === 'object' && (part.output as any).needsConnect) {
-    const output = part.output as { service?: string; connectMode?: 'oauth' | 'token' };
+    const output = part.output as { service?: string; connectMode?: 'oauth' | 'token'; reason?: 'repo_not_installed' };
     if (output.service) {
       const name = getKnownService(output.service)?.name ?? (output.service.charAt(0).toUpperCase() + output.service.slice(1));
       const initialResolved = findConnectResolution(allMessages, part.toolCallId, name);
@@ -95,6 +95,7 @@ function ToolPart({
           toolCallId={part.toolCallId}
           onSend={onSend}
           initialResolved={initialResolved}
+          reason={output.reason}
         />
       );
     }

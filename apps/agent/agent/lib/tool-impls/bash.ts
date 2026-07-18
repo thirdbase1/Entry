@@ -3,6 +3,7 @@ import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { withPeriodicVersionCapture } from '@entry/db/chat-versioning';
 
 /**
  * Best-effort capture of "the command that's actually serving something
@@ -98,7 +99,11 @@ export const bash = {
     void maybeRememberServeCommand(ctx.session.id, command);
     const t = withTimeoutSignal(ctx.abortSignal, TIMEOUT_MS, 'bash');
     try {
-      const result = await sandbox.run({ command, signal: t.signal });
+      // Periodic in-flight version capture (2026-07-18, "improve sandbox
+      // saving x6") -- see withPeriodicVersionCapture's own doc comment.
+      // Bash is the one tool most likely to run long enough for this to
+      // matter (builds, installs, multi-step pipelines run as one call).
+      const result = await withPeriodicVersionCapture(ctx.session.id, sandbox, () => sandbox.run({ command, signal: t.signal }));
       return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
     } catch (err) {
       throw t.rethrow(err);

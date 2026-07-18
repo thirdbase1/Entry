@@ -628,6 +628,7 @@ function DirectChatSession({
                                 toolCallId={`${mi}-${i}`}
                                 onSend={onSend}
                                 initialResolved={initialResolved}
+                                reason={(output as any).reason as 'repo_not_installed' | undefined}
                               />
                             );
                           }

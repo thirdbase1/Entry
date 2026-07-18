@@ -14,6 +14,21 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'One-click GitHub repo access, right from chat',
+    items: [
+      "If the agent hits a push that fails because this specific repo isn't in Entry's GitHub access list yet, chat now shows a one-click \"Manage repo access\" card instead of telling you to go dig through GitHub's own Settings pages manually.",
+      "Fixed GitHub Connect skipping the actual repo-picker screen entirely -- connecting now goes through GitHub's real \"Install & Authorize\" flow, so you actually get to choose which repos Entry can access (or all of them) instead of only authorizing an account with no repo access at all.",
+    ],
+  },
+  {
+    date: '2026-07-18',
+    title: 'Sandbox saving made far more frequent',
+    items: [
+      'File-change saving used to happen once, only after a whole reply finished. It now saves incrementally after every step of a reply, plus periodically (every ~30s) DURING any single long-running command -- so a big build/install/pipeline that gets cut off mid-way no longer loses everything back to the start.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Fixed GitHub Connect using the wrong account for some users',
     items: [
       "GitHub connections were silently resolving to whichever GitHub account first installed the app, not necessarily the account each person actually connected. Token requests now correctly resolve and use each person's own GitHub App installation.",
