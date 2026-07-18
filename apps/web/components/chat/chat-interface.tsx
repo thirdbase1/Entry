@@ -20,7 +20,7 @@ import { toast } from '@/lib/toast';
 import { useOnlineStatus } from './use-online-status';
 import { useStreamingAutoScroll } from './use-streaming-autoscroll';
 import { ThinkingIndicator } from './chat-thinking-indicator';
-import type { IntegrationCallback } from './integration-callback-reader';
+import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -815,6 +815,13 @@ function ChatInterfaceInner({
   useEffect(() => {
     if (!integrationCallback || sentIntegrationCallbackRef.current) return;
     sentIntegrationCallbackRef.current = true;
+    // Tab-wide one-shot claim (2026-07-18 dupe-send fix) -- see
+    // claimIntegrationCallback's own comment. Necessary IN ADDITION to
+    // the ref above, not instead of it: the ref only protects against
+    // THIS component instance re-running; the claim protects against a
+    // DIFFERENT component instance (DirectChatInterface's own copy of
+    // this same effect) independently processing the same callback.
+    if (!claimIntegrationCallback(integrationCallback)) return;
     const name = getKnownService(integrationCallback.service)?.name ?? (integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1));
     const text =
       integrationCallback.result === 'connected'

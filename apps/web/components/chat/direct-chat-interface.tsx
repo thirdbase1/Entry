@@ -54,7 +54,7 @@ import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/com
 import { ChooseResult } from './renderers/choose-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
 import { getKnownService } from '@/lib/integration-services';
-import type { IntegrationCallback } from './integration-callback-reader';
+import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
 
 interface DirectChatInterfaceProps {
   sessionId?: string;
@@ -413,6 +413,10 @@ function DirectChatSession({
   useEffect(() => {
     if (!integrationCallback || sentIntegrationCallbackRef.current) return;
     sentIntegrationCallbackRef.current = true;
+    // Tab-wide one-shot claim (2026-07-18 dupe-send fix) -- see
+    // claimIntegrationCallback's own comment in integration-callback-reader.tsx
+    // and chat-interface.tsx's identical effect for the full explanation.
+    if (!claimIntegrationCallback(integrationCallback)) return;
     const name = getKnownService(integrationCallback.service)?.name ?? (integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1));
     const text =
       integrationCallback.result === 'connected'
