@@ -469,6 +469,7 @@ export function ChatInterface({
         className={className}
         headerContent={headerContent}
         initialMessage={initialMessage}
+        integrationCallback={integrationCallback}
       />
     );
   }

@@ -52,6 +52,8 @@ import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 import { AutoFixSendProvider } from './chat-auto-fix-context';
 import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
 import { ChooseResult } from './renderers/choose-result';
+import { IntegrationConnectCard } from './renderers/integration-connect-card';
+import type { IntegrationCallback } from './integration-callback-reader';
 
 interface DirectChatInterfaceProps {
   sessionId?: string;
@@ -65,6 +67,11 @@ interface DirectChatInterfaceProps {
   className?: string;
   headerContent?: React.ReactNode;
   initialMessage?: string;
+  /** Mirrors ChatInterface's own prop — see chat-interface.tsx and
+   *  integration-callback-reader.tsx. Wired through here too (2026-07-18)
+   *  because this surface (BYOK/Gateway direct-chat) renders its OWN tool
+   *  parts, separate from message-renderer.tsx's ToolPart switch. */
+  integrationCallback?: IntegrationCallback;
 }
 
 /** Same heuristic as message-renderer.tsx's findChooseAnswer, adapted for plain AI SDK UIMessages. */
@@ -148,6 +155,7 @@ function DirectChatSession({
   className = '',
   headerContent,
   initialMessage,
+  integrationCallback,
   initialMessages,
 }: DirectChatInterfaceProps & { initialMessages: any[] }) {
   const router = useRouter();
@@ -376,6 +384,26 @@ function DirectChatSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMessage]);
 
+  // Mirrors chat-interface.tsx's own integrationCallback effect exactly
+  // (2026-07-18) -- see that file's comment for the full flow. No
+  // messages.length guard: this always fires into an existing
+  // conversation (a reopen via OAuth redirect), never a brand-new chat.
+  const sentIntegrationCallbackRef = useRef(false);
+  useEffect(() => {
+    if (!integrationCallback || sentIntegrationCallbackRef.current) return;
+    sentIntegrationCallbackRef.current = true;
+    const name = integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1);
+    const text =
+      integrationCallback.result === 'connected'
+        ? `Connected ${name}.`
+        : `${name} connection failed${integrationCallback.errorMessage ? `: ${integrationCallback.errorMessage}` : '.'}`;
+    void sendWithRetry(() => chat.sendMessage({ text })).catch(err => {
+      console.error('[integration callback send failed]', err);
+    });
+    if (sessionId) router.replace(`/chats/${sessionId}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [integrationCallback]);
+
   // Auto-follow-scroll while streaming: keeps the view pinned to the
   // bottom as new tokens/parts stream in, not just once per whole message.
   // The previous version only re-ran this effect on messages.length /
@@ -554,6 +582,27 @@ function DirectChatSession({
                               onAnswer={onSend}
                             />
                           );
+                        }
+
+                        // Same needsConnect special-case as message-renderer.tsx
+                        // (2026-07-18) -- this surface has its own separate tool
+                        // rendering (not message-renderer.tsx's ToolPart switch),
+                        // so it needs the exact same check duplicated here for
+                        // BYOK/Gateway direct-chat to get the same connect card
+                        // instead of a raw JSON tool-result dump.
+                        if (state === 'output-available' && output && typeof output === 'object' && (output as any).needsConnect) {
+                          const service = (output as any).service as string | undefined;
+                          if (service) {
+                            return (
+                              <IntegrationConnectCard
+                                key={i}
+                                service={service}
+                                connectMode={((output as any).connectMode as 'oauth' | 'token') ?? 'token'}
+                                toolCallId={`${mi}-${i}`}
+                                onSend={onSend}
+                              />
+                            );
+                          }
                         }
 
                         // Real AI SDK "Tool" component here too (2026-07-11,
