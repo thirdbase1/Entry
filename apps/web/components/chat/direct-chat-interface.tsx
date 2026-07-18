@@ -201,6 +201,24 @@ function DirectChatSession({
     id: sessionId,
     messages: initialMessages,
     transport,
+    // Throttle UI updates to at most once per 50ms (2026-07-18, "streaming
+    // lags when the model is super fast" report) -- unset by default,
+    // which means every single raw text-delta chunk from the stream
+    // triggered its own synchronous React re-render of the whole message
+    // list with NO ceiling on frequency. A fast model easily emits
+    // 50-100+ chunks/sec, i.e. that many full re-renders/sec, which is
+    // more work than the main thread can keep up with -- frames get
+    // dropped, so the rendered text visibly falls behind what actually
+    // arrived, and the autoscroll effect (which needs its own turn on
+    // that same saturated main thread) falls behind too. 50ms (~20
+    // renders/sec) is imperceptible as added latency but caps render
+    // frequency far below what starves the browser, regardless of how
+    // fast the model streams. See use-throttled-eve-agent.ts's file
+    // comment for the equivalent fix on the other (default eve-agent)
+    // chat path, which needed a custom wrapper since eve/react has no
+    // built-in throttle option -- this path's AI SDK `useChat` already
+    // ships one, it just wasn't turned on.
+    throttle: 50,
     onError(error) {
       console.error('[direct chat turn error]', error);
       setTurnError(readableChatErrorMessage(error));

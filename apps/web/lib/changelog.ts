@@ -14,6 +14,14 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Fixed the actual streaming-lag root cause: unthrottled re-renders',
+    items: [
+      "Found and fixed the real bug behind streaming looking laggy and auto-scroll falling behind, worse the faster the model responds: every single incoming stream chunk was triggering its own full, uncapped React re-render of the whole message list -- a fast model easily sends 50-100+ chunks/sec, i.e. that many re-renders/sec, which is more work than a browser main thread can keep up with, so frames get dropped and both the text and the auto-scroll visibly fall behind.",
+      'Capped render frequency to the screen\'s real refresh rate on the main chat path (a custom rAF-coalescing wrapper around the eve agent stream, since eve/react has no built-in throttle) and turned on the BYOK chat path\'s existing (but previously off) 50ms update throttle -- both now render smoothly regardless of how fast the model streams, with no perceptible added latency.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Paste-a-config BYOK import + auto model add + auto-verify',
     items: [
       "Adding a BYOK provider now accepts a pasted config block (Codex CLI's config.toml shape, JSON, or plain key=value) and fills in the label, base URL, and API shape (chat vs. Responses API) for you -- covers aggregators like Fireworks, Portkey, AIHubMix, ZenMux, and aerolink.lat that all hand out this same block.",

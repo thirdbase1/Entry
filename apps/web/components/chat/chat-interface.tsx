@@ -1,7 +1,7 @@
 'use client';
 
-import { useEveAgent } from 'eve/react';
 import { getKnownService } from '@/lib/integration-services';
+import { useThrottledEveAgent } from './use-throttled-eve-agent';
 import type { EveMessage, UseEveAgentSnapshot } from 'eve/react';
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -635,7 +635,7 @@ function ChatInterfaceInner({
 
   const chatIdRef = useRef<string | undefined>(sessionId);
 
-  const agent = useEveAgent({
+  const agent = useThrottledEveAgent({
     initialEvents,
     initialSession,
     // Default is 3 -- fine for a flaky packet or two, not enough for a
