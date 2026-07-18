@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Fixed sandboxes losing work after sitting idle',
+    items: [
+      "Found and fixed the real cause of reports that a chat's sandbox lost work: idle sandboxes were being fully deleted after a few minutes of inactivity instead of paused. They're now paused (a complete, durable snapshot of the filesystem) and automatically resumed exactly where you left off -- including if you come back to a live preview link after stepping away.",
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'The agent now remembers things about you across chats',
     items: [
       "Added durable per-user memory -- the agent can save a short, standing note about you (name spelling, preferences, ongoing projects/goals) and it's automatically shown to it at the start of every future conversation, not just recalled within one session. Works on both the default agent and any BYOK/custom model you pick.",
