@@ -469,6 +469,44 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   let lastFinishReason: string | undefined;
   let lastRawFinishReason: string | undefined;
 
+  // CRITICAL-SAVE GATE (2026-07-19, real data-loss bug: "agent done and
+  // stop, instantly the whole page reload, and all AI response and work
+  // didn't show at all, only my prompt show"). Root cause, confirmed by
+  // reading node_modules/ai/dist/index.js directly: `toUIMessageStream`'s
+  // own `onFinish` (below, which does the actual
+  // `prisma.eveChatSession.update` save) is wired through
+  // `handleUIMessageStreamFinish` to fire from a TransformStream's
+  // `flush()` -- which only runs AFTER every real chunk, INCLUDING the
+  // `type: 'finish'` chunk that tells the browser's `useChat` the turn is
+  // over, has already been enqueued and is already readable by whatever
+  // consumes this stream. So the client can see "done", flip back to
+  // 'ready', fire ITS OWN onFinish (which does `router.replace` to this
+  // chat's permanent URL for a brand-new chat's first turn), and that new
+  // page can re-fetch the persisted session from Postgres -- all before
+  // this route's own `onFinish` below has even STARTED writing the full
+  // transcript. Landing on that fresh fetch mid-race reads exactly what
+  // `preSave` wrote earlier (the user's message only), which is exactly
+  // "only my prompt show[s]." The slower `captureVersionFromSandboxDiff`
+  // runs (git lock contention, an unexpected nested-repo/gitlink path,
+  // etc.), the WIDER this race window gets, which is why it started
+  // showing up around the same time as those git errors.
+  //
+  // Fix: hold the client-visible `finish` chunk in the relay loop below
+  // until the CRITICAL save (the actual events write, not the best-effort
+  // versioning that follows it) has durably completed. `resolveCriticalSave`
+  // is called the instant that `prisma.eveChatSession.update` settles
+  // (success OR failure -- a failed save has nothing better to wait for,
+  // and the in-memory stream content the client already built itself is
+  // still correct either way; this gate only protects against navigating
+  // onto a STALE fetch, not against a genuine DB outage). Bounded by
+  // CRITICAL_SAVE_TIMEOUT_MS as a safety valve so a truly hung DB
+  // connection can never hang the user-visible end of the turn forever --
+  // same "always eventually forward" philosophy as HEARTBEAT_MS below.
+  let resolveCriticalSave: () => void = () => {};
+  const criticalSaveDone = new Promise<void>(resolve => {
+    resolveCriticalSave = resolve;
+  });
+
   const result = streamText({
     model,
     stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
@@ -694,6 +732,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         .catch(err => {
           console.error('[direct chat] final save failed', chatId, err);
           logError({ source: 'direct-chat-final-save', error: err, userId, chatId });
+        })
+        .finally(() => {
+          // See CRITICAL-SAVE GATE comment above -- releases the relay
+          // loop's held `finish` chunk the instant this write settles,
+          // whether it succeeded or failed.
+          resolveCriticalSave();
         });
 
       // Universal, tool-agnostic version capture (2026-07-16, real bug:
@@ -749,6 +793,13 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // an error) keeps real bytes flowing during any silent gap without
   // ever touching the actual model/tool content.
   const HEARTBEAT_MS = 15_000;
+  // Safety valve for the CRITICAL-SAVE GATE above -- a real DB outage
+  // should delay the client seeing "done" by at most this long, never
+  // forever. 5s is generous headroom over the single-row conditional
+  // UPDATE this is actually waiting on (a few ms to a couple hundred ms
+  // in the normal case) while still being short enough nobody would
+  // perceive it as a hang.
+  const CRITICAL_SAVE_TIMEOUT_MS = 5_000;
   const wrappedStream = new ReadableStream<UIMessageChunk>({
     async start(controller) {
       const iterator = uiStream[Symbol.asyncIterator]();
@@ -787,6 +838,17 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
             sawRealContent = true;
           } else if (chunk.type.startsWith('tool-')) {
             sawRealContent = true;
+          }
+          if (chunk.type === 'finish') {
+            // See CRITICAL-SAVE GATE comment near `criticalSaveDone`'s
+            // declaration above -- this is the exact chunk that tells the
+            // browser's `useChat` the turn is over, so it's the one chunk
+            // that must never reach the client before the real transcript
+            // save has landed.
+            await Promise.race([
+              criticalSaveDone,
+              new Promise<void>(resolve => setTimeout(resolve, CRITICAL_SAVE_TIMEOUT_MS)),
+            ]);
           }
           controller.enqueue(chunk);
         }

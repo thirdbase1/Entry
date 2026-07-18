@@ -292,6 +292,69 @@ const IGNORED_DIR_NAMES = [
 ];
 
 /**
+ * PER-CHAT SERIALIZATION + LOCK-RETRY (2026-07-19, real bug reported from
+ * production logs: `captureVersionFromSandboxDiff failed ... fatal:
+ * Unable to create '/home/user/.git/index.lock': File exists. Another git
+ * process seems to be running in this repository`). Root cause: this
+ * function now fires far more often per turn than it used to (broadened
+ * to `step.completed`/`step.failed` on 2026-07-18, see version-capture.ts),
+ * AND a duplicate/overlapping request for the SAME chat (a double-submit,
+ * a client retry, a reload racing an in-flight turn) can trigger a second,
+ * fully independent call against the exact same sandbox's git repo at the
+ * exact same time -- two concurrent `git add -A`/`git commit` sequences
+ * fighting over the one `.git/index.lock` file. Two-part fix:
+ *
+ *   1. `chainByChat`: a plain in-process promise queue keyed by chatId --
+ *      every call for the same chat now runs strictly after the previous
+ *      one settles, even if two callers kick one off "simultaneously"
+ *      within this same server process. Doesn't help two calls landing in
+ *      two DIFFERENT server processes/instances, which is what part 2 is
+ *      for.
+ *   2. `runGit`: retries a command a few times with a short backoff
+ *      SPECIFICALLY when the failure is the classic "index.lock: File
+ *      exists" transient condition (another process -- possibly in a
+ *      different server instance -- holds the lock right now, but
+ *      releases it within milliseconds under normal operation). Any other
+ *      git failure is returned as-is on the first try, unchanged from
+ *      before -- this only ever adds patience for the one specific,
+ *      genuinely-transient error shape.
+ */
+const chainByChat = new Map<string, Promise<unknown>>();
+
+function withChatSerialized<T>(chatId: string, fn: () => Promise<T>): Promise<T> {
+  const prior = chainByChat.get(chatId) ?? Promise.resolve();
+  const next = prior.then(fn, fn);
+  // Swallow so one failed call doesn't poison the chain for the next
+  // caller -- each `.then(fn, fn)` above already ran `fn` either way;
+  // this is purely to keep `chainByChat`'s stored promise from becoming a
+  // permanently-rejected value that every future `.then()` off it would
+  // otherwise inherit.
+  chainByChat.set(chatId, next.catch(() => {}));
+  return next;
+}
+
+const isLockContention = (stderr: string) => /Unable to create '.*index\.lock': File exists/i.test(stderr);
+
+async function runGit(
+  sandbox: VersionCaptureSandbox,
+  command: string,
+  opts: { retries?: number } = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const retries = opts.retries ?? 4;
+  let result = await sandbox.run({ command });
+  for (let attempt = 0; attempt < retries && result.exitCode !== 0 && isLockContention(result.stderr); attempt++) {
+    // Short, increasing backoff (120ms, 240ms, 360ms, 480ms) -- long
+    // enough for another in-flight `git commit`/`git add` to have
+    // actually released the lock, short enough that even the worst case
+    // (all retries exhausted) adds well under a second to a turn that
+    // was going to run this command anyway.
+    await new Promise(resolve => setTimeout(resolve, 120 * (attempt + 1)));
+    result = await sandbox.run({ command });
+  }
+  return result;
+}
+
+/**
  * Detects EVERY file change made during the turn that just ended --
  * regardless of which tool made it (write_file, edit_file, append_file,
  * a raw `bash` rm/mv/sed/redirect, a generated build artifact, anything)
@@ -309,25 +372,30 @@ const IGNORED_DIR_NAMES = [
  * user-visible failure on an otherwise-successful turn, same philosophy
  * as touchChatFileTree/trackChange elsewhere in this feature.
  */
-export async function captureVersionFromSandboxDiff(
+export function captureVersionFromSandboxDiff(
+  chatId: string,
+  sandbox: VersionCaptureSandbox,
+): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
+  return withChatSerialized(chatId, () => captureVersionFromSandboxDiffInner(chatId, sandbox));
+}
+
+async function captureVersionFromSandboxDiffInner(
   chatId: string,
   sandbox: VersionCaptureSandbox,
 ): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
   try {
-    const initCheck = await sandbox.run({ command: 'git rev-parse --is-inside-work-tree 2>/dev/null || echo NO_REPO' });
+    const initCheck = await runGit(sandbox, 'git rev-parse --is-inside-work-tree 2>/dev/null || echo NO_REPO');
     const alreadyInitialized = initCheck.stdout.trim() === 'true';
 
     if (!alreadyInitialized) {
-      await sandbox.run({
-        command: [
+      await runGit(sandbox, [
           'git init -q',
           'git config user.email "agent@entry.internal"',
           'git config user.name "Entry Agent"',
           `printf '%s' ${JSON.stringify(GIT_IGNORE_CONTENTS)} > .gitignore`,
           'git add -A',
           'git commit -q -m "baseline" --allow-empty',
-        ].join(' && '),
-      });
+        ].join(' && '));
       return null; // baseline only -- nothing to diff against yet
     }
 
@@ -339,12 +407,52 @@ export async function captureVersionFromSandboxDiff(
     // no-op (exit 128, ignored via `|| true`) for any name that was
     // never tracked, so this is safe to run unconditionally every time.
     const untrackCmd = IGNORED_DIR_NAMES.map(d => `git rm -r --cached ${JSON.stringify(d)} >/dev/null 2>&1 || true`).join(' && ');
-    await sandbox.run({
-      command: [`printf '%s' ${JSON.stringify(GIT_IGNORE_CONTENTS)} > .gitignore`, untrackCmd].join(' && '),
-    });
+    await runGit(sandbox, [`printf '%s' ${JSON.stringify(GIT_IGNORE_CONTENTS)} > .gitignore`, untrackCmd].join(' && '));
 
-    await sandbox.run({ command: 'git add -A' });
-    const statusResult = await sandbox.run({ command: "git diff --cached --name-status --no-renames" });
+    // NESTED-REPO / GITLINK GUARD (2026-07-19, real bug from production
+    // logs: `fatal: bad object :entry-seo`). If the agent ever ran `git
+    // init`/`git clone` inside one of its own project subdirectories
+    // (e.g. cloning/pushing a real project named "entry-seo" via the
+    // GitHub Connect flow -- completely routine), that subdirectory now
+    // has its OWN `.git` folder. From THIS shadow versioning repo's
+    // perspective at the sandbox root, `git add -A` then sees a directory
+    // containing a nested `.git` and records it as a git SUBMODULE
+    // (gitlink, mode 160000) -- a pointer to a commit SHA, not a blob --
+    // instead of as normal tracked files. `git show :<path>` on a gitlink
+    // has no blob content to return and fails outright with exactly
+    // "fatal: bad object", which used to bubble up as a hard, repeated
+    // per-turn error and silently drop that turn's whole versioning
+    // capture (return null via the catch below) -- not just for that one
+    // project folder, for the ENTIRE turn's diff, including any other,
+    // unrelated real file changes made in the same turn.
+    //
+    // Fix: detect any nested-repo directory before diffing, untrack it
+    // (git already treats a no-op `rm -r --cached` on something never
+    // tracked as harmless), and add it to the ignore list so it's never
+    // re-added as a gitlink again. This shadow repo only exists to power
+    // the in-chat version/revert feature -- it was never trying to track
+    // a project's own separate git history, so excluding it here loses
+    // nothing the user actually wanted from THIS feature.
+    const nestedGitDirsResult = await sandbox.run({
+      command: `find . -mindepth 2 -maxdepth 6 -type d -name .git -not -path "./.git*" 2>/dev/null`,
+    });
+    const nestedGitDirs = nestedGitDirsResult.stdout
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean)
+      // Strip the trailing `/.git` to get the actual project directory path.
+      .map(p => p.replace(/^\.\//, '').replace(/\/\.git$/, ''))
+      .filter(Boolean);
+    if (nestedGitDirs.length > 0) {
+      const untrackNestedCmd = nestedGitDirs
+        .map(d => `git rm -r --cached ${JSON.stringify(d)} >/dev/null 2>&1 || true`)
+        .join(' && ');
+      await runGit(sandbox, untrackNestedCmd);
+    }
+    const isNestedRepoPath = (p: string) => nestedGitDirs.some(d => p === d || p.startsWith(`${d}/`));
+
+    await runGit(sandbox, 'git add -A');
+    const statusResult = await runGit(sandbox, "git diff --cached --name-status --no-renames");
     const lines = statusResult.stdout.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 0) return null; // nothing changed this turn
 
@@ -363,7 +471,7 @@ export async function captureVersionFromSandboxDiff(
     for (const line of lines) {
       const [statusCode, ...pathParts] = line.split('\t');
       const path = pathParts.join('\t');
-      if (!path || isIgnoredToolingPath(path)) continue;
+      if (!path || isIgnoredToolingPath(path) || isNestedRepoPath(path)) continue;
       const code = statusCode[0];
       if (code === 'D') {
         changes.push({ path, changeType: 'deleted', content: null });
@@ -372,7 +480,7 @@ export async function captureVersionFromSandboxDiff(
         // was just `git add -A`'d), not the working tree, so this is
         // exactly what will be committed as this turn's baseline below.
         const safePath = JSON.stringify(path);
-        const showResult = await sandbox.run({ command: `git show :${safePath}` });
+        const showResult = await runGit(sandbox, `git show :${safePath}`);
         changes.push({ path, changeType: code === 'A' ? 'added' : 'modified', content: showResult.exitCode === 0 ? showResult.stdout : '' });
       }
     }
@@ -383,7 +491,7 @@ export async function captureVersionFromSandboxDiff(
     // baseline -- runs regardless of whether writeVersionRows actually
     // produced a version (e.g. a transient DB hiccup shouldn't leave the
     // git index permanently dirty and re-diff the same changes forever).
-    await sandbox.run({ command: `git commit -q -m "version ${info?.versionNumber ?? 'unrecorded'}" --allow-empty` });
+    await runGit(sandbox, `git commit -q -m "version ${info?.versionNumber ?? 'unrecorded'}" --allow-empty`);
 
     return info;
   } catch (err) {
@@ -531,16 +639,14 @@ export async function restoreLatestFilesToSandbox(chatId: string, sandbox: Versi
       await sandbox.run({ command: cmds.join(' && ') });
     }
 
-    await sandbox.run({
-      command: [
+    await runGit(sandbox, [
         'git init -q',
         'git config user.email "agent@entry.internal"',
         'git config user.name "Entry Agent"',
         `printf '%s' ${JSON.stringify(GIT_IGNORE_CONTENTS)} > .gitignore`,
         'git add -A',
         'git commit -q -m "restored baseline" --allow-empty',
-      ].join(' && '),
-    });
+      ].join(' && '));
 
     return live.length;
   } catch (err) {
