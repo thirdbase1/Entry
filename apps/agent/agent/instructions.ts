@@ -1,5 +1,6 @@
 import { defineDynamic, defineInstructions } from 'eve/instructions';
 import { buildPersonaInstructions } from './lib/persona.js';
+import { getWorkingMemory } from './lib/working-memory.js';
 
 /**
  * Root = shared persona only.
@@ -80,10 +81,17 @@ type SessionWithParent = { parent?: { sessionId: string; callId: string; rootSes
 // its own, no steering either way. See persona.ts's own comment.
 export default defineDynamic({
   events: {
-    'session.started': (_event, ctx) => {
+    'session.started': async (_event, ctx) => {
       const isChild = !!(ctx.session as unknown as SessionWithParent).parent;
+      // Working memory (2026-07-18) -- fetched for root AND child sessions
+      // alike (a subagent still benefits from knowing stable facts about
+      // the same user; it just doesn't get agent-delegation instructions).
+      // See persona.ts's own comment for why this is a separate small
+      // fetch rather than folded into chat embeddings.
+      const userId = ctx.session.auth.current?.principalId;
+      const workingMemory = userId ? await getWorkingMemory(userId) : null;
       return defineInstructions({
-        markdown: buildPersonaInstructions({ includeAgentDelegation: !isChild }),
+        markdown: buildPersonaInstructions({ includeAgentDelegation: !isChild, workingMemory }),
       });
     },
   },

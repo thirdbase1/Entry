@@ -43,6 +43,7 @@ model User {
   modelProviders UserModelProvider[]
   credentials     UserCredential[]
   agentSkills     AgentSkill[]
+  workingMemory   UserWorkingMemory?
 
   @@index([email])
   @@map("users")
@@ -497,6 +498,32 @@ model UserModelProviderModel {
   @@unique([providerId, modelId])
   @@index([providerId])
   @@map("user_model_provider_models")
+}
+
+/// Small, durable per-user "working memory" for the agent (2026-07-18,
+/// inspired by Mastra's working-memory pattern) -- a short, agent-curated
+/// text blob of stable facts about the user (name spelling, preferences,
+/// ongoing projects/goals), distinct from:
+/// - AiUserChatEmbedding (semantic recall over past chat content via
+///   vector search -- relevance-based, not always surfaced)
+/// - eve's own in-session compaction (agent.ts's `compaction` block --
+///   summarizes turns WITHIN one session's context window, doesn't
+///   persist across sessions)
+/// This is deliberately small (capped in the remember_about_user tool,
+/// not here) and injected verbatim into every new session's system
+/// prompt (see instructions.ts), so stable facts don't depend on
+/// semantic-search relevance or a single session's context window to
+/// resurface -- the same reason Mastra keeps working memory as its own
+/// layer instead of folding it into raw history or embeddings.
+model UserWorkingMemory {
+  userId    String   @id @map("user_id") @db.VarChar
+  content   String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_working_memory")
 }
 
 model UserSettings {

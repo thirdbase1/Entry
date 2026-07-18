@@ -133,6 +133,8 @@ import { recallSkillTool } from '@entry/agent/tool-impls/recall_skill';
 import { getPreviewUrlTool } from '@entry/agent/tool-impls/get_preview_url';
 import { restartSandboxTool } from '@entry/agent/tool-impls/restart_sandbox';
 import { agentDelegate } from '@entry/agent/tool-impls/agent';
+import { rememberAboutUserTool } from '@entry/agent/tool-impls/remember_about_user';
+import { getWorkingMemory } from '@entry/agent/lib/working-memory';
 import { z } from 'zod';
 
 // ENABLED (2026-07-15, user request): direct-chat now wires the real
@@ -306,7 +308,8 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // model naturally gives, with no steering either way. `providerLabel`/
   // `modelId` are still resolved above and still used for logging/
   // response headers, just no longer threaded into the prompt.
-  const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: true });
+  const userWorkingMemory = await getWorkingMemory(userId);
+  const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: true, workingMemory: userWorkingMemory });
   const instructions = compactionResult.then(({ summaryText }) => {
     const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
     if (!summaryText) return systemMessage;
@@ -424,6 +427,16 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       description: agentDelegate.description,
       inputSchema: agentDelegate.inputSchema,
       execute: (input: { message: string; provider?: string; model?: string }) => agentDelegate.execute(input, execCtx),
+    }),
+    // Durable per-user working memory (2026-07-18) -- see
+    // UserWorkingMemory's schema comment and persona.ts's comment. Wired
+    // identically to eve-root's copy (apps/agent/agent/tools/remember_about_user.ts)
+    // so BYOK/Gateway-direct chats get the same "remember things about me
+    // across sessions" capability as the default eve path.
+    remember_about_user: tool({
+      description: rememberAboutUserTool.description,
+      inputSchema: rememberAboutUserTool.inputSchema,
+      execute: (input: { action: 'read' | 'write'; content?: string }) => rememberAboutUserTool.execute(input, execCtx),
     }),
   } as const;
   // Confirmed real bug (2026-07-11): this used to be sent as-is regardless

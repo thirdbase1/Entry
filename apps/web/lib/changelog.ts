@@ -13,6 +13,14 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-18',
+    title: 'The agent now remembers things about you across chats',
+    items: [
+      "Added durable per-user memory -- the agent can save a short, standing note about you (name spelling, preferences, ongoing projects/goals) and it's automatically shown to it at the start of every future conversation, not just recalled within one session. Works on both the default agent and any BYOK/custom model you pick.",
+      "The agent now proactively saves things worth remembering when you share them, instead of only doing it if explicitly asked.",
+    ],
+  },
+  {
     date: '2026-07-17',
     title: 'Fixed the versioning system tracking the Vercel CLI\'s own cache files as project changes',
     items: [

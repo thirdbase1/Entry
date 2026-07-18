@@ -34,9 +34,29 @@ const AGENT_DELEGATION_GUIDELINES =
   "- Use `agent` to delegate a bounded subtask to a specific provider/model when that genuinely fits the task better than doing it yourself — e.g. a Google model for deep, wide research; an Anthropic model for careful multi-step planning; an OpenAI model for a tone/rewrite pass. It runs with fresh context (it never sees this conversation, so pack everything it needs into the message) and can call `web_search`/`web_crawl` itself. Don't reach for it on simple requests — it's for genuinely splitting specialized work across models, not a default detour.\n- When a task genuinely benefits from more than one model's perspective at once (e.g. \"get me research from a Google model AND a rewrite pass from a GPT model\", or comparing how two providers answer the same question), call `agent` MULTIPLE TIMES IN THE SAME STEP — one call per provider/model — instead of one at a time. Tool calls emitted together in a single step run concurrently, not sequentially, so this is a real time saver, not just a stylistic choice. Only chain calls sequentially when one delegate's output is a genuine input to the next (e.g. research first, then hand its findings to a rewrite pass) — otherwise fan them out together.\n";
 
 export function buildPersonaInstructions(
-  opts: { includeAgentDelegation?: boolean } = {}
+  opts: { includeAgentDelegation?: boolean; workingMemory?: string | null } = {}
 ): string {
-  const { includeAgentDelegation = true } = opts;
+  const { includeAgentDelegation = true, workingMemory } = opts;
+  // Durable per-user working memory (2026-07-18) -- see
+  // UserWorkingMemory's schema comment (packages/db/prisma/schema.prisma)
+  // for why this exists as its own small injected block rather than
+  // relying on chat embeddings (semantic recall, relevance-gated) or
+  // eve's in-session compaction (scoped to one session's own context
+  // window). Every caller (instructions.ts for eve-root, direct/chat's
+  // route.ts for BYOK/explicit-model chats) fetches the current user's
+  // note and threads it through here so both paths stay in parity, same
+  // as includeAgentDelegation above. Omitted entirely (not even an empty
+  // block) when there's nothing saved yet, so a fresh user's prompt isn't
+  // padded with a "no memory yet" placeholder every single turn.
+  const workingMemoryBlock = workingMemory
+    ? `
+
+<user_memory>
+Durable notes you've saved about this user across past conversations (via the \`remember_about_user\` tool). Treat as background context, not something to recite unprompted:
+${workingMemory}
+</user_memory>
+`
+    : '';
   // REMOVED (2026-07-15, explicit user request): this used to accept a
   // `runningAs` option and splice a `"You are currently running as
   // {provider} · {model} ... say exactly that"` line into the prompt, so
@@ -93,6 +113,7 @@ reference list at the end of the response in this exact JSON-per-line format:
 ${includeAgentDelegation ? AGENT_DELEGATION_GUIDELINES : ''}- Before deploying Entry itself (this app) to Vercel, debugging a failed Entry production build, or touching build/deploy scripts, load the \`entry-vercel-deploy-lessons\` skill first — it documents real incidents specific to this repo's monorepo layout that generic Vercel skills won't know about.
 - For \`github\`/\`vercel\`/\`supabase\` specifically: \`list_credentials\` only shows manually-pasted vault tokens — it will NOT show a user's real Vercel Connect OAuth grant (the "Connect" button in Settings > Integrations), so an empty \`list_credentials\` result does NOT mean the user has no access. NEVER tell the user to paste a token or run a CLI login for these three services based on \`list_credentials\` alone. Instead, go straight to \`inject_credential\` with that service and the actual command you need (e.g. \`vercel ls\`, \`gh repo view\`) — it transparently resolves either a saved vault token OR a live Connect grant, whichever exists, and only then fails with a clear \`needsConnect\` message telling you the user genuinely hasn't connected that service, which is the only time you should ask them to.
 - Whenever you start (or restart) a dev server in the sandbox (\`npm run dev\`, \`vite\`, etc.), immediately call \`get_preview_url\` afterward — this is what makes the preview panel in the chat header show the running app, and nothing else triggers it. Don't wait for the user to ask for a preview link. If the preview looks broken/stuck or the user reports an error, use \`restart_sandbox\` to restart it.\n- Whenever you create a new project scaffold or meaningfully change which files exist (not every tiny edit), call \`list_files\` afterward — this is what makes the \"Files\" tab in the chat header show the current project tree, and nothing else triggers it. Don't wait for the user to ask to see the files.
+- Proactively call \`remember_about_user\` (action:\"write\") whenever the user shares something durable worth recalling in future conversations — their name/preferred spelling, standing preferences, or an ongoing project/goal — even if they didn't explicitly ask you to remember it. Don't wait to be asked. Read the existing note first (action:\"read\") if unsure what's already saved, fold new facts into the FULL note rather than only appending, and keep it short — this is a small persistent profile, not a transcript.
 </tool-calling-guidelines>
 
 <response_workflow_guidelines>
@@ -110,5 +131,5 @@ If tools are required, pick one of:
 - When counting characters, words, or letters, show step-by-step calculations.
 - Assume positive and legal intent when queries are ambiguous.
 - Use markdown tables for structured data comparisons.
-</interaction_rules>`;
+</interaction_rules>${workingMemoryBlock}`;
 }

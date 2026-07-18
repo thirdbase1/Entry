@@ -46,6 +46,7 @@
     "./lib/credential-vault": "./agent/lib/credential-vault.ts",
     "./lib/connect-service-tokens": "./agent/lib/connect-service-tokens.ts",
     "./lib/browser-use-cloud-client": "./agent/lib/browser-use-cloud-client.ts",
-    "./lib/steel-client": "./agent/lib/steel-client.ts"
+    "./lib/steel-client": "./agent/lib/steel-client.ts",
+    "./lib/working-memory": "./agent/lib/working-memory.ts"
   }
 }
