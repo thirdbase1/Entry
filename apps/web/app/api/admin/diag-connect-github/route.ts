@@ -11,7 +11,18 @@ export async function POST(req: Request) {
   const bearerOk = Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`;
   if (!bearerOk) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
-  let { userId, email } = (await req.json()) as { userId?: string; email?: string };
+  const body = (await req.json()) as { userId?: string; email?: string; listUsers?: boolean };
+
+  if (body.listUsers) {
+    const users = await prisma.user.findMany({
+      select: { id: true, email: true, createdAt: true, githubInstallationId: true },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    return Response.json({ users });
+  }
+
+  let { userId, email } = body;
   if (!userId) {
     const user = email
       ? await prisma.user.findFirst({ where: { email } })
