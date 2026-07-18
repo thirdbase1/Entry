@@ -14,6 +14,15 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'BYOK API key security hardening pass',
+    items: [
+      "Removed three leftover one-off admin diagnostic routes (diag-toolcall, diag-steel-live, diag-browser-stress) that could decrypt a user's stored BYOK API key server-side -- their investigations were already finished, and each was needless residual attack surface behind a single static bearer token.",
+      "Switched every remaining admin/diagnostic route's bearer-token check to a timing-safe comparison (crypto.timingSafeEqual) instead of a plain string equality check, closing a theoretical timing side-channel on the one shared secret gating several routes that touch real user data.",
+      'Audited the full BYOK key lifecycle end to end: keys are AES-256-GCM encrypted at rest with a dedicated env-only secret, never logged anywhere (including error paths and retry-fetch logging), never returned to the client except on an explicit user-initiated reveal of their own key, and every lookup is ownership-scoped to the requesting session -- no gaps found.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Fixed a real data-loss bug: reloading mid-turn could permanently wipe an AI reply',
     items: [
       'Root cause: two independent writers could save a chat\'s transcript to the database -- the browser tab\'s own save-on-finish (the complete, correct reply) and a server-side reconciler that reattaches when a reload lands mid-turn (which only re-captures up to 8 seconds of progress). If the reconciler\'s shorter, partial write happened to land AFTER the tab\'s complete one, it silently overwrote the full reply with a partial one -- permanently, once the live session later expired with no way to recover it.',

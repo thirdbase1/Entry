@@ -16,10 +16,10 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { featureService } from '@entry/features';
 import { getSandboxForChat, getPreviewForChat } from '@/lib/direct-chat/sandbox';
 import { prisma } from '@entry/db';
+import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
 async function isAuthorized(req: NextRequest): Promise<boolean> {
-  const authHeader = req.headers.get('authorization') || '';
-  const bearerOk = Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`;
+  const bearerOk = isAdminBearerAuthorized(req);
   if (bearerOk) return true;
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return false;

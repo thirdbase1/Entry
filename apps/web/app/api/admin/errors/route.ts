@@ -12,14 +12,14 @@
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
+import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
 export const GET = withApiErrorHandling(async (req: Request) => {
   // Either a real logged-in session (used from the browser) OR a bearer
   // token matching ADMIN_DEBUG_TOKEN (used for one-off out-of-band
   // debugging, e.g. via curl, when there's no browser session handy) --
   // single-owner product, so either one is fine.
-  const authHeader = req.headers.get('authorization') || '';
-  const bearerOk = Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`;
+  const bearerOk = isAdminBearerAuthorized(req);
   if (!bearerOk) {
     const { session } = await getUserSessionFromRequest(req);
     if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });

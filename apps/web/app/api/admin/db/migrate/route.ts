@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { featureService } from '@entry/features';
+import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
 /**
  * Permanent admin-only route that applies any pending Prisma migrations
@@ -48,8 +49,7 @@ async function isAuthorized(req: NextRequest): Promise<boolean> {
   // hand-assembled prebuilt deploy with no browser session handy -- see
   // DEPLOY.md Step 4's "deploy first, then call this route once", which
   // previously had no non-interactive way to actually satisfy that call).
-  const authHeader = req.headers.get('authorization') || '';
-  const bearerOk = Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`;
+  const bearerOk = isAdminBearerAuthorized(req);
   if (bearerOk) return true;
 
   const { session } = await getUserSessionFromRequest(req);

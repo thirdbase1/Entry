@@ -50,6 +50,7 @@
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getToken } from '@vercel/connect';
+import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
 const VERCEL_API = 'https://api.vercel.com';
 const PROJECT_ID = process.env.VERCEL_PROJECT_ID || 'prj_vwm0Sv2SJz07EcyEu7eGIPblMpLd';
@@ -72,8 +73,7 @@ async function vercelHeaders() {
 }
 
 async function isAuthorized(req: Request): Promise<boolean> {
-  const authHeader = req.headers.get('authorization') || '';
-  if (Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`) return true;
+  if (isAdminBearerAuthorized(req)) return true;
   const { session } = await getUserSessionFromRequest(req);
   return Boolean(session);
 }

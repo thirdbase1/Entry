@@ -1,10 +1,10 @@
 /** One-off admin diagnostic: list a user's BYOK connections + their models (id, provider, model, status) so we can
  * pick a different one for stress-testing without exposing secrets. Bearer ADMIN_DEBUG_TOKEN only. */
 import { prisma } from '@entry/db';
+import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
 export async function POST(req: Request) {
-  const authHeader = req.headers.get('authorization') || '';
-  const bearerOk = Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`;
+  const bearerOk = isAdminBearerAuthorized(req);
   if (!bearerOk) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { userId } = (await req.json()) as { userId?: string };

@@ -12,10 +12,10 @@
  * GET -- bearer ADMIN_DEBUG_TOKEN only, same pattern as admin/errors.
  */
 import { prisma } from '@entry/db';
+import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
 export async function GET(req: Request) {
-  const authHeader = req.headers.get('authorization') || '';
-  const bearerOk = Boolean(process.env.ADMIN_DEBUG_TOKEN) && authHeader === `Bearer ${process.env.ADMIN_DEBUG_TOKEN}`;
+  const bearerOk = isAdminBearerAuthorized(req);
   if (!bearerOk) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
   const sessions = await prisma.chatBrowserSession.findMany({
