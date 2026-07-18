@@ -195,11 +195,18 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
   }
 
   return (
-    <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
+    <form
+      onSubmit={e => {
+        e.preventDefault();
+        void submit();
+      }}
+      className="border rounded-lg p-4 flex flex-col gap-3 bg-card"
+    >
       <div className="text-sm font-medium text-foreground">New provider connection</div>
 
       {!showImport ? (
         <button
+          type="button"
           onClick={() => setShowImport(true)}
           className="text-xs text-left text-muted-foreground hover:text-foreground underline underline-offset-2 w-fit"
         >
@@ -219,13 +226,14 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
           />
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={applyParsedConfig}
               disabled={!pastedConfig.trim()}
               className="h-8 px-3 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
             >
               Parse
             </button>
-            <button onClick={() => setShowImport(false)} className="h-8 px-3 rounded-md text-xs text-muted-foreground hover:bg-accent">
+            <button type="button" onClick={() => setShowImport(false)} className="h-8 px-3 rounded-md text-xs text-muted-foreground hover:bg-accent">
               Hide
             </button>
           </div>
@@ -284,17 +292,17 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
 
       <div className="flex items-center gap-2 pt-1">
         <button
-          onClick={submit}
+          type="submit"
           disabled={saving}
           className="h-8 px-3 rounded-md bg-primary text-primary-foreground text-sm disabled:opacity-50"
         >
           {saving ? 'Saving…' : 'Save connection'}
         </button>
-        <button onClick={() => setOpen(false)} className="h-8 px-3 rounded-md text-sm text-muted-foreground hover:bg-accent">
+        <button type="button" onClick={() => setOpen(false)} className="h-8 px-3 rounded-md text-sm text-muted-foreground hover:bg-accent">
           Cancel
         </button>
       </div>
-    </div>
+    </form>
   );
 }
 
@@ -352,6 +360,7 @@ function ManualModelAdd({ providerId, onAdded }: { providerId: string; onAdded: 
 }
 
 function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; onUpdate: (p: Provider) => void; onDelete: () => void }) {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(provider.lastError ?? null);
   const [editingKey, setEditingKey] = useState(false);
@@ -519,6 +528,12 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
 
   const testedModel = provider.models.find(m => m.id === testModelId);
 
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    const timer = setTimeout(() => setConfirmingDelete(false), 4000);
+    return () => clearTimeout(timer);
+  }, [confirmingDelete]);
+
   return (
     <div className="border rounded-lg p-4 flex flex-col gap-3 bg-card">
       <div className="flex items-start justify-between gap-2">
@@ -588,9 +603,30 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
             </div>
           )}
         </div>
-        <button onClick={onDelete} title="Remove provider" className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive shrink-0">
-          <DeleteIcon className="w-4 h-4" />
-        </button>
+        {confirmingDelete ? (
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={onDelete}
+              className="h-7 px-2 rounded-md bg-destructive text-destructive-foreground text-xs whitespace-nowrap"
+            >
+              Confirm remove
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(false)}
+              className="h-7 px-2 rounded-md text-xs text-muted-foreground hover:bg-accent"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmingDelete(true)}
+            title="Remove provider"
+            className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive shrink-0"
+          >
+            <DeleteIcon className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       <div className="flex items-center gap-2">
@@ -692,8 +728,15 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
 function ModelProvidersSection() {
   const [providers, setProviders] = useState<Provider[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Bumped to re-run the load effect on demand (2026-07-18, "improve the
+  // whole BYOK page x4") -- a failed initial load used to be a dead end:
+  // the red banner just sat there forever with no way to retry short of a
+  // full page reload, which is a jarring, disproportionate response to
+  // e.g. one dropped request on a flaky connection.
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
+    setLoadError(null);
     fetch('/api/user/byok/providers')
       .then(async res => {
         const json = await safeJson(res);
@@ -702,16 +745,19 @@ function ModelProvidersSection() {
       })
       .catch(e => {
         setLoadError(e.message ?? 'Failed to load providers.');
-        setProviders([]); // stop the spinner even on failure
+        setProviders(prev => prev ?? []); // stop the spinner even on failure, but don't wipe a prior successful load on a retry
       });
-  }, []);
+  }, [loadAttempt]);
 
   const updateProvider = useCallback((updated: Provider) => {
     setProviders(prev => (prev ? prev.map(p => (p.id === updated.id ? updated : p)) : prev));
   }, []);
 
+  // No more window.confirm() here (2026-07-18) -- ProviderCard now confirms
+  // inline itself (see its own confirmingDelete state) before ever calling
+  // this, so by the time onDelete fires the user has already confirmed;
+  // this just performs the actual removal.
   const deleteProvider = useCallback(async (id: string) => {
-    if (!confirm('Remove this provider and all its models?')) return;
     setProviders(prev => (prev ? prev.filter(p => p.id !== id) : prev));
     await fetch(`/api/user/byok/providers/${id}`, { method: 'DELETE' });
   }, []);
@@ -728,8 +774,14 @@ function ModelProvidersSection() {
       </div>
 
       {loadError && (
-        <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
-          {loadError}
+        <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2 flex items-center justify-between gap-3">
+          <span>{loadError}</span>
+          <button
+            onClick={() => setLoadAttempt(n => n + 1)}
+            className="shrink-0 h-7 px-2.5 rounded-md border border-destructive/40 text-xs hover:bg-destructive/10 transition-colors"
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -737,6 +789,13 @@ function ModelProvidersSection() {
         <div className="text-sm text-muted-foreground">Loading…</div>
       ) : (
         <>
+          {providers.length === 0 && !loadError && (
+            <div className="text-sm text-muted-foreground border border-dashed rounded-lg px-4 py-6 text-center">
+              No providers connected yet. Add one below with its base URL (and API key, if it needs one) --
+              works with any OpenAI/Anthropic/Google-compatible endpoint, e.g. Groq, Fireworks, OpenRouter, or a
+              local server like Ollama or LM Studio.
+            </div>
+          )}
           {providers.map(p => (
             <ProviderCard key={p.id} provider={p} onUpdate={updateProvider} onDelete={() => deleteProvider(p.id)} />
           ))}

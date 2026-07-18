@@ -14,6 +14,24 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Sub-agent delegation can now actually DO things, plus real timeout/cancel handling',
+    items: [
+      'The sub-agent delegate tool could previously only research (web_search/web_crawl) -- it had no way to actually execute anything, so any delegated task needing real work could only describe what should happen. It can now also use bash, list_files/write_file/edit_file/append_file, code_artifact, python_coding, and browser_use/browser_stop, in the SAME live sandbox as the conversation -- so delegating an actual coding or file-based subtask is now a real thing, not just delegating research.',
+      "Deliberately left out anything that doesn't fit an isolated, no-broader-context subtask: credential access (security-sensitive, no way for a blind delegate to judge if it's even appropriate), restarting the sandbox (too destructive a blast radius for one bounded subtask), the human-facing 'choose' prompt (a delegate has no user to ask), and a few others -- each with the reasoning written directly into the code.",
+      "Fixed a real gap versus every other AI-calling tool in the codebase: this one never had a timeout or any way to cancel an in-flight delegation, even though a multi-step delegated task is the most likely of all of them to hang. It's now wired the same way task_analysis/code_artifact/python_coding already were -- scaled to how many steps were requested, and properly stops a delegation if the user cancels the turn instead of letting it keep running (and billing) in the background.",
+    ],
+  },
+  {
+    date: '2026-07-18',
+    title: 'BYOK settings page: a few real usability fixes',
+    items: [
+      'Pressing Enter in the Add Provider form now actually submits it -- it silently did nothing before, since those fields were never wrapped in a real form.',
+      'Removing a provider now confirms inline instead of a jarring native browser popup (which can also be silently auto-dismissed in some contexts, previously meaning zero confirmation at all in that case).',
+      'Added a proper empty state for first-time users with no providers connected yet, and a Retry button on a failed provider list load instead of a dead-end error that needed a full page reload.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Fixed the actual streaming-lag root cause: unthrottled re-renders',
     items: [
       "Found and fixed the real bug behind streaming looking laggy and auto-scroll falling behind, worse the faster the model responds: every single incoming stream chunk was triggering its own full, uncapped React re-render of the whole message list -- a fast model easily sends 50-100+ chunks/sec, i.e. that many re-renders/sec, which is more work than a browser main thread can keep up with, so frames get dropped and both the text and the auto-scroll visibly fall behind.",

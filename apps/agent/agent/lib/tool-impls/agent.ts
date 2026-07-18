@@ -1,11 +1,21 @@
-import { generateText, tool, stepCountIs } from 'ai';
+import { generateText, tool, stepCountIs, type LanguageModel } from 'ai';
 import { gateway } from '@ai-sdk/gateway';
 import { z } from 'zod';
 import { resolveModelIdForProvider } from '../model-catalog.js';
 import { webSearch } from './web_search.js';
 import { webCrawl } from './web_crawl.js';
+import { bash } from './bash.js';
+import { listFilesTool } from './list_files.js';
+import { writeFileTool } from './write_file.js';
+import { editFileTool } from './edit_file.js';
+import { appendFileTool } from './append_file.js';
+import { codeArtifact } from './code_artifact.js';
+import { pythonCoding } from './python_coding.js';
+import { browserUse } from './browser_use.js';
+import { browserStop } from './browser_stop.js';
 import { safeExecute } from './safe-execute.js';
 import { withTransientRetry } from '../transient-provider-error.js';
+import { withTimeoutSignal } from './with-timeout-signal.js';
 import type { ToolExecCtx } from './types.js';
 
 /**
@@ -111,8 +121,17 @@ const AgentDelegateResultSchema = z.object({
 
 const SUBAGENT_SYSTEM_PROMPT =
   'You are a focused sub-agent completing ONE delegated task for a parent AI agent. You do not see the parent conversation — ' +
-  'only the task message you were given. Use web_search/web_crawl if the task needs current information or a specific page\'s content. ' +
-  'Answer completely and directly; your entire reply is returned as-is to the parent, which will use it to continue helping its own user. ' +
+  'only the task message you were given. Answer completely and directly; your entire reply is returned as-is to the parent, ' +
+  'which will use it to continue helping its own user. ' +
+  // IMPROVED (2026-07-18, "give sub agent tools too, use best judgement"): previously only had web_search/web_crawl, so any
+  // delegated task needing real execution (run this, edit that file, drive a browser) had no way to actually do it -- it could
+  // only ever describe what SHOULD happen, not make it happen. Added the tools that fit a bounded, isolated subtask with no
+  // broader context of its own; see this file's runDelegatedTask for the full tool set + what was deliberately left out and why.
+  'You also have bash, list_files/write_file/edit_file/append_file, code_artifact, python_coding, web_search/web_crawl, and ' +
+  'browser_use/browser_stop. IMPORTANT: bash/file/browser tools run in the SAME live sandbox as the parent turn\'s ongoing project ' +
+  '-- any file you write or command you run is real and persists, not an isolated scratch copy. If you start a browser_use ' +
+  'session, always call browser_stop when you are done with it (or before finishing if you still have one open), so it is not ' +
+  'left running/billing after your task ends. ' +
   "If you're running low on remaining steps and won't finish in time, don't trail off mid-thought — stop and clearly summarize what you " +
   "did complete, what's still left, and what the parent should do next (e.g. re-delegate the remainder with your partial result as context).";
 
@@ -126,12 +145,183 @@ function isTruncatedFinish(steps: { finishReason?: string }[], maxSteps: number)
   return last?.finishReason !== 'stop';
 }
 
+/**
+ * IMPROVED (2026-07-18, "improve the sub agent tool x3"):
+ *
+ *   1. TIMEOUT + ABORT WIRING (the real gap): this tool made its own
+ *      internal `generateText` call(s) with no timeout and never combined
+ *      `ctx.abortSignal` in at all -- every sibling sub-generation tool
+ *      (task_analysis, code_artifact, python_coding, bash) already went
+ *      through this exact fix via `withTimeoutSignal`, but it was never
+ *      applied here even though a multi-step delegated subtask (up to 40
+ *      steps, each potentially a slow web_search/web_crawl call) is
+ *      arguably the MOST likely tool to actually hang. Concretely this
+ *      used to mean: (a) a stuck upstream call rides along silently until
+ *      the outer turn's own platform ceiling kills the whole turn with
+ *      nothing surfaced, and (b) the user's Stop button did nothing for
+ *      an in-flight delegated subtask -- it kept running (and billing
+ *      tokens) server-side after the parent turn was cancelled, since
+ *      nothing ever told this generateText call to abort.
+ *   2. The timeout now SCALES with the requested `maxSteps` budget
+ *      instead of one blanket constant -- a caller-requested 40-step deep
+ *      research task legitimately needs more wall-clock time than the
+ *      15-step default, and a fixed short timeout would have made
+ *      `maxSteps` an empty promise for anything long. Capped at 280s to
+ *      stay under the same 300s platform ceiling bash.ts's own fix
+ *      documents (240s + margin there; kept a little tighter here since
+ *      the retry-on-transient-error wrapper below can itself cost a
+ *      config extra multi-second delay on top).
+ *   3. De-duplicated the BYOK and Gateway branches into one shared
+ *      `runDelegatedTask` -- they were two independent copies of the same
+ *      generateText+retry+timeout call differing only in which `model` is
+ *      passed, which is exactly the "two similar code paths silently
+ *      drift apart" bug class this codebase has hit for real before (see
+ *      use-streaming-autoscroll.ts's file comment: one chat path got a
+ *      streaming fix, the other didn't, for months). Fixing it here means
+ *      this timeout wiring -- or any future fix to this call -- can't
+ *      silently apply to only one of the two paths again.
+ */
+const BASE_TIMEOUT_MS = 90_000;
+const PER_EXTRA_STEP_MS = 8_000;
+const MAX_TIMEOUT_MS = 280_000;
+const DEFAULT_STEP_BUDGET = 15;
+
+function timeoutForBudget(budget: number): number {
+  const extraSteps = Math.max(0, budget - DEFAULT_STEP_BUDGET);
+  return Math.min(MAX_TIMEOUT_MS, BASE_TIMEOUT_MS + extraSteps * PER_EXTRA_STEP_MS);
+}
+
+/**
+ * Wraps a ctx-dependent tool-impl (bash, file I/O, code_artifact, browser_use,
+ * ...) as a real ai-sdk `tool()` bound to a FIXED ctx -- these all take
+ * `(args, ctx: ToolExecCtx)`, but when the ai-sdk tool-calling loop invokes a
+ * plain `tool()`-wrapped function itself, the second argument it passes is
+ * its OWN `ToolCallOptions` (toolCallId/messages/abortSignal), not our eve
+ * ToolExecCtx -- calling e.g. bash.execute(args, thatOtherShape) would crash
+ * immediately on `ctx.getSandbox is not a function`. This closes over the
+ * real ctx once so every nested call gets it correctly.
+ */
+function ctxTool<TArgs>(impl: { description: string; inputSchema: unknown; execute: (args: TArgs, ctx: ToolExecCtx) => Promise<unknown> }, ctx: ToolExecCtx) {
+  return tool({
+    description: impl.description,
+    inputSchema: impl.inputSchema as any,
+    execute: (args: TArgs) => impl.execute(args, ctx),
+  } as any);
+}
+
+/**
+ * Sub-agent tool set -- deliberately NOT just "give it everything the root
+ * has" (2026-07-18, "give sub agent tools too, use best judgement, think
+ * well before you decide"). Split below into what a bounded, isolated
+ * subtask (no visibility into the parent conversation, returns one final
+ * text result) can actually make good use of, vs. what doesn't fit that
+ * shape or is too high-risk/high-blast-radius to hand to a delegate:
+ *
+ * INCLUDED:
+ *   - web_search, web_crawl -- research, already had these.
+ *   - bash, list_files, write_file, edit_file, append_file -- real sandbox
+ *     work (read/run/write code, inspect a project) for a delegated coding
+ *     or file-based subtask. Same sandbox the parent turn is already using
+ *     (see bash.ts's own description), so this is genuinely useful --
+ *     e.g. "read these 6 files and refactor them" is a real bounded subtask.
+ *   - code_artifact, python_coding -- sub-generation coding tools; already
+ *     have their own internal timeout/abort wiring (task_analysis.ts's
+ *     pattern), so nesting one inside a delegate's own tool loop is safe
+ *     and consistent, not a new risk.
+ *   - browser_use, browser_stop -- given together deliberately (never one
+ *     without the other) so a delegate that opens a browser session can
+ *     also clean it up itself; SUBAGENT_SYSTEM_PROMPT explicitly tells it
+ *     to always call browser_stop before finishing.
+ *
+ * DELIBERATELY EXCLUDED:
+ *   - choose -- pauses the turn to ask a live human to click an option. A
+ *     sub-agent has no user-facing surface at all (its whole output is
+ *     just text handed back to the parent) -- this would either hang
+ *     forever waiting for a click that can never come, or be silently
+ *     meaningless.
+ *   - inject_credential, save_credential, list_credentials -- security-
+ *     sensitive secret access. A delegate has no context on WHY it's being
+ *     asked anything (it never sees the parent conversation), so it has no
+ *     way to judge whether touching the user's stored credentials is even
+ *     appropriate for this task -- that judgment call belongs at the root,
+ *     not delegated blind.
+ *   - restart_sandbox -- destructive to the ENTIRE shared session sandbox,
+ *     not scoped to just this bounded subtask; a delegate having the power
+ *     to nuke the parent's whole in-progress work is a wildly disproportionate
+ *     blast radius for "complete one subtask and return."
+ *   - create_skill, recall_skill, list_skills -- persistent, workspace-level
+ *     artifact decisions (what gets permanently saved to the user's skill
+ *     library). Better made by the root with the full conversation in view,
+ *     not by an isolated one-shot delegate.
+ *   - get_preview_url -- a UI side-effect tied to the visible chat's preview
+ *     panel/polling, not a "return a text result" fit; a delegate causing
+ *     the visible preview to flip while doing an unrelated subtask (e.g.
+ *     research) would just be confusing.
+ *   - agent (no recursive self-delegation) -- avoids uncontrolled recursive
+ *     delegation trees; eve's own subagents.mdx already documents a real
+ *     bug class around depth-capped nested delegation (see instructions.ts's
+ *     2026-07-15 comment) that this sidesteps entirely by not going there.
+ *   - task_analysis -- a meta-planning sub-generation tool; redundant here
+ *     since the delegate is already a full reasoning loop for ONE narrow
+ *     task -- adding a nested planner on top is extra cost/latency without
+ *     a matching benefit at this scope.
+ */
+function delegateTools(ctx: ToolExecCtx | undefined) {
+  const base = { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) };
+  if (!ctx) return base; // defensive: ctx-dependent tools need a real sandbox/session to bind to
+  return {
+    ...base,
+    bash: ctxTool(bash, ctx),
+    list_files: ctxTool(listFilesTool, ctx),
+    write_file: ctxTool(writeFileTool, ctx),
+    edit_file: ctxTool(editFileTool, ctx),
+    append_file: ctxTool(appendFileTool, ctx),
+    code_artifact: ctxTool(codeArtifact, ctx),
+    python_coding: ctxTool(pythonCoding, ctx),
+    browser_use: ctxTool(browserUse, ctx),
+    browser_stop: ctxTool(browserStop, ctx),
+  };
+}
+
+async function runDelegatedTask(
+  model: LanguageModel,
+  message: string,
+  budget: number,
+  outerCtx: ToolExecCtx | undefined
+): Promise<{ text: string; steps: { finishReason?: string }[] }> {
+  const t = withTimeoutSignal(outerCtx?.abortSignal, timeoutForBudget(budget), 'agent');
+  // Same ctx nested tools bind to, except abortSignal is swapped for `t.signal`
+  // -- so if THIS delegation's own timeout fires (not just the outer turn's
+  // cancellation), any in-flight bash/browser/file call the sub-agent is
+  // running gets cut off too, not just the top-level generateText polling loop.
+  const delegateCtx: ToolExecCtx | undefined = outerCtx ? { ...outerCtx, abortSignal: t.signal } : undefined;
+  try {
+    return await withTransientRetry(() =>
+      generateText({
+        model,
+        system: SUBAGENT_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: message }],
+        tools: delegateTools(delegateCtx),
+        stopWhen: stepCountIs(budget),
+        abortSignal: t.signal,
+      })
+    );
+  } catch (err) {
+    throw t.rethrow(err);
+  } finally {
+    t.clear();
+  }
+}
+
 export const agentDelegate = {
   description:
     'Delegate a bounded subtask to a sub-agent, optionally on a SPECIFIC provider/model you choose (e.g. hand deep research to a Gemini model, ' +
     'careful planning to a Claude model, or a rewrite/tone pass to a GPT model) — matching a real multi-model workflow instead of doing everything ' +
-    'on a single model. The sub-agent has its own fresh context (it does NOT see this conversation — pack everything it needs into `message`) and ' +
-    'can call web_search/web_crawl itself for research tasks. Returns its final result as plain text, plus `truncated: true` if it ran out of steps ' +
+    'on a single model. The sub-agent has its own fresh context (it does NOT see this conversation — pack everything it needs into `message`) but ' +
+    'is NOT limited to just reading/thinking: it can also call web_search/web_crawl, bash, list_files/write_file/edit_file/append_file, ' +
+    'code_artifact, python_coding, and browser_use/browser_stop itself, in the SAME live sandbox as this conversation -- so a coding or ' +
+    'file-based subtask ("read these files and refactor X", "write a script that does Y and run it") is a real thing you can delegate, ' +
+    'not just research. Returns its final result as plain text, plus `truncated: true` if it ran out of steps ' +
     'before genuinely finishing (re-delegate a continuation using the partial result as context in that case, rather than treating it as complete). ' +
     'Pass `maxSteps` for a task you expect to be long/involved. Omit `provider`/`model` to delegate to a copy of yourself instead of a different model.',
   inputSchema: AgentDelegateInputSchema,
@@ -153,16 +343,7 @@ export const agentDelegate = {
       if (provider || model) {
         note = `Custom provider/model requests aren't available on BYOK turns — ran on your connected model instead of ${[provider, model].filter(Boolean).join('/')}.`;
       }
-      const byokModel = ctx.byokModel;
-      const { text, steps } = await withTransientRetry(() =>
-        generateText({
-          model: byokModel,
-          system: SUBAGENT_SYSTEM_PROMPT,
-          messages: [{ role: 'user', content: message }],
-          tools: { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) },
-          stopWhen: stepCountIs(budget),
-        })
-      );
+      const { text, steps } = await runDelegatedTask(ctx.byokModel, message, budget, ctx);
       const truncated = isTruncatedFinish(steps, budget);
       return {
         result: text,
@@ -194,15 +375,7 @@ export const agentDelegate = {
       modelId = await resolveModelIdForProvider('anthropic');
     }
 
-    const { text, steps } = await withTransientRetry(() =>
-      generateText({
-        model: gateway(modelId),
-        system: SUBAGENT_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: message }],
-        tools: { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) },
-        stopWhen: stepCountIs(budget),
-      })
-    );
+    const { text, steps } = await runDelegatedTask(gateway(modelId), message, budget, ctx);
 
     const truncated = isTruncatedFinish(steps, budget);
     return {
