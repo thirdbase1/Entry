@@ -509,7 +509,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // tool(s) were called, whether each tool call actually produced a
     // result vs errored, and token usage -- so a "stopped after one tool
     // call" report is a five-second log lookup instead of a guess.
-    onStepFinish(step) {
+    async onStepFinish(step) {
       const { stepNumber, finishReason, rawFinishReason, toolCalls, toolResults, usage, text, warnings, content } = step;
       lastFinishReason = finishReason;
       lastRawFinishReason = rawFinishReason;
@@ -546,6 +546,29 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           rawFinishReason,
           toolCallCount: toolCalls.length,
           toolErrors,
+        });
+      }
+
+      // INCREMENTAL VERSION CAPTURE (2026-07-18, user-reported: "sandbox
+      // kept cleaning up file, it's not persistent"). This used to only
+      // run once, at the very end of the whole turn, in `onFinish` below.
+      // Real bug: a hard-killed turn (a long tool call pushing the whole
+      // request past the outer 300s maxDuration, a crash, a dropped
+      // connection) never reaches `onFinish` at all, so the git baseline
+      // `restoreLatestFilesToSandbox` restores from after an eviction
+      // stayed stuck wherever the LAST clean turn left it -- silently
+      // losing every file change made during the one that got cut off.
+      // Capturing after every step (tool call included), not just once
+      // at the very end, means a mid-turn hard-kill now only ever loses
+      // whatever happened after the last completed step, not the whole
+      // turn. Skipped for steps with no tool calls (pure text) --
+      // nothing on disk could have changed. captureVersionFromSandboxDiff
+      // is already a cheap, safe no-op with no real diff, so this adds
+      // no real cost beyond that.
+      if (sandboxPromise && toolCalls.length > 0) {
+        const sandbox = await sandboxPromise;
+        await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
+          console.error('[direct chat] incremental step version capture failed', chatId, err);
         });
       }
     },

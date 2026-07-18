@@ -1,4 +1,5 @@
 import { defineHook } from 'eve/hooks';
+import type { HookContext } from 'eve/hooks';
 import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
 
 /**
@@ -40,24 +41,51 @@ import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
  * no polling delay, no page reload, works identically for every chat
  * whether it's eve-default or BYOK.
  */
+const capture = async (_event: unknown, ctx: HookContext) => {
+  try {
+    const sandbox = await ctx.getSandbox();
+    await captureVersionFromSandboxDiff(ctx.session.id, sandbox);
+  } catch (err) {
+    // Most common case by far: this turn never used a sandbox at all
+    // (pure conversation, no tool calls) -- getSandbox() throws, and
+    // there is genuinely nothing to version. Anything else (a real
+    // sandbox/git hiccup) is still just best-effort, same philosophy
+    // as every other piece of this feature -- never let a versioning
+    // failure look like the turn itself failed.
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/no sandbox/i.test(message)) {
+      console.error('[version-capture hook] failed', ctx.session.id, err);
+    }
+  }
+};
+
 export default defineHook({
   events: {
-    'turn.completed': async (_event, ctx) => {
-      try {
-        const sandbox = await ctx.getSandbox();
-        await captureVersionFromSandboxDiff(ctx.session.id, sandbox);
-      } catch (err) {
-        // Most common case by far: this turn never used a sandbox at all
-        // (pure conversation, no tool calls) -- getSandbox() throws, and
-        // there is genuinely nothing to version. Anything else (a real
-        // sandbox/git hiccup) is still just best-effort, same philosophy
-        // as every other piece of this feature -- never let a versioning
-        // failure look like the turn itself failed.
-        const message = err instanceof Error ? err.message : String(err);
-        if (!/no sandbox/i.test(message)) {
-          console.error('[version-capture hook] failed', ctx.session.id, err);
-        }
-      }
-    },
+    // BROADENED (2026-07-18, user-reported: "sandbox kept cleaning up
+    // file, it's not persistent"). This used to only fire on
+    // `turn.completed` -- ONE snapshot per whole turn, at the very end.
+    // Real bug: `restoreLatestFilesToSandbox` (used whenever an evicted/
+    // reset sandbox needs to be rebuilt) only ever restores from the
+    // LAST git-committed baseline, which this hook is the only thing
+    // that advances. Any turn that never reaches a clean `turn.completed`
+    // -- a long tool call hitting the outer request's own maxDuration and
+    // getting hard-killed by the platform mid-turn, a crash, a dropped
+    // connection -- left the baseline stuck wherever it was after the
+    // PREVIOUS turn, silently losing every file change made during the
+    // one that got cut off, the instant that sandbox was later evicted
+    // and rebuilt from that stale baseline. `step.completed` fires after
+    // EVERY individual model step within a turn (tool call and result
+    // included), not just once at the end, so the baseline now advances
+    // incrementally as the turn progresses -- a hard-kill mid-turn now
+    // only ever loses whatever happened after the last completed step,
+    // not the entire turn. `step.failed` covers the same gap for a step
+    // that errors outright (a tool call can still have written real
+    // files before the step itself failed). captureVersionFromSandboxDiff
+    // is already a cheap, safe no-op when nothing actually changed on
+    // disk, so firing it this much more often costs nothing extra when
+    // there's no diff to record.
+    'step.completed': capture,
+    'step.failed': capture,
+    'turn.completed': capture,
   },
 });
