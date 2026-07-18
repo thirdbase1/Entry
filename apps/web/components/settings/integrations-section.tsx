@@ -229,12 +229,54 @@ function OAuthIntegrationCard({
       });
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error?.message ?? json.error ?? 'Failed to start connection');
+
+      // GitHub's connector type doesn't support the redirect-back callback
+      // the other connectors use (see connect-service-tokens.ts's
+      // startConnectAuthorization) -- Vercel serves its own "you can close
+      // this window" page with nowhere to send the browser back to us.
+      // Open it as a popup instead and poll our own status endpoint until
+      // it flips to connected (or the popup gets closed without finishing).
+      if (def.service === 'github') {
+        const popup = window.open(json.url, 'entry-connect-github', 'width=640,height=800');
+        if (!popup) {
+          // Popup blocked -- fall back to a normal top-level navigation.
+          // The user just won't get auto-redirected back; they can
+          // navigate to Settings manually afterwards and this card will
+          // reflect the real status on next load/reload.
+          window.location.href = json.url;
+          return;
+        }
+        const started = Date.now();
+        const poll = setInterval(async () => {
+          const timedOut = Date.now() - started > 3 * 60 * 1000;
+          if (popup.closed || timedOut) {
+            clearInterval(poll);
+            setBusy(false);
+            onChanged();
+            return;
+          }
+          try {
+            const statusRes = await fetch('/api/integrations/connect/status');
+            const statusJson = await safeJson(statusRes);
+            if (statusRes.ok && statusJson.connected?.github) {
+              clearInterval(poll);
+              popup.close();
+              setBusy(false);
+              onChanged();
+            }
+          } catch {
+            // Transient -- keep polling until timeout/close.
+          }
+        }, 2000);
+        return;
+      }
+
       window.location.href = json.url;
     } catch (e: any) {
       setError(e.message ?? 'Something went wrong');
       setBusy(false);
     }
-  }, [def.service]);
+  }, [def.service, onChanged]);
 
   const disconnect = useCallback(async () => {
     if (!confirm(`Disconnect ${def.name}? Anything using this connection (deploys, chat) will stop working until you reconnect.`)) return;

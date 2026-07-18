@@ -124,6 +124,16 @@ export async function startConnectAuthorization(userId: string, service: string,
     service === 'github'
       ? ([{ type: 'github_app_installation' as const, permissions: ['contents'], repositories: 'all' as const }])
       : undefined;
+  // 2026-07-18: GitHub's connector type does NOT support the redirect-back
+  // "stateless callback" mechanism the other connectors use -- passing
+  // callbackUrl here makes Vercel's own hosted callback page fail with
+  // "Connector type 'github' does not support stateless callbacks"
+  // (confirmed live: happened on every attempt, fresh or not). For github,
+  // omit callbackUrl entirely; Vercel then serves its own "you can close
+  // this window" confirmation page instead, and the caller (our frontend)
+  // is expected to detect completion itself -- see the popup+poll flow in
+  // integrations-section.tsx's OAuthIntegrationCard rather than relying on
+  // a query-string redirect back to our own /settings page.
   const { url } = await startAuthorization(
     connector,
     {
@@ -131,7 +141,7 @@ export async function startConnectAuthorization(userId: string, service: string,
       ...(scopes ? { scopes } : {}),
       ...(authorizationDetails ? { authorizationDetails } : {}),
     },
-    { callbackUrl }
+    service === 'github' ? {} : { callbackUrl }
   );
   return url;
 }
