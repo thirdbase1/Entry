@@ -64,6 +64,41 @@ const BACKEND_NAME = 'e2b';
  */
 const BASE_TEMPLATE = process.env.E2B_BASE_TEMPLATE ?? 'entry-agent-base';
 
+/**
+ * FIXED (2026-07-18, real user-reported bug: "sandbox is clearing my work").
+ * Root cause: every `E2BSandbox.create()` call in this file left E2B's
+ * `lifecycle.onTimeout` at its SDK default of `'kill'` (confirmed in
+ * node_modules/e2b/dist/index.d.ts's `SandboxLifecycle` -- `@default "kill"`).
+ * That means every sandbox that went idle past its timeout was HARD DELETED,
+ * filesystem and all -- not paused. The only thing standing between a user
+ * and total data loss was `restoreLatestFilesToSandbox` (chat-versioning.ts),
+ * which only replays whatever was captured at the last explicit checkpoint
+ * (not a live, exact snapshot), and whose own restore call here is wrapped in
+ * `.catch(() => {})` -- so a failed restore silently left the user with an
+ * empty sandbox and zero error surfaced anywhere. That combination is exactly
+ * "my work got cleared" with no warning.
+ *
+ * E2B's actual fix for this is a first-class feature we simply weren't using:
+ * `lifecycle: { onTimeout: 'pause', autoResume: true }`. On timeout this
+ * takes a full memory+filesystem snapshot and pauses (rather than kills) the
+ * sandbox; per E2B's own docs this snapshot is "a persistent image that
+ * survives sandbox deletion" (not a short-lived TTL'd thing like the old
+ * kill-timeout was). `Sandbox.connect(sandboxId)` -- already what `create()`
+ * below calls for an existing session -- transparently auto-resumes a paused
+ * sandbox with its exact prior state (confirmed in the SDK's own doc comment:
+ * "Connect to a sandbox. If the sandbox is paused, it will be automatically
+ * resumed."). `autoResume: true` additionally lets direct inbound traffic
+ * (e.g. a live preview URL opened via cloudflared, see get_preview_url.ts)
+ * wake a paused sandbox on its own, without going through our `create()` path
+ * at all. Net effect: idle sandboxes now round-trip through a real, complete
+ * snapshot/resume cycle instead of a lossy custom DB-based file replay --
+ * `restoreLatestFilesToSandbox` stays in place purely as a last-resort for
+ * the rare case E2B can no longer resume a given sandbox at all (e.g. past
+ * its account-level retention), not as the routine recovery path it was
+ * before this fix.
+ */
+const SANDBOX_LIFECYCLE = { onTimeout: 'pause' as const, autoResume: true };
+
 function resolveApiKey(options: E2BBackendOptions | undefined): string {
   const key = options?.apiKey ?? process.env.E2B_API_KEY;
   if (!key) {
@@ -369,7 +404,7 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
       // envelope, so starting bootstrap from this instead of the bare
       // default template is what actually fixes it for every session
       // cloned from the resulting snapshot.
-      const sandbox = await withRetry('Sandbox.create', () => E2BSandbox.create(BASE_TEMPLATE, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000 }));
+      const sandbox = await withRetry('Sandbox.create', () => E2BSandbox.create(BASE_TEMPLATE, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000, lifecycle: SANDBOX_LIFECYCLE }));
       try {
         for (const seed of input.seedFiles) {
           const data = typeof seed.content === 'string' ? seed.content : toArrayBuffer(seed.content);
@@ -404,7 +439,19 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
       if (existingSandboxId) {
         try {
           sandbox = await withRetry('Sandbox.connect', () => E2BSandbox.connect(existingSandboxId, { apiKey }));
-        } catch {
+        } catch (err) {
+          // With SANDBOX_LIFECYCLE (`onTimeout: 'pause'`) in place, `connect()`
+          // should transparently resume a paused sandbox almost always -- this
+          // branch firing now means genuine, harder loss (E2B-side retention
+          // expiry, account issue, etc.), not routine idle recycling. Log it
+          // loudly rather than silently falling back, so this stays visible
+          // (previously this exact path was the ROUTINE case for every idle
+          // sandbox, so it deliberately wasn't noisy -- that's no longer true).
+          console.warn(
+            `[e2b] Sandbox.connect(${existingSandboxId}) failed, sandbox could not be resumed -- ` +
+              `falling back to a fresh sandbox + best-effort file restore from the last checkpoint:`,
+            err instanceof Error ? err.message : err,
+          );
           sandbox = await createFromTemplate(input, apiKey, options);
           restoredFromEviction = true;
         }
@@ -412,12 +459,12 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
         sandbox = await createFromTemplate(input, apiKey, options);
       }
 
-      // See chat-versioning.ts's restoreLatestFilesToSandbox for the full
-      // bug this closes ("sandbox wiped between turns" / files gone
-      // after an eviction). `tags.sessionId` is the real chat/session id
-      // (confirmed against eve's own context/providers/sandbox.js — same
-      // value ctx.session.id resolves to everywhere else), always set
-      // regardless of which branch above ran.
+      // Last-resort fallback only (see SANDBOX_LIFECYCLE comment above) --
+      // replays whatever was captured at the last chat-versioning checkpoint,
+      // which is NOT necessarily every file/edit since then. `tags.sessionId`
+      // is the real chat/session id (confirmed against eve's own
+      // context/providers/sandbox.js -- same value ctx.session.id resolves to
+      // everywhere else), always set regardless of which branch above ran.
       const chatIdForRestore = input.tags?.sessionId;
       if (restoredFromEviction && chatIdForRestore) {
         await restoreLatestFilesToSandbox(chatIdForRestore, {
@@ -425,7 +472,13 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
             const r = await sandbox.commands.run(command, { timeoutMs: 60_000 });
             return { exitCode: r.exitCode ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
           },
-        }).catch(() => {});
+        }).catch(err => {
+          // FIXED (2026-07-18): this used to be a bare `.catch(() => {})` --
+          // if the restore itself failed, the user was left with a genuinely
+          // empty sandbox and there was no trace anywhere that anything had
+          // gone wrong. Now at least surfaces in logs for real investigation.
+          console.error(`[e2b] restoreLatestFilesToSandbox failed for chat ${chatIdForRestore}:`, err instanceof Error ? err.message : err);
+        });
       }
 
       const refreshTimeoutMs = options.timeoutMs ?? 5 * 60 * 1000;
@@ -469,7 +522,7 @@ async function createFromTemplate(
   options: E2BBackendOptions,
 ): Promise<E2BSandbox> {
   if (!input.templateKey) {
-    return withRetry('Sandbox.create', () => E2BSandbox.create(BASE_TEMPLATE, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000 }));
+    return withRetry('Sandbox.create', () => E2BSandbox.create(BASE_TEMPLATE, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000, lifecycle: SANDBOX_LIFECYCLE }));
   }
   const template = await prisma.sandboxTemplate.findUnique({ where: { templateKey: input.templateKey } });
   if (!template) {
@@ -477,7 +530,7 @@ async function createFromTemplate(
       `[e2b] no snapshot found for template "${input.templateKey}" — run \`eve build\` (prewarm) before serving traffic.`,
     );
   }
-  return withRetry('Sandbox.create', () => E2BSandbox.create(template.snapshotId, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000 }));
+  return withRetry('Sandbox.create', () => E2BSandbox.create(template.snapshotId, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000, lifecycle: SANDBOX_LIFECYCLE }));
 }
 
 export { defineSandbox };
