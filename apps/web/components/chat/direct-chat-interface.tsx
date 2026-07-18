@@ -53,6 +53,7 @@ import { AutoFixSendProvider } from './chat-auto-fix-context';
 import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
 import { ChooseResult } from './renderers/choose-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
+import { getKnownService } from '@/lib/integration-services';
 import type { IntegrationCallback } from './integration-callback-reader';
 
 interface DirectChatInterfaceProps {
@@ -87,6 +88,26 @@ function findDirectChooseAnswer(messages: any[], afterIndex: number, options: st
     if (matched.length) return text.split(', ');
   }
   return [];
+}
+
+/** Same shape as findDirectChooseAnswer above, for the connect card's
+ *  own auto-sent "Connected X."/"skip" text -- see
+ *  message-renderer.tsx's findConnectResolution (identical logic,
+ *  duplicated here because this surface has its own separate tool
+ *  rendering, not EveMessage-shaped `dynamic-tool` parts). */
+function findDirectConnectResolution(messages: any[], afterIndex: number, serviceName: string): 'connected' | 'skipped' | undefined {
+  for (let i = afterIndex + 1; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== 'user') continue;
+    const text = (m.parts ?? [])
+      .filter((p: any) => p.type === 'text')
+      .map((p: any) => p.text)
+      .join('')
+      .trim();
+    if (text === `Connected ${serviceName}.`) return 'connected';
+    if (text.toLowerCase() === 'skip') return 'skipped';
+  }
+  return undefined;
 }
 
 function ThinkingIndicator() {
@@ -392,7 +413,7 @@ function DirectChatSession({
   useEffect(() => {
     if (!integrationCallback || sentIntegrationCallbackRef.current) return;
     sentIntegrationCallbackRef.current = true;
-    const name = integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1);
+    const name = getKnownService(integrationCallback.service)?.name ?? (integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1));
     const text =
       integrationCallback.result === 'connected'
         ? `Connected ${name}.`
@@ -593,6 +614,8 @@ function DirectChatSession({
                         if (state === 'output-available' && output && typeof output === 'object' && (output as any).needsConnect) {
                           const service = (output as any).service as string | undefined;
                           if (service) {
+                            const name = getKnownService(service)?.name ?? (service.charAt(0).toUpperCase() + service.slice(1));
+                            const initialResolved = findDirectConnectResolution(messages, mi, name);
                             return (
                               <IntegrationConnectCard
                                 key={i}
@@ -600,6 +623,7 @@ function DirectChatSession({
                                 connectMode={((output as any).connectMode as 'oauth' | 'token') ?? 'token'}
                                 toolCallId={`${mi}-${i}`}
                                 onSend={onSend}
+                                initialResolved={initialResolved}
                               />
                             );
                           }

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEveAgent } from 'eve/react';
+import { getKnownService } from '@/lib/integration-services';
 import type { EveMessage, UseEveAgentSnapshot } from 'eve/react';
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -814,7 +815,7 @@ function ChatInterfaceInner({
   useEffect(() => {
     if (!integrationCallback || sentIntegrationCallbackRef.current) return;
     sentIntegrationCallbackRef.current = true;
-    const name = integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1);
+    const name = getKnownService(integrationCallback.service)?.name ?? (integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1));
     const text =
       integrationCallback.result === 'connected'
         ? `Connected ${name}.`

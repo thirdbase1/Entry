@@ -9,6 +9,14 @@ interface IntegrationConnectCardProps {
   connectMode: 'oauth' | 'token';
   toolCallId: string;
   onSend?: (text: string) => void;
+  /** Derived from later message history (see message-renderer.tsx /
+   *  direct-chat-interface.tsx's findConnectResolution) — this card
+   *  remounts fresh on every page load (OAuth is a full top-level
+   *  redirect), so its own `resolved` useState never survives the round
+   *  trip. Seeding from history is what actually makes the card show
+   *  "connected" with no buttons after a real reconnect, instead of
+   *  resetting back to the unconnected prompt every time. */
+  initialResolved?: 'connected' | 'skipped';
 }
 
 /**
@@ -31,10 +39,10 @@ interface IntegrationConnectCardProps {
  * — no page navigation at all, so no returnTo plumbing needed for this
  * mode.
  */
-export function IntegrationConnectCard({ service, connectMode, toolCallId, onSend }: IntegrationConnectCardProps) {
+export function IntegrationConnectCard({ service, connectMode, toolCallId, onSend, initialResolved }: IntegrationConnectCardProps) {
   const known = getKnownService(service);
   const name = known?.name ?? service.charAt(0).toUpperCase() + service.slice(1);
-  const [resolved, setResolved] = useState<'connecting' | 'connected' | 'skipped' | null>(null);
+  const [resolved, setResolved] = useState<'connecting' | 'connected' | 'skipped' | null>(initialResolved ?? null);
   const [showTokenInput, setShowTokenInput] = useState(false);
   const [tokenValue, setTokenValue] = useState('');
   const [busy, setBusy] = useState(false);

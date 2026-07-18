@@ -17,6 +17,7 @@ import { TodoListResult } from './renderers/todo-list-result';
 import { PythonCodeResult } from './renderers/python-code-result';
 import { AgentDelegateResult } from './renderers/agent-delegate-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
+import { getKnownService } from '@/lib/integration-services';
 
 interface MessageRendererProps {
   message: { id: string; role: 'user' | 'assistant'; parts: readonly EveMessagePart[] };
@@ -41,6 +42,29 @@ function findChooseAnswer(allMessages: readonly EveMessage[] | undefined, toolCa
   return [];
 }
 
+/** Scans later user messages for this card's own auto-sent "Connected
+ *  X." / "skip" text (see integration-connect-card.tsx's onSend calls)
+ *  so a fresh mount after an OAuth redirect round trip shows "connected"
+ *  instead of resetting back to the unconnected prompt. Same
+ *  toolCallId-then-scan-forward shape as findChooseAnswer above. */
+function findConnectResolution(
+  allMessages: readonly EveMessage[] | undefined,
+  toolCallId: string,
+  serviceName: string
+): 'connected' | 'skipped' | undefined {
+  if (!allMessages) return undefined;
+  const toolMsgIdx = allMessages.findIndex(m => m.parts.some(p => p.type === 'dynamic-tool' && p.toolCallId === toolCallId));
+  if (toolMsgIdx === -1) return undefined;
+  for (let i = toolMsgIdx + 1; i < allMessages.length; i++) {
+    const m = allMessages[i];
+    if (m.role !== 'user') continue;
+    const text = m.parts.filter((p): p is Extract<EveMessagePart, { type: 'text' }> => p.type === 'text').map(p => p.text).join('').trim();
+    if (text === `Connected ${serviceName}.`) return 'connected';
+    if (text.toLowerCase() === 'skip') return 'skipped';
+  }
+  return undefined;
+}
+
 function ToolPart({
   part,
   isStreaming,
@@ -61,6 +85,8 @@ function ToolPart({
   if (part.state === 'output-available' && part.output && typeof part.output === 'object' && (part.output as any).needsConnect) {
     const output = part.output as { service?: string; connectMode?: 'oauth' | 'token' };
     if (output.service) {
+      const name = getKnownService(output.service)?.name ?? (output.service.charAt(0).toUpperCase() + output.service.slice(1));
+      const initialResolved = findConnectResolution(allMessages, part.toolCallId, name);
       return (
         <IntegrationConnectCard
           key={part.toolCallId}
@@ -68,6 +94,7 @@ function ToolPart({
           connectMode={output.connectMode ?? 'token'}
           toolCallId={part.toolCallId}
           onSend={onSend}
+          initialResolved={initialResolved}
         />
       );
     }
