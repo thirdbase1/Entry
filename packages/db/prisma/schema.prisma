@@ -30,6 +30,16 @@ model User {
   registered    Boolean   @default(true)
   disabled      Boolean   @default(false)
 
+  /// GitHub App installation id this user's GitHub Connect grant resolved
+  /// to (see connect-service-tokens.ts's file header, 2026-07-18 fix).
+  /// GitHub is a multi-tenant Vercel Connect connector -- installations
+  /// are a separate axis from `subject`, and token requests that omit
+  /// `installationId` silently fall back to the connector's single
+  /// existing default installation instead of the specific one this user
+  /// actually installed. Captured right after their OAuth callback
+  /// completes; null until they've connected GitHub at least once.
+  githubInstallationId String? @map("github_installation_id") @db.VarChar
+
   accounts        Account[]
   sessions        Session[]
   features        UserFeature[]

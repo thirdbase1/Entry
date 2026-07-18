@@ -1,26 +1,23 @@
 /**
- * Real per-user OAuth for deploy-target services (2026-07-17), riding on
- * Vercel Connect (@vercel/connect), layered ON TOP of the existing
- * manual-token vault (credential-vault.ts) rather than replacing it.
+ * Real per-user OAuth for deploy-target services, riding on Vercel Connect
+ * (@vercel/connect), layered ON TOP of the existing manual-token vault
+ * (credential-vault.ts) rather than replacing it.
  *
- * Background: Vercel Connect's "Custom OAuth" connector type looked, at
- * first read of the docs' Installations page, like it was single-tenant
- * only (one connector -> one grant, forever) — Snowflake/Salesforce/API-
- * key/Custom-OAuth are described as having "one (implicit) installation".
- * That's true for the *installation* concept specifically, but it does
- * NOT mean single-user: `startAuthorization`/`getToken` take a
- * `subject: { type: 'user', id }` with an ARBITRARY id we choose (our own
- * User.id), and Connect issues and stores one independent OAuth grant
- * PER subject id, regardless of connector type. Verified empirically
- * end-to-end in production against all three connectors below
- * (github/entry-github, vercel/entry-vercel-internal,
- * supabase/entry-supabase) before building this — each produced its own
- * per-subject consent URL and correctly gated getToken on
- * UserAuthorizationRequiredError until that specific subject completed
- * it. "Installations" (multi-tenant workspaces within ONE user's OAuth
- * grant, e.g. many Slack workspaces under one connector) is a genuinely
- * different, orthogonal axis from "which of OUR users this grant acts
- * as" (subject) — don't conflate them again.
+ * CORRECTED 2026-07-18 (previous version of this comment was wrong about
+ * GitHub specifically -- leaving this note so it doesn't get re-asserted):
+ * `subject: { type: 'user', id }` genuinely does give each of our users
+ * their own independent OAuth grant for single-tenant connector types
+ * (Custom OAuth: vercel/entry-vercel-internal, supabase/entry-supabase --
+ * confirmed empirically, each subject id gets its own consent URL and is
+ * correctly gated on UserAuthorizationRequiredError). GitHub is different:
+ * it's a genuinely multi-tenant connector type where "installation" (which
+ * GitHub org/account) is a SEPARATE axis from "subject", and real
+ * installation-scoped tokens require `subject: { type: 'app' },
+ * installationId` -- seeing UserAuthorizationRequiredError clear for a
+ * given subject id does NOT mean that subject has its own installation;
+ * omitting installationId silently falls back to the connector's single
+ * default installation (see resolveGithubInstallationId below for the
+ * fix and packages/db's User.githubInstallationId for where it's stored).
  *
  * Why layer instead of replace: Pxxl and Sendbyte have no Vercel Connect
  * connector type available (no managed type, and standing up a Custom
@@ -32,8 +29,9 @@
  * already pasted a token, or who wants to use a different account than
  * the one they OAuth'd with, isn't broken.
  */
-import { getToken, startAuthorization, revokeToken, UserAuthorizationRequiredError, ConnectorInstallationRequiredError } from '@vercel/connect';
+import { getToken, getTokenResponse, startAuthorization, revokeToken, UserAuthorizationRequiredError, ConnectorInstallationRequiredError } from '@vercel/connect';
 import { getCredential } from './credential-vault.js';
+import { prisma } from '@entry/db';
 
 export const CONNECT_CONNECTORS: Record<string, string> = {
   github: 'github/entry-github',
@@ -67,11 +65,46 @@ export function hasConnectConnector(service: string): boolean {
   return service in CONNECT_CONNECTORS;
 }
 
+/**
+ * GitHub-specific (2026-07-18 fix): GitHub is a multi-tenant Vercel Connect
+ * connector type -- "installation" (which GitHub org/account) is a
+ * completely separate axis from "subject" (which of our users is asking).
+ * A token request that doesn't pass `installationId` silently falls back to
+ * the connector's single *default* installation -- in practice this meant
+ * every user's GitHub connection was actually resolving to the SAME
+ * installation (whichever GitHub account happened to install the app
+ * first), never to that specific user's own account. Real installation-
+ * scoped tokens need `subject: { type: 'app' }, installationId` (per Vercel
+ * Connect's own eve helper -- GitHub installation tokens are app-scoped),
+ * not `subject: { type: 'user', id }`.
+ *
+ * This resolves + persists the installationId a user's own OAuth grant
+ * corresponds to, the first time it's needed, so all following calls use
+ * the correct per-user installation instead of the shared default.
+ */
+async function resolveGithubInstallationId(userId: string): Promise<string | null> {
+  const existing = await prisma.user.findUnique({ where: { id: userId }, select: { githubInstallationId: true } });
+  if (existing?.githubInstallationId) return existing.githubInstallationId;
+
+  // Not captured yet -- ask Connect what installation this user's own grant
+  // (identified via the user-subject OAuth token they completed) maps to.
+  const resp = await getTokenResponse(CONNECT_CONNECTORS.github, { subject: { type: 'user', id: userId } });
+  if (!resp.installationId) return null;
+  await prisma.user.update({ where: { id: userId }, data: { githubInstallationId: resp.installationId } });
+  return resp.installationId;
+}
+
 /** true if this user has a live OAuth grant for this service (no vault fallback considered). */
 export async function isConnectAuthorized(userId: string, service: string): Promise<boolean> {
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) return false;
   try {
+    if (service === 'github') {
+      const installationId = await resolveGithubInstallationId(userId);
+      if (!installationId) return false;
+      await getToken(connector, { subject: { type: 'app' }, installationId });
+      return true;
+    }
     await getToken(connector, { subject: { type: 'user', id: userId } });
     return true;
   } catch {
@@ -106,6 +139,15 @@ export async function startConnectAuthorization(userId: string, service: string,
 export async function disconnectConnectAuthorization(userId: string, service: string) {
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) return;
+  if (service === 'github') {
+    // GitHub's connector reports supportsRevocation: false (installations
+    // are only removed from the provider side or the Vercel dashboard, not
+    // via this API) -- clear our own stored mapping so the next connect
+    // attempt re-resolves a fresh installationId instead of reusing a stale
+    // one, and skip the (unsupported) revoke call.
+    await prisma.user.update({ where: { id: userId }, data: { githubInstallationId: null } }).catch(() => {});
+    return;
+  }
   await revokeToken(connector, { subject: { type: 'user', id: userId } });
 }
 
@@ -141,6 +183,17 @@ export async function resolveServiceCredential(
   }
 
   try {
+    if (service === 'github') {
+      const installationId = await resolveGithubInstallationId(userId);
+      if (!installationId) {
+        return {
+          error: `The user hasn't connected their GitHub account yet (or their installation couldn't be resolved). Ask them to connect it in Settings > Integrations.`,
+          needsConnect: true,
+        };
+      }
+      const token = await getToken(connector, { subject: { type: 'app' }, installationId });
+      return { value: token, source: 'connect' };
+    }
     const token = await getToken(connector, { subject: { type: 'user', id: userId } });
     return { value: token, source: 'connect' };
   } catch (e) {
