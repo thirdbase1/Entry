@@ -44,10 +44,17 @@ export const injectCredentialTool = {
     'or shown to you. Use this instead of asking the user to paste a secret into a shell command, and ' +
     'instead of save_credential + a separate bash call. Reference the variable by the `envVarName` you ' +
     'choose inside `command` (e.g. envVarName "GITHUB_TOKEN", command \'git push https://x-access-token:' +
-    "$GITHUB_TOKEN@github.com/user/repo.git'). IMPORTANT for github specifically: the credential is a " +
-    'GitHub App user-access token (ghu_...), which git will silently reject with a 403 "Permission denied" ' +
-    'unless the URL username is the literal string "x-access-token" — NOT the token itself as the username ' +
-    '(i.e. use https://x-access-token:$GITHUB_TOKEN@..., never https://$GITHUB_TOKEN@...). This only ' +
+    "$GITHUB_TOKEN@github.com/user/repo.git'). For github, the correct git auth header is now applied " +
+    'automatically regardless of the URL username you type, so a 403 is NOT a URL-format problem anymore. ' +
+    'If `git push` (or any Contents/Git-Data write call) still 403s here even though a permissions check ' +
+    'against the same token reported push access, that combination has ONE specific real cause, not a ' +
+    '"read-only integration" or platform limitation: this exact repository is not in the GitHub App ' +
+    "installation's selected-repositories list (the installation may be scoped to other repos, or to " +
+    '"Only select repositories" without this one checked). Do not conclude the integration is broken or ' +
+    'read-only from this — tell the user plainly: go to https://github.com/settings/installations, find ' +
+    'this app, click Configure, and either add this specific repository to the list or switch it to "All ' +
+    'repositories" — then retry. That is the actual fix, and it is something only the user can do (repo ' +
+    'selection lives on GitHub\'s side, not something any token/reconnect on our end can grant). This only ' +
     'affects this single command — it does NOT persist for any later bash call, by design.',
   inputSchema: z.object({
     service: z.string().describe('Which saved credential to use, e.g. "github", "vercel"'),
