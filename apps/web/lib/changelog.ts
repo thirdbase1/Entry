@@ -13,6 +13,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-19',
+    title: 'Fixed another real data-loss bug: a brand-new chat could show only your first message, forever',
+    items: [
+      "Root cause (different from the 2026-07-18 fix above, and confirmed by tracing the AI SDK's own streaming internals): the signal telling your browser a reply had finished streaming could reach it BEFORE the server had actually finished saving that reply to the database. On a brand-new chat, the browser reacts to \"finished\" by immediately navigating to the chat's permanent URL and re-fetching -- if that landed a beat before the save did, it showed a chat containing only your prompt, permanently, since nothing ever re-triggered a re-save afterward.",
+      'Fixed with a hold-the-line guard: the server now waits for its own database save to genuinely finish before it ever tells your browser the turn is done (capped at 5 seconds so a real outage still fails safely instead of hanging forever). Your browser now can never be told "done" before the reply is actually saved.',
+      "Also fixed two related crashes in the in-chat version history feature (the \"Version #N / Revert\" cards): a project folder with its own nested git repo (e.g. one cloned/pushed via the GitHub connection) could be misread as a submodule and crash that turn's versioning capture with a \"bad object\" error; and two overlapping saves for the same chat could occasionally collide over a git lock file. Both are now detected and handled cleanly instead of erroring.",
+    ],
+  },
+  {
     date: '2026-07-18',
     title: 'BYOK API key security hardening pass',
     items: [
