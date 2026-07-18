@@ -716,10 +716,57 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // already persisted server-side above, so a page refresh shows the
   // identical message instead of it vanishing.
   let sawRealContent = false;
+  // HEARTBEAT KEEP-ALIVE (2026-07-18, user-reported: "still have streaming
+  // problems" -- confirmed real gap: a long silent tool call (bash,
+  // browser_use) can legitimately run for well over a minute with ZERO
+  // stream bytes emitted in between -- the model has nothing to say until
+  // the tool result comes back. An idle HTTP connection with no bytes
+  // flowing for that long is exactly the shape corporate proxies, some
+  // CDNs, and plenty of mobile carrier gateways kill outright (commonly a
+  // 60-120s no-data timeout), which reads to the user as "streaming just
+  // stopped/hung" even though the server is still working fine -- the
+  // connection itself died underneath it. Racing the next real chunk
+  // against a 15s timer and emitting a `type: 'custom'` chunk (the SDK's
+  // own documented safe no-op passthrough type, see UIMessageChunk in
+  // ai/dist/index.d.ts -- the client's tool/message switch only handles
+  // known types, so an unrecognized `kind` here is silently ignored, not
+  // an error) keeps real bytes flowing during any silent gap without
+  // ever touching the actual model/tool content.
+  const HEARTBEAT_MS = 15_000;
   const wrappedStream = new ReadableStream<UIMessageChunk>({
     async start(controller) {
+      const iterator = uiStream[Symbol.asyncIterator]();
       try {
-        for await (const chunk of uiStream) {
+        // IMPORTANT: `iterator.next()` must only ever be called ONCE per
+        // actual value -- calling it again while a previous call is still
+        // pending (e.g. naively re-calling it on every heartbeat timeout)
+        // would race two concurrent reads against the same underlying
+        // stream reader, which is not a safe/supported pattern. The fix:
+        // keep reusing the SAME in-flight `pending` promise across as
+        // many heartbeat timeouts as it takes, only replacing it once it
+        // actually resolves with a real value.
+        let pending = iterator.next();
+        while (true) {
+          // `clearTimeout` below matters, not just tidiness: without it, a
+          // fast-arriving stream (plenty of quick text-deltas) would spawn
+          // a fresh un-cancelled 15s timer on EVERY single chunk, each one
+          // still firing (and resolving an otherwise-abandoned Promise)
+          // long after it was made irrelevant by a real chunk already
+          // winning the race -- accumulating timer garbage for the
+          // duration of a long, chatty reply for no benefit.
+          let timeoutId: ReturnType<typeof setTimeout>;
+          const timeout = new Promise<'timeout'>(resolve => {
+            timeoutId = setTimeout(() => resolve('timeout'), HEARTBEAT_MS);
+          });
+          const raced = await Promise.race([pending, timeout]);
+          clearTimeout(timeoutId!);
+          if (raced === 'timeout') {
+            controller.enqueue({ type: 'custom', kind: 'entry.heartbeat' });
+            continue;
+          }
+          const { value: chunk, done } = raced;
+          if (done) break;
+          pending = iterator.next();
           if (chunk.type === 'text-delta' && chunk.delta.trim().length > 0) {
             sawRealContent = true;
           } else if (chunk.type.startsWith('tool-')) {
@@ -748,6 +795,20 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       'x-direct-chat-session-id': chatId,
       'x-direct-chat-provider': providerLabel,
       'x-direct-chat-model': modelId,
+      // ANTI-BUFFERING (2026-07-18, same "still have streaming problems"
+      // report): without an explicit no-cache/no-transform signal, some
+      // intermediary (a corporate proxy, some CDN configurations, even
+      // certain reverse-proxy defaults) will buffer the ENTIRE response
+      // before releasing any of it -- which looks identical to "not
+      // streaming at all" client-side even though the server emitted
+      // every chunk incrementally as intended. `X-Accel-Buffering: no` is
+      // the standard signal nginx-family proxies specifically respect to
+      // disable this; `Cache-Control`/`Connection` reinforce the same
+      // intent for anything else in the path. Harmless no-ops for a
+      // request that was never going to be buffered in the first place.
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
     },
   });
 });

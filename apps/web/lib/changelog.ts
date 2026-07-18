@@ -14,6 +14,16 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    title: 'Four more streaming reliability fixes',
+    items: [
+      "Updated the underlying AI SDK (7.0.28 -> 7.0.31), picking up an upstream fix for compressed response chunks not flushing incrementally in Next.js -- exactly the \"looks like it's not streaming, just appears all at once\" symptom.",
+      'Added explicit no-buffering response headers -- some proxies/CDNs silently buffer an entire streamed response before releasing any of it if not told otherwise, which looks identical to "not streaming at all" even though the server sent it incrementally.',
+      "Added a heartbeat during long silent tool calls (bash, browser automation can run 30s-2min+ with zero output) -- an idle connection that long is exactly what corporate proxies and mobile carriers commonly kill outright, which read as \"streaming just stopped.\" A lightweight keep-alive now flows during any silent gap.",
+      'Fixed a subtle resource-leak in the streaming relay where a fast-arriving reply could spawn a pile of uncancelled internal timers.',
+    ],
+  },
+  {
+    date: '2026-07-18',
     title: 'Sandbox saving tightened to every 10 seconds',
     items: [
       "The periodic in-flight save added earlier today (every ~30s during a long-running command) is now every ~10s -- roughly 3x more save points across a full-length command, on top of the per-step saving already in place.",

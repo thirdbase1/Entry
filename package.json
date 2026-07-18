@@ -19,6 +19,7 @@
     "db:studio": "(cd packages/db && node ../../node_modules/prisma/build/index.js studio)"
   },
   "dependencies": {
+    "ai": "^7.0.31",
     "better-auth": "^1.6.23",
     "patch-package": "^8.0.1"
   },
@@ -33,6 +34,5 @@
     "esbuild@0.28.1": true,
     "prisma@7.8.0": true,
     "sharp@0.34.5": true
-  },
-  "devDependencies": {}
+  }
 }
