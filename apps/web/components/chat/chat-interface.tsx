@@ -19,6 +19,7 @@ import { toast } from '@/lib/toast';
 import { useOnlineStatus } from './use-online-status';
 import { useStreamingAutoScroll } from './use-streaming-autoscroll';
 import { ThinkingIndicator } from './chat-thinking-indicator';
+import type { IntegrationCallback } from './integration-callback-reader';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -35,6 +36,12 @@ interface ChatInterfaceProps {
    *  cross-bucket redirect above) — takes priority over the last-used
    *  localStorage value, since the user just explicitly picked this one. */
   initialModel?: string;
+  /** In-chat connect card (2026-07-18): set when this chat was just
+   *  reopened via an OAuth connect redirect (github-oauth/callback or
+   *  connect/start's returnTo) — triggers an automatic "Connected X."/
+   *  error follow-up message so the agent resumes without the user
+   *  retyping anything. See the effect below. */
+  integrationCallback?: IntegrationCallback;
 }
 
 /** localStorage key for the user's last-selected model, so a BYOK choice
@@ -72,6 +79,7 @@ export function ChatInterface({
   initialMessage,
   initialAttachedContext,
   initialModel,
+  integrationCallback,
 }: ChatInterfaceProps) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -478,6 +486,7 @@ export function ChatInterface({
       headerContent={headerContent}
       initialMessage={initialMessage}
       initialAttachedContext={initialAttachedContext}
+      integrationCallback={integrationCallback}
       scrollRef={scrollRef}
       createdRef={createdRef}
       router={router}
@@ -502,6 +511,7 @@ function ChatInterfaceInner({
   headerContent,
   initialMessage,
   initialAttachedContext,
+  integrationCallback,
   scrollRef,
   createdRef,
   router,
@@ -788,6 +798,32 @@ function ChatInterfaceInner({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMessage]);
+
+  // 2026-07-18: in-chat connect card follow-through. When this chat was
+  // just reopened via an OAuth redirect (github-oauth/callback or
+  // connect/start's returnTo — see integration-callback-reader.tsx),
+  // automatically send "Connected <service>." (or an error message) as
+  // a real user turn, WITHOUT the `messages.length === 0` guard the
+  // initialMessage effect above has (this always fires into an existing
+  // conversation, never a brand-new one). The agent's persona
+  // instructions tell it to treat that exact text as "retry the action
+  // that needed this credential." Strips the query params afterward so
+  // a refresh/back-nav doesn't resend it.
+  const sentIntegrationCallbackRef = useRef(false);
+  useEffect(() => {
+    if (!integrationCallback || sentIntegrationCallbackRef.current) return;
+    sentIntegrationCallbackRef.current = true;
+    const name = integrationCallback.service.charAt(0).toUpperCase() + integrationCallback.service.slice(1);
+    const text =
+      integrationCallback.result === 'connected'
+        ? `Connected ${name}.`
+        : `${name} connection failed${integrationCallback.errorMessage ? `: ${integrationCallback.errorMessage}` : '.'}`;
+    void sendWithRetry(() => agent.send({ message: text })).catch(err => {
+      console.error('[integration callback send failed]', err);
+    });
+    if (sessionId) router.replace(`/chats/${sessionId}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [integrationCallback]);
 
   const onSend = useCallback(
     (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string; images?: ChatImageAttachment[] }) => {

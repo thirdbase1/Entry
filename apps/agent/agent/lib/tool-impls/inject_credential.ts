@@ -72,7 +72,11 @@ export const injectCredentialTool = {
     }
     const resolved = await resolveServiceCredential(userId, service, label);
     if ('error' in resolved) {
-      return { error: resolved.error };
+      // Pass the full structured error through (needsConnect/service/
+      // connectMode) — the chat renderer uses those fields to show an
+      // inline IntegrationConnectCard instead of the model having to
+      // explain in prose where to go. See connect-service-tokens.ts.
+      return resolved;
     }
     const value = resolved.value;
 

@@ -169,15 +169,31 @@ export interface ResolvedCredential {
 export interface ResolveError {
   error: string;
   needsConnect?: boolean;
+  /** Which service this is about — lets the chat UI render the right
+   *  inline connect card (icon, name) instead of a plain text bubble. */
+  service?: string;
+  /** "oauth" -> chat shows a Connect/Cancel button that opens the real
+   *  one-click flow. "token" -> chat shows an inline paste-token box
+   *  (still Connect/Cancel, "Connect" here just means "save + continue"). */
+  connectMode?: 'oauth' | 'token';
 }
 
 /**
  * The single call site inject_credential (and anything else that needs a
  * live token for a deploy-target service) should use. Vault takes
- * priority — a manually pasted token always wins if present, so a user
- * who explicitly set one isn't silently switched to a different OAuth'd
- * account. Falls back to a fresh Vercel Connect token when the service
- * supports it and no vault entry exists.
+ * priority — a manually pasted OR OAuth-obtained token always wins if
+ * present (github's direct-OAuth flow also lands here — see
+ * github-oauth/callback/route.ts), so a user who explicitly set one
+ * isn't silently switched to a different account. Falls back to a fresh
+ * Vercel Connect token when the service supports it (vercel/supabase)
+ * and no vault entry exists.
+ *
+ * 2026-07-18: every "not connected" branch now returns `needsConnect`
+ * (previously only the Connect-backed services did) plus `service` +
+ * `connectMode`, so the chat's inline IntegrationConnectCard can render
+ * for ANY missing credential — token-only services (Pxxl, Sendbyte,
+ * custom) included — instead of the model asking the user to paste a
+ * secret directly into the chat text box.
  */
 export async function resolveServiceCredential(
   userId: string,
@@ -189,7 +205,12 @@ export async function resolveServiceCredential(
 
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) {
-    return { error: `No saved credential for service "${service}". Ask the user for it, then call save_credential first.` };
+    return {
+      error: `The user hasn't connected "${service}" yet. A connect card will be shown in the chat for them to paste a token — do not ask them to type the secret directly into chat.`,
+      needsConnect: true,
+      service,
+      connectMode: 'token',
+    };
   }
 
   try {
@@ -197,8 +218,10 @@ export async function resolveServiceCredential(
       const installationId = await resolveGithubInstallationId(userId);
       if (!installationId) {
         return {
-          error: `The user hasn't connected their GitHub account yet (or their installation couldn't be resolved). Ask them to connect it in Settings > Integrations.`,
+          error: `The user hasn't connected their GitHub account yet. A connect card will be shown in the chat.`,
           needsConnect: true,
+          service,
+          connectMode: 'oauth',
         };
       }
       const token = await getToken(connector, { subject: { type: 'app' }, installationId });
@@ -212,16 +235,19 @@ export async function resolveServiceCredential(
         error:
           `The user connected their ${service} identity but never completed the app-installation step ` +
           `(picking repos + granting write access), so this token has no actual repo permissions -- any ` +
-          `push/write will 403 regardless of what we request. Ask them to go to Settings > Integrations ` +
-          `and click "Connect ${service}" again to redo it through the install flow (it now requests the ` +
-          `installation grant, not just sign-in).`,
+          `push/write will 403 regardless of what we request. A connect card will be shown in the chat for ` +
+          `them to redo it through the install flow.`,
         needsConnect: true,
+        service,
+        connectMode: 'oauth',
       };
     }
     if (e instanceof UserAuthorizationRequiredError) {
       return {
-        error: `The user hasn't connected their ${service} account yet. Ask them to connect it in Settings > Integrations (there's a real "Connect ${service}" button there now — no token needed).`,
+        error: `The user hasn't connected their ${service} account yet. A connect card will be shown in the chat.`,
         needsConnect: true,
+        service,
+        connectMode: 'oauth',
       };
     }
     return { error: e instanceof Error ? e.message : String(e) };

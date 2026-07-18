@@ -17,75 +17,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';
 import { AutoSaveField, safeJson } from './shared';
 
-interface KnownService {
-  service: string;
-  name: string;
-  hint: string;
-  placeholder: string;
-  tokenUrl: string;
-  /** Real brand logo, served from /public/integration-logos — pulled
-   *  straight from each provider's own site/docs (not AI-generated). */
-  icon: string;
-  /** Some marks (e.g. Pxxl's raster wordmark) look better on a subtle
-   *  tinted tile than bare on the card background. */
-  iconBg?: string;
-  /** Has a real Vercel Connect connector (github/entry-github,
-   *  vercel/entry-vercel-internal, supabase/entry-supabase) — render a
-   *  one-click "Connect" OAuth button instead of a token-paste field.
-   *  Pxxl and Sendbyte have no such connector (no managed type, and
-   *  neither runs an OAuth server for a Custom OAuth connector), so
-   *  they stay token-only. */
-  oauth?: boolean;
-}
-
-const KNOWN_SERVICES: KnownService[] = [
-  {
-    service: 'vercel',
-    name: 'Vercel',
-    hint: 'Connect your own Vercel account — the agent deploys as you, with a short-lived token it never stores.',
-    placeholder: 'Paste your Vercel token',
-    tokenUrl: 'https://vercel.com/account/tokens',
-    icon: '/integration-logos/vercel.svg',
-    oauth: true,
-  },
-  {
-    service: 'github',
-    name: 'GitHub',
-    hint: 'Connect your own GitHub account — the agent pushes/opens PRs as you, with a short-lived token it never stores.',
-    placeholder: 'Paste your GitHub token',
-    tokenUrl: 'https://github.com/settings/tokens',
-    icon: '/integration-logos/github.svg',
-    oauth: true,
-  },
-  {
-    service: 'supabase',
-    name: 'Supabase',
-    hint: 'Connect your own Supabase account — the agent provisions/manages your own projects, with a short-lived token it never stores.',
-    placeholder: 'Paste your Supabase token',
-    tokenUrl: 'https://supabase.com/dashboard/account/tokens',
-    icon: '/integration-logos/supabase.svg',
-    oauth: true,
-  },
-  {
-    service: 'pxxl',
-    name: 'Pxxl',
-    hint: 'Scoped API key from Dashboard > API Keys — used to deploy to your own Pxxl workspace.',
-    placeholder: 'Paste your Pxxl API key',
-    tokenUrl: 'https://pxxl.app/dashboard/keys',
-    // Pxxl's actual app-icon mark (purple ringed-planet on white),
-    // pulled from their own apple-touch-icon — not the plain white
-    // navbar wordmark, which is invisible outside a dark background.
-    icon: '/integration-logos/pxxl.png',
-  },
-  {
-    service: 'sendbyte',
-    name: 'Sendbyte',
-    hint: 'API key — used to send transactional email through your own Sendbyte account.',
-    placeholder: 'Paste your Sendbyte API key',
-    tokenUrl: 'https://app.sendbyte.africa/keys/',
-    icon: '/integration-logos/sendbyte.svg',
-  },
-];
+import { KNOWN_SERVICES, type KnownService } from '@/lib/integration-services';
 
 interface CredentialMeta {
   service: string;

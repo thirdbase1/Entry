@@ -2,6 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'node:crypto';
 import { getUserSessionFromRequest } from '@entry/auth';
 
+/** Only allow redirecting back to a chat session page — never an
+ *  arbitrary path, so this can't be abused as an open redirect. */
+function sanitizeReturnTo(value: string | null): string | null {
+  if (!value) return null;
+  return /^\/chats\/[a-zA-Z0-9_-]+$/.test(value) ? value : null;
+}
+
 /**
  * GET /api/integrations/github-oauth/start
  *
@@ -15,6 +22,11 @@ import { getUserSessionFromRequest } from '@entry/auth';
  *
  * Full top-level navigation (not fetch+JSON) so a plain <a href> or
  * window.location.href works from the client.
+ *
+ * `returnTo` (2026-07-18, in-chat connect card): when present, the
+ * callback redirects back to that exact chat instead of /settings, so
+ * the chat can auto-send "Connected github." and the agent can resume
+ * whatever it was doing without the user retyping anything.
  */
 export async function GET(req: NextRequest) {
   const { session } = await getUserSessionFromRequest(req);
@@ -28,6 +40,7 @@ export async function GET(req: NextRequest) {
   const state = randomBytes(24).toString('base64url');
   const origin = req.nextUrl.origin;
   const redirectUri = `${origin}/api/integrations/github-oauth/callback`;
+  const returnTo = sanitizeReturnTo(req.nextUrl.searchParams.get('returnTo'));
 
   const authorizeUrl = new URL('https://github.com/login/oauth/authorize');
   authorizeUrl.searchParams.set('client_id', clientId);
@@ -37,9 +50,6 @@ export async function GET(req: NextRequest) {
   authorizeUrl.searchParams.set('allow_signup', 'false');
 
   const res = NextResponse.redirect(authorizeUrl.toString());
-  // Short-lived, httpOnly CSRF-state cookie -- checked against the `state`
-  // query param on callback. Not tied to userId (session cookie already
-  // carries that); this only guards against a forged callback request.
   res.cookies.set('github_oauth_state', state, {
     httpOnly: true,
     secure: true,
@@ -47,5 +57,14 @@ export async function GET(req: NextRequest) {
     maxAge: 10 * 60,
     path: '/api/integrations/github-oauth',
   });
+  if (returnTo) {
+    res.cookies.set('github_oauth_return', returnTo, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      maxAge: 10 * 60,
+      path: '/api/integrations/github-oauth',
+    });
+  }
   return res;
 }

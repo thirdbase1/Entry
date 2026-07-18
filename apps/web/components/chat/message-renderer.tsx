@@ -16,6 +16,7 @@ import { ChooseResult } from './renderers/choose-result';
 import { TodoListResult } from './renderers/todo-list-result';
 import { PythonCodeResult } from './renderers/python-code-result';
 import { AgentDelegateResult } from './renderers/agent-delegate-result';
+import { IntegrationConnectCard } from './renderers/integration-connect-card';
 
 interface MessageRendererProps {
   message: { id: string; role: 'user' | 'assistant'; parts: readonly EveMessagePart[] };
@@ -52,6 +53,25 @@ function ToolPart({
   onSend?: (text: string) => void;
 }) {
   const toolName = part.toolMetadata?.eve?.name ?? part.toolName;
+
+  // 2026-07-18: ANY tool's output (not just inject_credential's) can
+  // signal "the user needs to connect something" via `needsConnect` —
+  // render the shared inline connect card instead of falling through to
+  // a generic/textual tool card, regardless of which tool produced it.
+  if (part.state === 'output-available' && part.output && typeof part.output === 'object' && (part.output as any).needsConnect) {
+    const output = part.output as { service?: string; connectMode?: 'oauth' | 'token' };
+    if (output.service) {
+      return (
+        <IntegrationConnectCard
+          key={part.toolCallId}
+          service={output.service}
+          connectMode={output.connectMode ?? 'token'}
+          toolCallId={part.toolCallId}
+          onSend={onSend}
+        />
+      );
+    }
+  }
 
   switch (toolName) {
     case 'code_artifact':
