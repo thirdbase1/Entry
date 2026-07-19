@@ -120,6 +120,7 @@ import { codeArtifact } from '@entry/agent/tool-impls/code_artifact';
 import { pythonCoding } from '@entry/agent/tool-impls/python_coding';
 import { writeFileTool } from '@entry/agent/tool-impls/write_file';
 import { editFileTool } from '@entry/agent/tool-impls/edit_file';
+import { readFileTool } from '@entry/agent/tool-impls/read_file';
 import { browserUse } from '@entry/agent/tool-impls/browser_use';
 import { browserStop } from '@entry/agent/tool-impls/browser_stop';
 import { listFilesTool } from '@entry/agent/tool-impls/list_files';
@@ -372,6 +373,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       inputSchema: editFileTool.inputSchema,
       execute: (input: { path: string; old_text: string; new_text: string; replace_all?: boolean }) => editFileTool.execute(input, execCtx),
     }),
+    read_file: tool({
+      description: readFileTool.description,
+      inputSchema: readFileTool.inputSchema,
+      execute: (input: { path: string; startLine?: number; endLine?: number }) => readFileTool.execute(input, execCtx),
+    }),
     bash: tool({
       description: bash.description,
       inputSchema: bash.inputSchema,
@@ -592,6 +598,26 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         return { activeTools: [] };
       }
       return {};
+    },
+    // ADDED (2026-07-19, real bug: AI_NoSuchToolError: Model tried to call
+    // unavailable tool 'Agent'/'Read' -- the model emitted a hallucinated
+    // case variant (`Agent` instead of the registered `agent`) or a tool
+    // that plain does not exist here at all (`Read` -- see read_file.ts's
+    // header for that half of the fix). This is the AI SDK's own documented
+    // recovery hook (parse-tool-call.ts: on NoSuchToolError/
+    // InvalidToolInputError it calls `repairToolCall` with {toolCall,
+    // tools}, and a non-null return gets re-parsed instead of failing the
+    // whole turn) -- exactly the mechanism this class of bug calls for,
+    // not another prompt-only patch (the 2026-07-19 availableTools
+    // grounding block already tried that and the model still hallucinated
+    // past it). Case-insensitive match ONLY: never invents a mapping to a
+    // genuinely different tool (e.g. does not try to guess `Read` means
+    // `bash` or `list_files`) -- returns null (no repair, original error
+    // surfaces normally) whenever there's no case-insensitive match.
+    repairToolCall: async ({ toolCall, tools }) => {
+      const realName = Object.keys(tools).find(name => name.toLowerCase() === toolCall.toolName.toLowerCase());
+      if (realName === undefined || realName === toolCall.toolName) return null;
+      return { ...toolCall, toolName: realName };
     },
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);

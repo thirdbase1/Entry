@@ -14,6 +14,14 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Added a real file-read tool, and hallucinated tool-name typos no longer crash the whole turn',
+    items: [
+      'Real bug, reproduced live: the agent called a tool named "Read" that never existed here -- there was write_file/edit_file/append_file/list_files, but no matching read tool, so any model that (reasonably) expected one crashed the entire turn instead of falling back to bash. Added a proper `read_file` tool (with optional line-range reads for large files) so this now just works.',
+      'Separately, a model occasionally emits a tool name in the wrong case (e.g. "Agent" instead of the registered "agent") -- previously an instant, unrecoverable crash for the whole turn. Both the default agent path and BYOK/direct-model chats now auto-correct a case-mismatched tool name using the AI SDK\'s own built-in repair mechanism, instead of failing outright. A tool that genuinely does not exist still fails normally -- this only rescues an exact-name-but-wrong-case call.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Enter now adds a new line instead of sending your message',
     items: [
       'The chat box used to send on Enter (Shift+Enter was the only way to get a new line) -- flipped per user request so Enter always behaves like a normal multi-line text box and just adds a line break. The only way a message actually goes out now is clicking the Send button.',
