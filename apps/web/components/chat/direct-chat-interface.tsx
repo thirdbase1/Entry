@@ -666,8 +666,13 @@ function DirectChatSession({
                         // simply stays however the user last left it once
                         // it completes -- no forced re-collapse fighting a
                         // manual expand/collapse click later.
+                        // Key the controlled tool shell by lifecycle state: it mounts open
+                        // the instant a call starts, then remounts closed on Completed/Error.
+                        // Radix `defaultOpen` is intentionally only an initial value, so without
+                        // the state key a running card stayed open forever after its final output.
+                        // Output updates within a terminal state preserve a manual choice.
                         return (
-                          <Tool key={i} className="my-1" defaultOpen={state === 'input-streaming' || state === 'input-available'}>
+                          <Tool key={`${i}:${state}`} className="my-1" defaultOpen={state === 'input-streaming' || state === 'input-available'}>
                             <ToolHeader title={toolName} state={state} />
                             <ToolContent>
                               {errorText ? (

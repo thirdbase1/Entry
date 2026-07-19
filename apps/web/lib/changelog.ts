@@ -14,6 +14,24 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Fast agent output no longer locks up scrolling, and finished tools close themselves',
+    items: [
+      'Fixed the page becoming unscrollable while a very fast agent streamed: even after batching updates to one per animation frame, each update still had urgent priority, so a non-stop stream could consume every frame rendering markdown and tool cards before the browser got a chance to process wheel/touch input. Stream painting now runs as an interruptible React transition; scrolling, typing, clicking, and navigation take priority, while every token and tool update still arrives.',
+      'Tool cards still open automatically while a call is running, but now collapse when it reaches Completed or Error. You can reopen any result yourself; later output updates do not keep snapping a manually opened card shut.',
+      'BYOK/direct-model chats now start their working-memory lookup at the same time as provider/key resolution instead of waiting for it. Those independent database reads overlap, shortening the path to the first provider request without changing the prompt or provider behavior.',
+    ],
+  },
+  {
+    date: '2026-07-19',
+    title: 'Reloading mid-reply no longer loses the agent, and chats connect faster',
+    items: [
+      "Fixed the real reason a reload during a working turn could show a stuck chat missing the agent's progress: the server-side catch-up that reattaches to a still-running turn only enforced its time limit AFTER an event arrived -- so while the agent was quietly deep in a long tool call (a build, a browser task) it emitted nothing, and the catch-up request just sat blocked instead of returning. It now returns promptly with whatever has actually happened so far, and the normal background polling keeps topping the chat up until the turn finishes. The turn itself always kept running server-side -- reloading never killed it -- it was catching UP that hung.",
+      'Faster time-to-first-reply on the default chat: every message send, stream open, and automatic reconnect used to re-verify your login with a full extra internal HTTP round trip before the model was even contacted. That check is now cached for 60 seconds per session, removing a whole serial network hop from the front of nearly every turn.',
+      'Opening a chat with a still-working reply also renders faster: the initial catch-up window was cut from 8 seconds to 2.5 -- reattachment replays everything already generated instantly, so the long wait bought nothing except a slower first paint.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Added a real file-read tool, and hallucinated tool-name typos no longer crash the whole turn',
     items: [
       'Real bug, reproduced live: the agent called a tool named "Read" that never existed here -- there was write_file/edit_file/append_file/list_files, but no matching read tool, so any model that (reasonably) expected one crashed the entire turn instead of falling back to bash. Added a proper `read_file` tool (with optional line-range reads for large files) so this now just works.',
