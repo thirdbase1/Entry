@@ -79,7 +79,7 @@ check('agent-delegation guidance only for root sessions', () => {
 
 check('every backtick-quoted tool-like name in prose is a real tool', () => {
   // The `todo` incident: prose referencing a tool that exists nowhere.
-  const realTools = ['choose', 'web_crawl', 'web_search', 'task_analysis', 'code_artifact', 'python_coding', 'bash', 'write_file', 'edit_file', 'append_file', 'list_files', 'browser_use', 'browser_stop', 'save_credential', 'list_credentials', 'inject_credential', 'create_skill', 'list_skills', 'recall_skill', 'get_preview_url', 'restart_sandbox', 'remember_about_user', 'agent'];
+  const realTools = ['choose', 'web_crawl', 'web_search', 'task_analysis', 'code_artifact', 'python_coding', 'bash', 'read_file', 'write_file', 'edit_file', 'append_file', 'list_files', 'browser_use', 'browser_stop', 'save_credential', 'list_credentials', 'inject_credential', 'create_skill', 'list_skills', 'recall_skill', 'get_preview_url', 'restart_sandbox', 'remember_about_user', 'agent'];
   const s = buildPersonaInstructions({ includeAgentDelegation: true, availableTools: realTools });
   const nonTools = new Set(['old_text', 'new_text', 'entry-vercel-deploy-lessons', 'session_id', 'needs_connect']); // legit non-tool identifiers in prose
   const referenced = [...s.matchAll(/\\?`([a-z][a-z0-9_]{2,30})\\?`/g)].map(m => m[1]).filter(n => n.includes('_'));
