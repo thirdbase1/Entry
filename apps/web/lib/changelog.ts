@@ -14,6 +14,18 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Sandbox work can no longer be deleted by going idle, plus a smarter, honest agent harness',
+    items: [
+      'Fixed the last remaining "sandbox reset and deleted my files" hole: chats with a specific model picked (including BYOK) used a second, independent sandbox implementation that was still hard-deleting the entire sandbox after idle timeout. It now pauses instead — a full filesystem+memory snapshot kept indefinitely — and transparently resumes on your next message, matching the fix the default-agent path got on 2026-07-18. Restore failures are also no longer silently swallowed.',
+      'The agent now follows an explicit operating loop: verify work with evidence before claiming it done, never retry a failed action verbatim, recover from an environment reset by rebuilding state and continuing (instead of stopping mid-task), and report honestly what works and what does not.',
+      'Raised the output quality bar across every model: no filler AI prose, and a hard ban on emoji as icons or decoration in generated interfaces — icons are real inline SVGs or text labels. Generated designs start from a restrained, concrete design-token set instead of the generic AI-template look.',
+      'Generated single-file apps (artifacts) can now be revised incrementally — a tweak no longer regenerates the whole page from scratch — and every artifact passes an automatic sanity check (truncation, broken markup, empty shells, banned external resources, emoji) before being presented.',
+      "The agent's instructions now embed the exact list of tools available in your session, eliminating the class of failure where the model tried to call a tool that doesn't exist.",
+      'Fixed progressively-worsening jank while long replies streamed in: the renderer was re-parsing the entire message on every incoming token; it now re-parses only the newest block.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Fixed another real data-loss bug: a brand-new chat could show only your first message, forever',
     items: [
       "Root cause (different from the 2026-07-18 fix above, and confirmed by tracing the AI SDK's own streaming internals): the signal telling your browser a reply had finished streaming could reach it BEFORE the server had actually finished saving that reply to the database. On a brand-new chat, the browser reacts to \"finished\" by immediately navigating to the chat's permanent URL and re-fetching -- if that landed a beat before the save did, it showed a chat containing only your prompt, permanently, since nothing ever re-triggered a re-save afterward.",
