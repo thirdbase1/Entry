@@ -456,6 +456,30 @@ async function captureVersionFromSandboxDiffInner(
     const lines = statusResult.stdout.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 0) return null; // nothing changed this turn
 
+    // BINARY GUARD (2026-07-19). `git show :<path>` on a binary file
+    // (image, zip, sqlite db, font...) dumps raw bytes into stdout ->
+    // stored as "text" in ChatVersionFile.content -> silently corrupted
+    // on the round-trip (NUL bytes don't survive Postgres text columns /
+    // JSON transport), and restoreLatestFilesToSandbox would then write
+    // that garbage back over the real file. git already knows which
+    // staged paths are binary: numstat reports "-\t-" for them. Capture
+    // those as metadata-only rows (content null, like deletes) -- the
+    // card still shows the change, diffs/restores just skip the bytes.
+    // Same numstat pass also flags oversized text files: a single
+    // captured file is capped at 2MB -- past that it's build output or
+    // a dataset, not something the diff viewer or restore path can
+    // usefully handle, and one giant row per turn bloats the table fast.
+    const numstatResult = await runGit(sandbox, 'git diff --cached --numstat --no-renames');
+    const binaryPaths = new Set(
+      numstatResult.stdout
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l.startsWith('-\t-\t'))
+        .map(l => l.split('\t').slice(2).join('\t'))
+        .filter(Boolean),
+    );
+    const MAX_CAPTURED_FILE_BYTES = 2 * 1024 * 1024;
+
     const changes: PendingChange[] = [];
     // Belt-and-suspenders on top of the untrack step above: a path being
     // un-tracked THIS turn (because it matched a newly-added ignore rule
@@ -476,12 +500,21 @@ async function captureVersionFromSandboxDiffInner(
       if (code === 'D') {
         changes.push({ path, changeType: 'deleted', content: null });
       } else {
+        const changeType = code === 'A' ? ('added' as const) : ('modified' as const);
+        // Binary/oversized guard (see numstat pass above): capture as a
+        // metadata-only row instead of corrupting bytes through a text
+        // column. content '' (not null) so it isn't mistaken for a delete.
+        if (binaryPaths.has(path)) {
+          changes.push({ path, changeType, content: '' });
+          continue;
+        }
         // 'A' (added) or 'M' (modified) -- read the STAGED content (what
         // was just `git add -A`'d), not the working tree, so this is
         // exactly what will be committed as this turn's baseline below.
         const safePath = JSON.stringify(path);
         const showResult = await runGit(sandbox, `git show :${safePath}`);
-        changes.push({ path, changeType: code === 'A' ? 'added' : 'modified', content: showResult.exitCode === 0 ? showResult.stdout : '' });
+        const content = showResult.exitCode === 0 ? showResult.stdout : '';
+        changes.push({ path, changeType, content: content.length > MAX_CAPTURED_FILE_BYTES ? '' : content });
       }
     }
 
