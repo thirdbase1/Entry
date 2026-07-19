@@ -325,16 +325,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // `modelId` are still resolved above and still used for logging/
   // response headers, just no longer threaded into the prompt.
   const userWorkingMemory = await userWorkingMemoryPromise;
-  const SYSTEM_PROMPT = buildPersonaInstructions({ includeAgentDelegation: true, workingMemory: userWorkingMemory });
-  const instructions = compactionResult.then(({ summaryText }) => {
-    const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
-    if (!summaryText) return systemMessage;
-    // Plain string is fine for the summary -- it's regenerated (and its
-    // text changes) each time compaction re-triggers, so there's no
-    // stable prefix worth a cache_control breakpoint here the way there
-    // is for the persona prompt above.
-    return [systemMessage, { role: 'system' as const, content: summaryText }];
-  });
+  // NOTE (2026-07-19): `instructions` is now built AFTER `activeTools`
+  // below so the persona prompt can embed the real post-filter tool-name
+  // list (see persona.ts's availableTools) — it's only consumed by
+  // streamText much further down.
 
   // Only `choose` and `web_crawl` are always-on (not user-toggleable in
   // the Tools menu — see chat-config.tsx's `configurableTools`); every
@@ -462,6 +456,27 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // every single tool's full schema attached (unnecessary prompt/latency
   // overhead) AND a disabled tool could still be called by the model.
   const activeTools = Object.fromEntries(Object.entries(allTools).filter(([name]) => !disabledToolSet.has(name))) as typeof allTools;
+
+  // Persona prompt grounded in the REAL tool list for this exact session
+  // (post Tools-menu filtering) — see persona.ts's availableTools
+  // comment: an authoritative name list prevents the hallucinated-tool
+  // class of failure (the `todo` incident, 2026-07-15) up front instead
+  // of at AI_NoSuchToolError time. This is why the block moved down here
+  // from its old spot above `allTools`.
+  const SYSTEM_PROMPT = buildPersonaInstructions({
+    includeAgentDelegation: true,
+    workingMemory: userWorkingMemory,
+    availableTools: Object.keys(activeTools),
+  });
+  const instructions = compactionResult.then(({ summaryText }) => {
+    const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
+    if (!summaryText) return systemMessage;
+    // Plain string is fine for the summary -- it's regenerated (and its
+    // text changes) each time compaction re-triggers, so there's no
+    // stable prefix worth a cache_control breakpoint here the way there
+    // is for the persona prompt above.
+    return [systemMessage, { role: 'system' as const, content: summaryText }];
+  });
 
   // Tracked across steps so a fully-empty final turn (see
   // fill-empty-refusal.ts) can report WHY it was empty instead of just

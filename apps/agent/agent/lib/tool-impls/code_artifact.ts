@@ -16,6 +16,36 @@ function stripCodeFence(raw: string): string {
   return stripped;
 }
 
+// ADDED 2026-07-19 ("no feedback loop on output quality"): cheap static
+// sanity checks on the generated HTML so obviously-broken output is
+// FLAGGED to the calling model (which can regenerate or revise via
+// `previousHtml`) instead of being handed to the user as if fine. This
+// is a lint, not a proof: no headless browser exists in this serverless
+// env (playwright-core here only drives REMOTE browsers), so a full
+// render check isn't possible in-process — but most real broken
+// artifacts are structural (truncation mid-tag, unbalanced script/style,
+// empty body, banned external resources), all catchable by string
+// checks for free. Exported for apps/agent/evals/harness-checks.mjs.
+export function lintArtifactHtml(html: string): string[] {
+  const warnings: string[] = [];
+  const lower = html.toLowerCase();
+  const count = (re: RegExp) => (lower.match(re) ?? []).length;
+  const scriptOpens = count(/<script\b[^>]*>/g);
+  const scriptCloses = count(/<\/script>/g);
+  if (scriptOpens !== scriptCloses) warnings.push(`unbalanced <script> tags (${scriptOpens} open, ${scriptCloses} close) — JS likely cut off or malformed`);
+  const styleOpens = count(/<style\b[^>]*>/g);
+  const styleCloses = count(/<\/style>/g);
+  if (styleOpens !== styleCloses) warnings.push(`unbalanced <style> tags (${styleOpens} open, ${styleCloses} close) — CSS likely cut off`);
+  if (lower.includes('<html') && !lower.includes('</html>')) warnings.push('document opens <html> but never closes it — output looks truncated');
+  const visible = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, '').trim();
+  if (visible.length === 0 && !lower.includes('<canvas') && !lower.includes('<svg')) warnings.push('page has no visible content at all (and no canvas/svg) — likely an empty shell');
+  if (/(?:src|href)\s*=\s*["'](?:https?:)?\/\//i.test(html)) warnings.push('references an external http(s) resource — violates the single-file contract, may break offline');
+  // Enforce the design bar's emoji ban mechanically, not just by prompt:
+  // prompt instructions alone are unreliable on weaker models.
+  if (/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(html)) warnings.push('contains emoji — the design bar bans emoji in UI (use inline SVG icons or text labels)');
+  return warnings;
+}
+
 // How long this tool's OWN internal model call is allowed to run before it
 // fails itself, with a clear message, instead of riding along silently
 // until the outer request's own maxDuration (300s, direct/chat/route.ts)
@@ -33,8 +63,12 @@ export const codeArtifact = {
   inputSchema: z.object({
     title: z.string().describe('The title of the HTML page'),
     userPrompt: z.string().describe('The user description of the code artifact, will be used to generate the code artifact'),
+    // ADDED 2026-07-19: iterate-on-previous. Before this the tool was
+    // strictly one-shot — any tweak ("make the button green") forced a
+    // from-scratch regeneration that usually changed unrelated things.
+    previousHtml: z.string().optional().describe('Pass the html from a previous code_artifact result to REVISE it (userPrompt becomes a change request against it) instead of regenerating from scratch. Strongly preferred for any follow-up tweak.'),
   }),
-  async execute({ title, userPrompt }: { title: string; userPrompt: string }, ctx?: ToolExecCtx) {
+  async execute({ title, userPrompt, previousHtml }: { title: string; userPrompt: string; previousHtml?: string }, ctx?: ToolExecCtx) {
     // UPDATED (2026-07-17, "improve the whole AI process for long term
     // task") — same two fixes as python_coding.ts's identical rewrite:
     // a transient upstream capacity blip used to fail this whole call
@@ -98,6 +132,10 @@ export const codeArtifact = {
 
     const html = stripCodeFence(text);
     const truncated = finishReason === 'length';
+    // Static sanity pass (lintArtifactHtml above). Surfaced as `note` in
+    // the tool result — the persona's verify step treats a flagged
+    // artifact as a draft to revise (cheap now via previousHtml).
+    const lintWarnings = truncated ? [] : lintArtifactHtml(html);
     return {
       title,
       html,
@@ -105,7 +143,9 @@ export const codeArtifact = {
       truncated,
       note: truncated
         ? 'Output was cut off by the token limit before finishing — this HTML is likely incomplete/broken. Ask for a leaner version or split it into parts.'
-        : undefined,
+        : lintWarnings.length
+          ? `Automatic sanity check flagged possible problems: ${lintWarnings.join('; ')}. Review before presenting — revise via previousHtml if real.`
+          : undefined,
     };
   },
 };

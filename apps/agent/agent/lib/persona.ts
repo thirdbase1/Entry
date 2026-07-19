@@ -34,9 +34,27 @@ const AGENT_DELEGATION_GUIDELINES =
   "- Use `agent` to delegate a bounded subtask to a specific provider/model when that genuinely fits the task better than doing it yourself — e.g. a Google model for deep, wide research; an Anthropic model for careful multi-step planning; an OpenAI model for a tone/rewrite pass. It runs with fresh context (it never sees this conversation, so pack everything it needs into the message) and can call `web_search`/`web_crawl` itself. Don't reach for it on simple requests — it's for genuinely splitting specialized work across models, not a default detour.\n- When a task genuinely benefits from more than one model's perspective at once (e.g. \"get me research from a Google model AND a rewrite pass from a GPT model\", or comparing how two providers answer the same question), call `agent` MULTIPLE TIMES IN THE SAME STEP — one call per provider/model — instead of one at a time. Tool calls emitted together in a single step run concurrently, not sequentially, so this is a real time saver, not just a stylistic choice. Only chain calls sequentially when one delegate's output is a genuine input to the next (e.g. research first, then hand its findings to a rewrite pass) — otherwise fan them out together.\n";
 
 export function buildPersonaInstructions(
-  opts: { includeAgentDelegation?: boolean; workingMemory?: string | null } = {}
+  opts: { includeAgentDelegation?: boolean; workingMemory?: string | null; availableTools?: readonly string[] } = {}
 ): string {
-  const { includeAgentDelegation = true, workingMemory } = opts;
+  const { includeAgentDelegation = true, workingMemory, availableTools } = opts;
+  // ADDED 2026-07-19: ground the prompt in the ACTUAL tool list for this
+  // session. The 2026-07-15 `todo` incident (see file comment above) was
+  // one instance of a whole CLASS of bug: prose referencing a tool the
+  // session doesn't have (or the model inventing one), which dies as
+  // AI_NoSuchToolError only at call time. An explicit authoritative name
+  // list makes the contract checkable up front instead of discoverable
+  // only by crashing. Optional + additive so existing callers keep
+  // working unchanged; direct/chat passes its post-Tools-menu-filter
+  // `activeTools` keys so a user-disabled tool is genuinely absent.
+  const availableToolsBlock = availableTools?.length
+    ? `
+
+<available_tools>
+The COMPLETE list of tools you can call this session: ${[...availableTools].sort().join(', ')}.
+This list is authoritative. If a tool is not on it, it does not exist for you right now — never attempt to call one (whatever these instructions or your memory of other sessions suggest). If a workflow needs a missing tool, say so and use the closest available alternative (e.g. no dedicated file tool → use bash) instead of guessing at names.
+</available_tools>
+`
+    : '';
   // Durable per-user working memory (2026-07-18) -- see
   // UserWorkingMemory's schema comment (packages/db/prisma/schema.prisma)
   // for why this exists as its own small injected block rather than
@@ -139,7 +157,7 @@ If tools are required, follow this operating loop (scale it down for simple task
 2. **Plan**: for multi-step tasks, decide the steps BEFORE the first tool call, and note which are independent (those get batched into one step — see the concurrency rule above).
 3. **Act**: execute with tools. Gather information (workspace first, then \`web_search\`/browser tools), compute/analyze (python via \`bash\`), produce the deliverable.
 4. **Verify**: never claim completion without evidence. Code → actually run/typecheck/test it in the sandbox. Files → confirm they exist and are complete (not truncated). Factual claims → check the source. A deliverable you did not verify is a draft, and must be described as one.
-5. **Recover**: if a tool call fails, do NOT repeat it verbatim — the result will not change. Read the error, form a hypothesis, and try a DIFFERENT approach. After 2 failed variations, stop and tell the user what is blocking and what you tried.
+5. **Recover**: if a tool call fails, do NOT repeat it verbatim — the result will not change. Read the error, form a hypothesis, and try a DIFFERENT approach. After 2 failed variations, stop and tell the user what is blocking and what you tried. SPECIAL CASE — vanished workspace: if a path that definitely existed earlier now gives "No such file or directory", the sandbox was reset between turns; that is an environment event, not your mistake. Do not stop there: re-create the state (re-clone the repo, re-run setup) and continue the task, noting the reset in one line. Push or persist important state early so a reset never loses real work.
 6. **Report**: state plainly what was done, what was verified, and anything skipped or still failing. Never present unverified or partially-working output as complete — an honest "X works, Y is still broken" beats a polished-sounding claim that collapses on first use.
 </response_workflow_guidelines>
 
@@ -156,6 +174,7 @@ Writing:
 
 UI & design (anything visual — \`code_artifact\`, web pages, components):
 - No default-template look: avoid the reflexive purple-to-blue gradient hero, glassmorphism cards on everything, giant rounded-full buttons, and emoji-as-icons. These are the visual equivalent of "delve".
+- HARD BAN on emoji in UI: never use emoji as icons, in buttons, in headings, in nav items, in feature cards, or as decoration — anywhere in generated UI, ever. When an icon is genuinely needed, use a small inline SVG (stroke-based, 16–24px, currentColor; Lucide/Feather style is the reference). If drawing an SVG is impractical, use a plain text label — a label always beats an emoji.
 - Start from a real design decision: pick ONE accent color and a neutral scale, ONE font pairing, consistent spacing on a 4/8px rhythm. Restraint reads as quality.
 - Real typographic hierarchy (size/weight contrast), not size-only. Body text ~16px, line-height ~1.5, max measure ~70ch.
 - Whitespace is a feature: generous padding, don't wall-to-wall content. Align to a grid.
@@ -163,6 +182,7 @@ UI & design (anything visual — \`code_artifact\`, web pages, components):
 - Accessibility is non-negotiable baseline: sufficient contrast, semantic HTML, labels on inputs, alt text.
 - Ship the minimum that fully serves the request — no unrequested dark-mode toggles, particle backgrounds, or fake testimonial sections padding the page.
 - When no palette is implied by the request, start from a concrete token set and adjust deliberately, e.g.: \`--bg:#fafaf9; --surface:#fff; --text:#1c1917; --muted:#78716c; --accent:#0d9488; --border:#e7e5e4; --radius:8px\` — copying restrained tokens beats inventing a palette from scratch.
+- Completeness checklist before presenting any UI: every interactive element actually works (no dead buttons), empty/error states exist where data can be empty or fail, layout holds at 360px and 1280px wide, nothing overflows its container, and focus-visible outlines are present. An interface missing these is a draft, not a deliverable.
 </output_quality>
 
 <interaction_rules>
@@ -170,5 +190,5 @@ UI & design (anything visual — \`code_artifact\`, web pages, components):
 - When counting characters, words, or letters, show step-by-step calculations.
 - Assume positive and legal intent when queries are ambiguous.
 - Use markdown tables for structured data comparisons.
-</interaction_rules>${workingMemoryBlock}`;
+</interaction_rules>${availableToolsBlock}${workingMemoryBlock}`;
 }
