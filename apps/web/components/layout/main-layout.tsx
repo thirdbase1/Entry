@@ -1,6 +1,6 @@
 'use client';
 
-import { EditIcon, AllDocsIcon, FileIcon, SettingsIcon } from '@blocksuite/icons/rc';
+import { EditIcon, AllDocsIcon, FileIcon, SettingsIcon, LockIcon } from '@blocksuite/icons/rc';
 import { ChatIcon } from '@/components/icons/chat-icon';
 import { AnimatePresence, motion } from 'framer-motion';
 import Link from 'next/link';
@@ -8,6 +8,7 @@ import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useMemo } from 'react';
 import AppSidebar from '@/components/ui/sidebar/sidebar';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { useIsAdmin } from '@/lib/use-is-admin';
 import { UserInfo } from '@/components/sidebar/user-info';
 import { Cmdk } from '@/components/cmdk';
 import { cn } from '@/lib/utils';
@@ -68,6 +69,8 @@ function SidebarContent() {
   const inChats = pathname === '/chats';
   const inLibrary = pathname.startsWith('/library');
   const inSettings = pathname.startsWith('/settings');
+  const inAdmin = pathname.startsWith('/admin');
+  const isAdmin = useIsAdmin();
 
   return (
     <div className="size-full flex flex-col">
@@ -101,6 +104,17 @@ function SidebarContent() {
             <div className="text-sm">Settings</div>
           </li>
         </Link>
+        {isAdmin ? (
+          <Link href="/admin">
+            <li className={cn(
+              'flex items-center gap-3 h-[30px] px-2 rounded hover:bg-accent transition-colors cursor-pointer',
+              inAdmin && 'bg-accent'
+            )}>
+              <LockIcon className="w-5 h-5 text-muted-foreground" />
+              <div className="text-sm">Admin</div>
+            </li>
+          </Link>
+        ) : null}
       </div>
 
       <div className="px-2 flex-1 h-0 overflow-y-auto">
