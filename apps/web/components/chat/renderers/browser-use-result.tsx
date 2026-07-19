@@ -210,7 +210,7 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
 
   if (part.state === 'output-error') {
     return (
-      <GenericToolResult icon={<EmbedWebIcon />} autoExpand title="The browser task failed." status="output-error">
+      <GenericToolResult icon={<EmbedWebIcon />} title="The browser task failed." status="output-error">
         <div className="p-3 text-sm text-destructive">{part.errorText}</div>
       </GenericToolResult>
     );
@@ -219,7 +219,13 @@ export function BrowserUseResult({ part }: { part: EveDynamicToolPart; isStreami
   return (
     <GenericToolResult
       icon={<EmbedWebIcon />}
-      autoExpand
+      // Open while the task runs, auto-collapse once it finishes
+      // (2026-07-19, "auto close the tool card once it's completed or
+      // errored") -- was a bare `autoExpand` (always true), which kept
+      // every finished browser card permanently expanded. The flip
+      // true->false on completion triggers GenericToolResult's existing
+      // auto-collapse; a manual toggle still opts out there.
+      autoExpand={isRunning}
       title={
         isRunning ? (
           <span className="text-sm text-muted-foreground">The browser task is running. Below are the steps and results.</span>

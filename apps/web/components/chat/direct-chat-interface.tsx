@@ -52,7 +52,7 @@ import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
 import type { AttachedContext } from './chat-context';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
 import { AutoFixSendProvider } from './chat-auto-fix-context';
-import { Tool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
+import { AutoCollapseTool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
 import { ChooseResult } from './renderers/choose-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
 import { getKnownService } from '@/lib/integration-services';
@@ -657,22 +657,15 @@ function DirectChatSession({
                         // badge before), now sharing the exact same
                         // components/ui/tool.tsx primitives as the eve chat
                         // path's GenericToolResult/GenericToolCalling.
-                        // Auto-open while actively running (2026-07-17,
-                        // "improve real time streaming") -- Radix
-                        // Collapsible's `defaultOpen` only applies at this
-                        // element's own first render, which for a tool
-                        // part is the moment its input starts arriving, so
-                        // this reliably opens right as a call starts and
-                        // simply stays however the user last left it once
-                        // it completes -- no forced re-collapse fighting a
-                        // manual expand/collapse click later.
-                        // Key the controlled tool shell by lifecycle state: it mounts open
-                        // the instant a call starts, then remounts closed on Completed/Error.
-                        // Radix `defaultOpen` is intentionally only an initial value, so without
-                        // the state key a running card stayed open forever after its final output.
-                        // Output updates within a terminal state preserve a manual choice.
+                        // Auto-open while actively running, auto-close on
+                        // completed/error (2026-07-19) -- the previous
+                        // uncontrolled `defaultOpen` opened the card as the
+                        // call started but left it open forever afterwards;
+                        // AutoCollapseTool drives open-ness from the part's
+                        // live state instead, with a manual toggle always
+                        // winning for that card (see tool.tsx).
                         return (
-                          <Tool key={`${i}:${state}`} className="my-1" defaultOpen={state === 'input-streaming' || state === 'input-available'}>
+                          <AutoCollapseTool key={i} className="my-1" state={state}>
                             <ToolHeader title={toolName} state={state} />
                             <ToolContent>
                               {errorText ? (
@@ -693,7 +686,7 @@ function DirectChatSession({
                                 />
                               )}
                             </ToolContent>
-                          </Tool>
+                          </AutoCollapseTool>
                         );
                       }
                       return null;

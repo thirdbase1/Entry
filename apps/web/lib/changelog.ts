@@ -23,6 +23,13 @@ export const CHANGELOG: ChangelogEntry[] = [
   },
   {
     date: '2026-07-19',
+    title: "You can scroll again while the agent is streaming fast",
+    items: [
+      'Real bug ("when the agent is super fast the whole page hangs and I can\'t even scroll until it stops"): while streaming, the auto-follow engine snaps the view to the bottom every frame, and its user-vs-programmatic scroll detection classified your scrollbar drags and touch drags as its own follow scrolls -- so every attempt to scroll up got snapped straight back down until the turn ended. Any upward scroll or touch drag now always counts as you taking control: following stops immediately and re-arms only when you return to the bottom yourself (or a new turn starts). Applies to both the default and BYOK/direct chat paths, which share this engine.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Reloading mid-reply no longer loses the agent, and chats connect faster',
     items: [
       "Fixed the real reason a reload during a working turn could show a stuck chat missing the agent's progress: the server-side catch-up that reattaches to a still-running turn only enforced its time limit AFTER an event arrived -- so while the agent was quietly deep in a long tool call (a build, a browser task) it emitted nothing, and the catch-up request just sat blocked instead of returning. It now returns promptly with whatever has actually happened so far, and the normal background polling keeps topping the chat up until the turn finishes. The turn itself always kept running server-side -- reloading never killed it -- it was catching UP that hung.",

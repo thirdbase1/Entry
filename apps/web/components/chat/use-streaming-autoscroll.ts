@@ -91,9 +91,15 @@ export function useStreamingAutoScroll(
       if (e.deltaY < 0) followingRef.current = false;
     };
     const onTouchMove = () => {
-      // Any touch drag counts as taking manual control; re-arms below if
-      // they end up back at the bottom.
-      if (!isAtBottom()) followingRef.current = false;
+      // FIXED (2026-07-19, "when the agent is fast the page hangs and I
+      // can't even scroll until it stops"): this used to only disarm when
+      // already !isAtBottom() -- but while streaming, the follow engine
+      // snaps back to the bottom EVERY frame, so by the time each
+      // touchmove fired the view was back at the bottom and the check
+      // never passed: on touch devices it was literally impossible to
+      // scroll away mid-stream. Any touch drag IS manual control,
+      // unconditionally; ending back at the bottom re-arms via onScroll.
+      followingRef.current = false;
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') followingRef.current = false;
@@ -101,11 +107,27 @@ export function useStreamingAutoScroll(
     // Scrollbar drags produce scroll events with no wheel/touch/key — any
     // scroll we didn't cause ourselves that lands away from the bottom is
     // user intent too. And ANY path back to the bottom re-arms following.
+    let lastScrollTop = el.scrollTop;
     const onScroll = () => {
+      const top = el.scrollTop;
+      const movedUp = top < lastScrollTop;
+      lastScrollTop = top;
       if (isAtBottom()) {
         followingRef.current = true;
         programmaticRef.current = false;
-      } else if (!programmaticRef.current) {
+        return;
+      }
+      // FIXED (2026-07-19, same "can't scroll while the agent is fast"
+      // hang as onTouchMove above, scrollbar-drag flavor): during fast
+      // streaming scrollToBottom() runs every frame, so programmaticRef
+      // was effectively ALWAYS true and every user scrollbar drag got
+      // classified as "our own follow" and ignored -- then the next
+      // frame's follow snapped the view right back down. The tiebreaker
+      // that needs no flag at all: our programmatic follows only ever
+      // move DOWN (to the bottom); any scroll event that moved the
+      // viewport UP is necessarily the user, no matter what
+      // programmaticRef says.
+      if (movedUp || !programmaticRef.current) {
         followingRef.current = false;
       }
     };
