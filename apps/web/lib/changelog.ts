@@ -14,17 +14,11 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
-    title: 'Faster model start: repeated auth checks taken off the critical path',
+    title: 'Fast agent output no longer locks up scrolling, and finished tools close themselves',
     items: [
-      "Default/Eve chat path: every send, stream open, and reconnect on /eve/v1/* performed an internal HTTP authentication round trip before the model could even start -- a purely serial cost paid on every single turn. Successful authentication is now cached for 60 seconds per session cookie, removing that repeated request from the model-start path. Failures are never cached, so a fresh login is picked up immediately.",
-      "BYOK/direct chat path: verified it already avoids this class of cost -- its auth check runs in-process against Better Auth's signed cookie cache (no HTTP hop, no DB hit), and its pre-model work (history save, compaction, working memory) was already parallelized ahead of the model call in an earlier pass.",
-    ],
-  },
-  {
-    date: '2026-07-19',
-    title: 'Tool-call cards now auto-close when they finish',
-    items: [
-      "A tool card auto-opens the moment a call starts (kept -- that part was already right), but used to stay expanded forever after the call completed or errored, burying the conversation under a stack of open cards. Cards now auto-collapse the moment their call reaches completed or error state, on both the default and BYOK/direct chat paths. Manually expanding or collapsing a card still always wins: once you've clicked one, the auto behavior leaves that card alone.",
+      'Fixed the page becoming unscrollable while a very fast agent streamed: even after batching updates to one per animation frame, each update still had urgent priority, so a non-stop stream could consume every frame rendering markdown and tool cards before the browser got a chance to process wheel/touch input. Stream painting now runs as an interruptible React transition; scrolling, typing, clicking, and navigation take priority, while every token and tool update still arrives.',
+      'Tool cards still open automatically while a call is running, but now collapse when it reaches Completed or Error. You can reopen any result yourself; later output updates do not keep snapping a manually opened card shut.',
+      'BYOK/direct-model chats now start their working-memory lookup at the same time as provider/key resolution instead of waiting for it. Those independent database reads overlap, shortening the path to the first provider request without changing the prompt or provider behavior.',
     ],
   },
   {
@@ -32,6 +26,15 @@ export const CHANGELOG: ChangelogEntry[] = [
     title: "You can scroll again while the agent is streaming fast",
     items: [
       'Real bug ("when the agent is super fast the whole page hangs and I can\'t even scroll until it stops"): while streaming, the auto-follow engine snaps the view to the bottom every frame, and its user-vs-programmatic scroll detection classified your scrollbar drags and touch drags as its own follow scrolls -- so every attempt to scroll up got snapped straight back down until the turn ended. Any upward scroll or touch drag now always counts as you taking control: following stops immediately and re-arms only when you return to the bottom yourself (or a new turn starts). Applies to both the default and BYOK/direct chat paths, which share this engine.',
+    ],
+  },
+  {
+    date: '2026-07-19',
+    title: 'Reloading mid-reply no longer loses the agent, and chats connect faster',
+    items: [
+      "Fixed the real reason a reload during a working turn could show a stuck chat missing the agent's progress: the server-side catch-up that reattaches to a still-running turn only enforced its time limit AFTER an event arrived -- so while the agent was quietly deep in a long tool call (a build, a browser task) it emitted nothing, and the catch-up request just sat blocked instead of returning. It now returns promptly with whatever has actually happened so far, and the normal background polling keeps topping the chat up until the turn finishes. The turn itself always kept running server-side -- reloading never killed it -- it was catching UP that hung.",
+      'Faster time-to-first-reply on the default chat: every message send, stream open, and automatic reconnect used to re-verify your login with a full extra internal HTTP round trip before the model was even contacted. That check is now cached for 60 seconds per session, removing a whole serial network hop from the front of nearly every turn.',
+      'Opening a chat with a still-working reply also renders faster: the initial catch-up window was cut from 8 seconds to 2.5 -- reattachment replays everything already generated instantly, so the long wait bought nothing except a slower first paint.',
     ],
   },
   {

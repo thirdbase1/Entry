@@ -173,6 +173,16 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // same chat until repaired.
   const uiMessages = sanitizeDanglingToolCalls(messages as UIMessage[]);
 
+  // BYOK TTFT FIX (2026-07-19): resolving a BYOK model reads/decrypts its
+  // provider row, while Working Memory is a completely independent user
+  // read. Starting the latter only AFTER `await resolveByokModel()` made
+  // every direct/BYOK send pay those two DB operations serially before
+  // `streamText()` could open the provider connection. Start it as soon as
+  // userId exists; it is still awaited before the system prompt is built,
+  // so neither prompt contents nor error behavior changes -- only the
+  // otherwise-wasted wall-clock overlap does.
+  const userWorkingMemoryPromise = getWorkingMemory(userId);
+
   // Resolve BEFORE any streaming starts — a bad/missing key or unknown
   // model slug surfaces as a clean JSON error, not a broken half-open
   // stream.
@@ -223,8 +233,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // alongside preSave, the earliest point userId is known); still fully
   // awaited before SYSTEM_PROMPT is built below, so behavior is
   // unchanged -- only the wall-clock overlap improved.
-  const userWorkingMemoryPromise = getWorkingMemory(userId);
-
   const preSave = (async () => {
     const existing = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId } });
     if (!existing) {

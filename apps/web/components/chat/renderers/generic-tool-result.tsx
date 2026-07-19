@@ -39,6 +39,7 @@ export function GenericToolResult({
   className,
   onClick,
   autoExpand,
+  autoCollapseOnTerminal = false,
   status = 'output-available',
 }: {
   icon?: ReactNode;
@@ -54,6 +55,10 @@ export function GenericToolResult({
    *  false. A manual expand/collapse click opts out of this for the rest
    *  of this instance's life — the user's explicit choice always wins. */
   autoExpand?: boolean;
+  /** Auto-close a card that was open while its call was running as soon
+   *  it reaches a completed/error terminal state. Manual toggles still
+   *  win for the rest of this card's lifetime. */
+  autoCollapseOnTerminal?: boolean;
   /** Status badge shown in the header. Defaults to "Completed" — pass
    *  'output-error' from an error branch, or 'input-streaming' /
    *  'input-available' for a still-running call (see GenericToolCalling,
@@ -71,6 +76,17 @@ export function GenericToolResult({
     if (userToggledRef.current) return;
     setCollapsed(!autoExpand);
   }, [autoExpand]);
+
+  useEffect(() => {
+    // Tool cards deliberately open as soon as an invocation starts so its
+    // progress is visible. Before this, the same component instance stayed
+    // open forever when its streamed part changed to completed/error -- a
+    // long agent run leaves a wall of huge finished JSON cards open. Close
+    // that automatic opening at the terminal transition, but never fight a
+    // user who explicitly opened/collapsed the card themselves.
+    if (!autoCollapseOnTerminal || userToggledRef.current) return;
+    if (status === 'output-available' || status === 'output-error') setCollapsed(true);
+  }, [autoCollapseOnTerminal, status]);
 
   return (
     <Collapsible

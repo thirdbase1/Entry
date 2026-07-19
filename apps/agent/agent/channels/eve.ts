@@ -71,23 +71,30 @@ interface InternalSessionUser {
  * failing here.
  */
 /**
- * 60s per-cookie auth cache (2026-07-19, model-start latency pass): this
- * authenticator runs before EVERY send, stream open, and reconnect on
- * /eve/v1/*, and each run was a full (loopback-HTTP) round trip to
- * /api/internal/session -- a purely serial cost sitting directly on the
- * time-to-first-token path, paid again on every single turn. The same
- * cookie re-verifying successfully milliseconds apart is the overwhelmingly
- * common case, so cache the SUCCESSFUL result per exact cookie value for
- * 60s. Failures are never cached (a just-logged-in user shouldn't wait out
- * a negative TTL), and 60s stays well under the session's real lifetime;
- * worst case after a logout, a stolen-cookie replay window shrinks to
- * <=60s more than the Better Auth cookieCache (5 min) already allows.
- * Per-instance Map on serverless: no cross-instance invalidation needed,
- * bounded by a simple sweep to avoid unbounded growth on long-lived local
- * dev processes.
+ * Short-TTL auth cache (2026-07-19, real "takes time to connect to the
+ * model" latency fix): the loopback `/api/internal/session` verification
+ * below is a FULL extra HTTP round trip through the platform's front door
+ * (same deployment, but still a real network hop on Vercel -- not an
+ * in-process call), and it ran on EVERY single `/eve/v1/*` request: every
+ * send, every stream open, and every one of the client's automatic
+ * reconnect attempts (up to 20 per turn -- see chat-interface.tsx's
+ * maxReconnectAttempts). That put a whole serial HTTP round trip in front
+ * of every turn before eve even started the model call. A 60s in-memory
+ * cache keyed by the exact Cookie header removes it from every request
+ * after the first: Better Auth session cookies are stable strings for the
+ * life of the session (rotation issues a NEW cookie value = new cache
+ * key), and 60s is far shorter than any session expiry, so the worst case
+ * is honoring a just-revoked session for under a minute on an
+ * already-warm instance -- the same window a CDN-cached session check
+ * would have. Entries are pruned lazily on lookup so the map can't grow
+ * unboundedly on a long-lived instance.
  */
+interface CachedPrincipal {
+  value: Awaited<ReturnType<ReturnType<typeof betterAuthSession>>>;
+  expiresAt: number;
+}
 const AUTH_CACHE_TTL_MS = 60_000;
-const authCache = new Map<string, { user: InternalSessionUser; expires: number }>();
+const authCache = new Map<string, CachedPrincipal>();
 
 function betterAuthSession(): AuthFn<Request> {
   return async (request) => {
@@ -95,14 +102,10 @@ function betterAuthSession(): AuthFn<Request> {
     if (!cookie) return null;
 
     const now = Date.now();
-    const hit = authCache.get(cookie);
-    if (hit && hit.expires > now) {
-      return {
-        attributes: { email: hit.user.email, name: hit.user.name },
-        authenticator: 'better-auth',
-        principalId: hit.user.id,
-        principalType: 'user',
-      };
+    const cached = authCache.get(cookie);
+    if (cached && cached.expiresAt > now) return cached.value;
+    if (authCache.size > 500) {
+      for (const [k, v] of authCache) if (v.expiresAt <= now) authCache.delete(k);
     }
 
     let user: InternalSessionUser | null;
@@ -122,20 +125,17 @@ function betterAuthSession(): AuthFn<Request> {
     }
     if (!user) return null;
 
-    if (authCache.size > 500) {
-      for (const [k, v] of authCache) if (v.expires <= now) authCache.delete(k);
-    }
-    authCache.set(cookie, { user, expires: now + AUTH_CACHE_TTL_MS });
-
-    return {
+    const principal = {
       attributes: {
         email: user.email,
         name: user.name,
       },
       authenticator: 'better-auth',
       principalId: user.id,
-      principalType: 'user',
+      principalType: 'user' as const,
     };
+    authCache.set(cookie, { value: principal, expiresAt: now + AUTH_CACHE_TTL_MS });
+    return principal;
   };
 }
 
