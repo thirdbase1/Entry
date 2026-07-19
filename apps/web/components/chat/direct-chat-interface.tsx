@@ -43,6 +43,8 @@ import { DefaultChatTransport } from 'ai';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
+import { CollapsibleUserText } from './collapsible-user-text';
+import { useStreamingAutoScroll } from './use-streaming-autoscroll';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
 import { VersionCard } from './renderers/version-card';
@@ -479,26 +481,14 @@ function DirectChatSession({
   //     frame tracks perfectly with fast-arriving content with zero
   //     animation-queue buildup; a smooth one only make sense as a single
   //     one-off jump, not as a per-frame follow.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const isNearBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    // Always snap to bottom (smoothly, once) on a genuinely new turn starting.
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-    let rafId: number | null = null;
-    const observer = new MutationObserver(() => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        if (isNearBottom()) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' });
-      });
-    });
-    observer.observe(el, { childList: true, subtree: true, characterData: true });
-    return () => {
-      observer.disconnect();
-      if (rafId !== null) cancelAnimationFrame(rafId);
-    };
-  }, [messages.length, showThinkingIndicator]);
+  // Auto-follow while streaming -- shared engine (2026-07-19): the inline
+  // MutationObserver here used the same broken 120px near-bottom check
+  // the eve path had (large tool-card/markdown appends outran the
+  // threshold in one frame and silently killed following mid-turn --
+  // "doesn't auto scroll at all"). Replaced with
+  // use-streaming-autoscroll.ts's sticky user-intent version; one
+  // implementation for both chat paths so they can't re-diverge.
+  useStreamingAutoScroll(scrollRef, `${messages.length}:${showThinkingIndicator}`);
 
   const onSend = (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string; images?: ChatImageAttachment[] }) => {
     // Switching to a different model mid-chat is handled by the parent
@@ -571,7 +561,15 @@ function DirectChatSession({
                     }
                   >
                     {m.parts.map((part, i) => {
-                      if (part.type === 'text') return <MarkdownText key={i} text={part.text} />;
+                      if (part.type === 'text') {
+                        // Long USER messages collapse behind "Show more"
+                        // (collapsible-user-text.tsx) -- assistant text
+                        // renders in full, always.
+                        if (m.role === 'user') {
+                          return <CollapsibleUserText key={i} text={part.text} full={<MarkdownText text={part.text} />} />;
+                        }
+                        return <MarkdownText key={i} text={part.text} />;
+                      }
                       if (part.type === 'data-version-card') {
                         return <VersionCard key={i} data={(part as any).data} onOpen={() => requestOpenHistory((part as any).data.versionNumber)} />;
                       }

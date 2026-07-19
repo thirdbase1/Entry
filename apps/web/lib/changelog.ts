@@ -14,6 +14,26 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'The harness overhaul that was missing from this changelog: verification loop, anti-slop bar, faster streaming',
+    items: [
+      'The agent now works to an explicit contract on every request: understand, plan, act, VERIFY, recover, report. Verification is evidence-based — code it claims works must actually have been run or compiled, files confirmed complete, factual claims source-checked; anything unverified must be presented as a draft, not as done.',
+      'When a tool call fails, the agent may no longer retry it verbatim (a top measured failure mode — the result never changes). It must read the error, try a genuinely different approach, and after two failed variations stop and tell you honestly what is blocking, instead of burning your time in a silent loop.',
+      'A writing-quality bar against "AI slop": no filler openers, no reflex vocabulary (delve, leverage, seamless, robust...), no emoji unless you use them first, no decorative bolding, register matched to how you actually talk.',
+      'A concrete design system for everything it builds — not just a ban on the generic AI look (purple gradient heroes, glassmorphism everywhere) but a copyable starting recipe: neutral palette plus one accent, real type scale, consistent radii/shadows, proper focus states. Prohibitions alone don\'t steer weaker models; recipes do.',
+      'Fixed the real cause of laggy streaming: the markdown renderer re-parsed the ENTIRE accumulated reply on every streamed token (quadratic cost — long replies got slower as they grew). It now re-parses only the block actually being appended to, so long replies stream as smoothly at the end as at the start.',
+    ],
+  },
+  {
+    date: '2026-07-19',
+    title: 'Auto-scroll finally follows agent work, long messages fold away, versioning gets safer',
+    items: [
+      'Fixed "the chat doesn\'t auto scroll at all while the agent works": the follow logic only kept scrolling if you were within 120px of the bottom — but a tool card or big result lands as one large jump that instantly puts you "too far" from the bottom, so it concluded you\'d scrolled up and stopped following for the rest of the turn. It now tracks your actual intent: it keeps following through any size of content jump, stops only when you genuinely scroll up (wheel, drag, keyboard), and resumes the moment you return to the bottom or a new turn starts. Both chat paths now share one engine so this can\'t regress on just one of them.',
+      'Very long messages you send (pasted logs, whole files) now collapse to a short preview with a "Show more (N characters)" button — and a "Show less" to fold them back — instead of permanently dominating the conversation. Applies only to your messages; replies always render in full.',
+      'Version history no longer corrupts binary files: a changed image/zip/database used to have its raw bytes stored as text, and restoring after a sandbox eviction would write that garbage back over the real file. Binary and oversized (2MB+) files are now recorded on the version card but excluded from content storage, so restore can never damage them.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Fixed a real log-spam/reasoning bug on third-party "Claude-compatible" BYOK providers',
     items: [
       'A BYOK provider set to ANTHROPIC compatibility mode but actually pointing at a third-party relay (not real Anthropic) was producing 80+ "unsupported reasoning metadata" warnings on a single turn -- one per past reasoning part in that chat\'s history, every single turn, forever. Root cause: only genuine Anthropic-issued thinking blocks carry the signature needed to resend them; a relay imitating Anthropic\'s API shape without that real signing mechanism can never satisfy it. Same fix already used for third-party OpenAI-Responses relays (Kie.ai, 2026-07-16) now also applies here: past reasoning is never resent to a relay that cannot actually replay it.',

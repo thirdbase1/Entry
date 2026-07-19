@@ -12,6 +12,7 @@ import { BrowserUseResult } from './renderers/browser-use-result';
 import { TaskAnalysisCard } from './renderers/task-analysis-card';
 import { AuthorizationCard } from './renderers/authorization-card';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
+import { CollapsibleUserText } from './collapsible-user-text';
 import { ChooseResult } from './renderers/choose-result';
 import { TodoListResult } from './renderers/todo-list-result';
 import { PythonCodeResult } from './renderers/python-code-result';
@@ -217,7 +218,12 @@ export const MessageRenderer = memo(function MessageRenderer({
         'flex flex-col self-end p-3 inline-block max-w-full rounded-lg mb-4 bg-[#f3f3f3] text-foreground'
       )}
     >
-      {text}
+      {/* Long messages collapse behind "Show more" -- see
+          collapsible-user-text.tsx. `full` here is the same plain text
+          this branch always rendered (user messages are never markdown-
+          rendered on this path), whitespace preserved when expanded so a
+          pasted log/code blob stays readable. */}
+      <CollapsibleUserText text={text} full={<span className="whitespace-pre-wrap break-words">{text}</span>} />
     </div>
   );
 }, messagePropsAreEqual);
