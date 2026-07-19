@@ -503,9 +503,13 @@ async function captureVersionFromSandboxDiffInner(
         const changeType = code === 'A' ? ('added' as const) : ('modified' as const);
         // Binary/oversized guard (see numstat pass above): capture as a
         // metadata-only row instead of corrupting bytes through a text
-        // column. content '' (not null) so it isn't mistaken for a delete.
+        // column. content NULL specifically (not '') — restore filters
+        // on `content != null`, so null rows are naturally skipped
+        // instead of writing an empty file over the real binary during
+        // eviction recovery; '' would do exactly that. changeType stays
+        // added/modified so it's never confused with a delete.
         if (binaryPaths.has(path)) {
-          changes.push({ path, changeType, content: '' });
+          changes.push({ path, changeType, content: null });
           continue;
         }
         // 'A' (added) or 'M' (modified) -- read the STAGED content (what
@@ -514,7 +518,7 @@ async function captureVersionFromSandboxDiffInner(
         const safePath = JSON.stringify(path);
         const showResult = await runGit(sandbox, `git show :${safePath}`);
         const content = showResult.exitCode === 0 ? showResult.stdout : '';
-        changes.push({ path, changeType, content: content.length > MAX_CAPTURED_FILE_BYTES ? '' : content });
+        changes.push({ path, changeType, content: content.length > MAX_CAPTURED_FILE_BYTES ? null : content });
       }
     }
 
