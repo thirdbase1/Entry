@@ -73,7 +73,12 @@ export const codeArtifact = {
             'Generate a single-file HTML snippet (inline <style> and <script>, no external resources ' +
             'except data URIs) that fulfills the request. Respond with ONLY the HTML, no explanation. ' +
             'Keep it as lean as reasonably possible for the request — avoid unrequested extra features, ' +
-            'inline comments, or boilerplate that inflates length without adding real functionality.',
+            'inline comments, or boilerplate that inflates length without adding real functionality. ' +
+            'Design quality bar (unless the request specifies otherwise): no generic AI-template look — ' +
+            'no purple/blue gradient heroes, no glassmorphism-on-everything, no emoji as icons or in headings. ' +
+            'Pick one accent color plus a neutral scale, one font stack (system-ui is fine), spacing on a ' +
+            'consistent 4/8px rhythm, real typographic hierarchy (~16px body, ~1.5 line-height), generous ' +
+            'whitespace, visible hover/focus states, semantic HTML with labeled inputs and sufficient contrast.',
           messages: [{ role: 'user', content: userPrompt }],
         });
       } catch (err) {
