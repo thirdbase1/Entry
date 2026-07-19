@@ -14,6 +14,17 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'The harness overhaul that was missing from this changelog: verification loop, anti-slop bar, faster streaming',
+    items: [
+      'The agent now works to an explicit contract on every request: understand, plan, act, VERIFY, recover, report. Verification is evidence-based — code it claims works must actually have been run or compiled, files confirmed complete, factual claims source-checked; anything unverified must be presented as a draft, not as done.',
+      'When a tool call fails, the agent may no longer retry it verbatim (a top measured failure mode — the result never changes). It must read the error, try a genuinely different approach, and after two failed variations stop and tell you honestly what is blocking, instead of burning your time in a silent loop.',
+      'A writing-quality bar against "AI slop": no filler openers, no reflex vocabulary (delve, leverage, seamless, robust...), no emoji unless you use them first, no decorative bolding, register matched to how you actually talk.',
+      'A concrete design system for everything it builds — not just a ban on the generic AI look (purple gradient heroes, glassmorphism everywhere) but a copyable starting recipe: neutral palette plus one accent, real type scale, consistent radii/shadows, proper focus states. Prohibitions alone don\'t steer weaker models; recipes do.',
+      'Fixed the real cause of laggy streaming: the markdown renderer re-parsed the ENTIRE accumulated reply on every streamed token (quadratic cost — long replies got slower as they grew). It now re-parses only the block actually being appended to, so long replies stream as smoothly at the end as at the start.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Auto-scroll finally follows agent work, long messages fold away, versioning gets safer',
     items: [
       'Fixed "the chat doesn\'t auto scroll at all while the agent works": the follow logic only kept scrolling if you were within 120px of the bottom — but a tool card or big result lands as one large jump that instantly puts you "too far" from the bottom, so it concluded you\'d scrolled up and stopped following for the rest of the turn. It now tracks your actual intent: it keeps following through any size of content jump, stops only when you genuinely scroll up (wheel, drag, keyboard), and resumes the moment you return to the bottom or a new turn starts. Both chat paths now share one engine so this can\'t regress on just one of them.',
