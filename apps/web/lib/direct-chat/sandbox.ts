@@ -124,16 +124,33 @@ async function bootstrapFallback(sandbox: E2BSandbox): Promise<void> {
 }
 
 async function createFreshSandbox(apiKey: string): Promise<E2BSandbox> {
+  // FIXED (2026-07-19, user: "make sure sandbox never resets again" —
+  // reproduced live twice in one conversation: the whole /home/user
+  // workspace vanished between turns). Root cause: the 2026-07-18
+  // pause-instead-of-kill fix (see e2b-backend.ts's SANDBOX_LIFECYCLE
+  // comment) was only applied to eve's OWN sandbox backend — this file is
+  // the second, independent E2B implementation used by every BYOK/direct
+  // chat, and its create calls passed no `lifecycle` at all, leaving
+  // E2B's SDK default `onTimeout: 'kill'`: every idle timeout HARD
+  // DELETED the sandbox, filesystem included. Same fix as there:
+  // auto-pause on timeout (full memory+filesystem snapshot, retained
+  // indefinitely per E2B's persistence docs — no TTL) + autoResume so
+  // preview-URL traffic can wake it. `Sandbox.connect` in
+  // getSandboxForChat below transparently resumes a paused sandbox, so
+  // the existing reconnect path needs no change — its catch-branch
+  // (fresh sandbox + best-effort file restore) becomes a genuine
+  // last-resort instead of the routine outcome of every idle period.
+  const lifecycle = { onTimeout: 'pause' as const, autoResume: true };
   const template = await prisma.sandboxTemplate.findFirst();
   if (template) {
     return withRetry('Sandbox.create (shared snapshot)', () =>
-      E2BSandbox.create(template.snapshotId, { apiKey, timeoutMs: IDLE_TIMEOUT_MS }),
+      E2BSandbox.create(template.snapshotId, { apiKey, timeoutMs: IDLE_TIMEOUT_MS, lifecycle }),
     );
   }
   // No shared snapshot exists yet anywhere in the app — bootstrap inline
   // this one time rather than fail outright.
   const sandbox = await withRetry('Sandbox.create (fallback base template)', () =>
-    E2BSandbox.create(FALLBACK_BASE_TEMPLATE, { apiKey, timeoutMs: IDLE_TIMEOUT_MS }),
+    E2BSandbox.create(FALLBACK_BASE_TEMPLATE, { apiKey, timeoutMs: IDLE_TIMEOUT_MS, lifecycle }),
   );
   await bootstrapFallback(sandbox);
   return sandbox;
@@ -163,9 +180,17 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
       // it explicitly too so a long tool-heavy turn doesn't get cut short
       // mid-way through.
       await sandbox.setTimeout(IDLE_TIMEOUT_MS).catch(() => {});
-    } catch {
-      // Sandbox paused/expired/evicted — create a fresh one rather than
-      // hard-failing the tool call.
+    } catch (err) {
+      // With `lifecycle: onTimeout 'pause'` in place (createFreshSandbox
+      // above), connect() transparently resumes a paused sandbox — this
+      // branch firing now means genuine, harder loss (retention expiry,
+      // account issue), not routine idle recycling. Log loudly: silent
+      // fallback here is exactly how "sandbox wiped my work" stayed
+      // invisible before.
+      console.warn(
+        `[direct-chat sandbox] Sandbox.connect(${existing.sandboxId}) failed for chat ${chatId} — falling back to a fresh sandbox + best-effort file restore:`,
+        err instanceof Error ? err.message : err,
+      );
       sandbox = await createFreshSandbox(apiKey);
       await persistSandboxId(chatId, sandbox.sandboxId);
       restoredFromEviction = true;
@@ -184,7 +209,12 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
         const r = await sandbox.commands.run(command, { timeoutMs: 60_000 });
         return { exitCode: r.exitCode ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
       },
-    }).catch(() => {});
+    }).catch(err => {
+      // Was a bare `.catch(() => {})` — a failed restore silently left
+      // the user with an empty sandbox and zero trace (same fix already
+      // applied in e2b-backend.ts on 2026-07-18).
+      console.error(`[direct-chat sandbox] restoreLatestFilesToSandbox failed for chat ${chatId}:`, err instanceof Error ? err.message : err);
+    });
   }
 
   const id = sandbox.sandboxId;
@@ -304,7 +334,9 @@ export async function restartSandboxForChat(chatId: string): Promise<{ ok: true 
         const r = await fresh.commands.run(command, { timeoutMs: 60_000 });
         return { exitCode: r.exitCode ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
       },
-    }).catch(() => {});
+    }).catch(err => {
+      console.error(`[direct-chat sandbox] restoreLatestFilesToSandbox (restart path) failed for chat ${chatId}:`, err instanceof Error ? err.message : err);
+    });
     if (preview?.lastServeCommand) {
       await fresh.commands
         .run(`nohup ${preview.lastServeCommand} > /tmp/.devserver.log 2>&1 & sleep 1`, { timeoutMs: 15_000 })
