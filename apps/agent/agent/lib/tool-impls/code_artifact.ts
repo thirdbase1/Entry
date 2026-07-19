@@ -73,7 +73,20 @@ export const codeArtifact = {
             'Generate a single-file HTML snippet (inline <style> and <script>, no external resources ' +
             'except data URIs) that fulfills the request. Respond with ONLY the HTML, no explanation. ' +
             'Keep it as lean as reasonably possible for the request — avoid unrequested extra features, ' +
-            'inline comments, or boilerplate that inflates length without adding real functionality.',
+            'inline comments, or boilerplate that inflates length without adding real functionality. ' +
+            'Design quality bar (unless the request specifies otherwise): no generic AI-template look — ' +
+            'no purple/blue gradient heroes, no glassmorphism-on-everything, no emoji as icons or in headings. ' +
+            'Pick one accent color plus a neutral scale, one font stack (system-ui is fine), spacing on a ' +
+            'consistent 4/8px rhythm, real typographic hierarchy (~16px body, ~1.5 line-height), generous ' +
+            'whitespace, visible hover/focus states, semantic HTML with labeled inputs and sufficient contrast. ' +
+            'Unless the request implies its own palette, START from these tokens and adjust only as needed: ' +
+            ':root{--bg:#fafaf9;--surface:#fff;--text:#1c1917;--muted:#78716c;--accent:#0d9488;' +
+            '--border:#e7e5e4;--radius:8px;--shadow:0 1px 3px rgb(0 0 0/.08)} ' +
+            'body{font:16px/1.5 system-ui;background:var(--bg);color:var(--text);margin:0} ' +
+            'Cards: surface bg, 1px border, var(--radius), var(--shadow), 16-24px padding. ' +
+            'Buttons: accent bg, white text, 8px 16px padding, radius, darken ~10% on hover, ' +
+            '2px accent outline-offset on focus-visible. Headings: 600 weight, tight line-height, ' +
+            'sizes stepping 1.25x. Max content width 72ch, centered, 24px+ side padding.',
           messages: [{ role: 'user', content: userPrompt }],
         });
       } catch (err) {
