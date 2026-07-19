@@ -38,6 +38,26 @@ export interface ResolvedByokModel {
    *  empty completion instead of erroring, which read exactly like the
    *  model "stopping instantly" after a tool call. */
   isThirdPartyResponsesRelay: boolean;
+  /** FIXED (2026-07-19, real log spam traced live: a 'Free' provider on
+   *  ANTHROPIC compatibility mode, model id "claude-fable-5" — clearly a
+   *  third-party relay, not real Anthropic — produced 80+ "unsupported
+   *  reasoning metadata" warnings on a single turn, one per historical
+   *  `reasoning` part in the compacted history). Root cause, confirmed in
+   *  node_modules/@ai-sdk/anthropic/src/convert-to-anthropic-prompt.ts:
+   *  every past `reasoning` part gets resent to Anthropic's Messages API
+   *  as a `thinking`/`redacted_thinking` block ONLY if it carries a real
+   *  `providerOptions.anthropic.signature` or `.redactedData` — fields
+   *  only genuine Anthropic-issued thinking blocks have. A third-party
+   *  relay merely returning plain reasoning text (no real signature) has
+   *  every one of its past reasoning parts silently dropped with a
+   *  warning EVERY single turn, forever, for the life of that chat —
+   *  same root problem class as isThirdPartyResponsesRelay above (a relay
+   *  imitating a real provider's API shape without that provider's actual
+   *  stateful/signed reasoning-replay mechanism), just on the ANTHROPIC
+   *  compatibility mode instead of OPENAI_RESPONSES. Same fix applies:
+   *  never resend a previous turn's reasoning to a relay that can't
+   *  actually replay it — see strip-reasoning-parts.ts. */
+  isThirdPartyAnthropicRelay: boolean;
 }
 
 /** Ownership-checked: a model row id alone is never sufficient — it must belong to userId. */
@@ -66,11 +86,16 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
     provider.compatibility === 'OPENAI_RESPONSES' &&
     !/(^|\.)api\.openai\.com$/.test(new URL(provider.baseUrl).hostname);
 
+  const isThirdPartyAnthropicRelay =
+    provider.compatibility === 'ANTHROPIC' &&
+    !/(^|\.)api\.anthropic\.com$/.test(new URL(provider.baseUrl).hostname);
+
   return {
     model,
     providerLabel: provider.label,
     modelId: modelRow.modelId,
     reasoningEnabled: modelRow.reasoningEnabled,
     isThirdPartyResponsesRelay,
+    isThirdPartyAnthropicRelay,
   };
 }

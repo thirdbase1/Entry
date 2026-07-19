@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Fixed a real log-spam/reasoning bug on third-party "Claude-compatible" BYOK providers',
+    items: [
+      'A BYOK provider set to ANTHROPIC compatibility mode but actually pointing at a third-party relay (not real Anthropic) was producing 80+ "unsupported reasoning metadata" warnings on a single turn -- one per past reasoning part in that chat\'s history, every single turn, forever. Root cause: only genuine Anthropic-issued thinking blocks carry the signature needed to resend them; a relay imitating Anthropic\'s API shape without that real signing mechanism can never satisfy it. Same fix already used for third-party OpenAI-Responses relays (Kie.ai, 2026-07-16) now also applies here: past reasoning is never resent to a relay that cannot actually replay it.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Sandbox can no longer be wiped by going idle, plus a smarter, less "AI-looking" agent',
     items: [
       'Fixed the last remaining way a chat\'s sandbox could silently lose your files: the workspace used by BYOK/direct-model chats still hard-deleted itself after idle timeout (the July 18 pause-instead-of-kill fix had only covered the default agent\'s path). Both paths now pause with a full filesystem+memory snapshot that E2B retains indefinitely, and transparently resume on your next message — nothing is deleted on idle anymore. Restore failures are also no longer silently swallowed.',

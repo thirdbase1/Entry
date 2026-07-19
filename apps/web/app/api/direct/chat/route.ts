@@ -183,6 +183,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // fixes (only set on the BYOK path -- resolveGatewayModel's return type
   // has no such flag, always undefined/false there).
   const isThirdPartyResponsesRelay = 'isThirdPartyResponsesRelay' in resolved && resolved.isThirdPartyResponsesRelay;
+  // FIXED (2026-07-19): same relay-imitating-a-real-provider problem, just
+  // on ANTHROPIC compatibility mode instead of OPENAI_RESPONSES -- see
+  // resolve-model.ts's isThirdPartyAnthropicRelay comment for the exact
+  // "unsupported reasoning metadata" warning-storm bug this closes.
+  const isThirdPartyAnthropicRelay = 'isThirdPartyAnthropicRelay' in resolved && resolved.isThirdPartyAnthropicRelay;
 
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
@@ -304,7 +309,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // (e.g. for caching), a SystemModelMessage." Both the persona prompt and
   // the (optional) compaction summary are combined into `instructions`
   // below instead of ever being spliced into `messages`.
-  const messagesForModel = isThirdPartyResponsesRelay ? stripReasoningParts(uiMessages) : uiMessages;
+  const messagesForModel = (isThirdPartyResponsesRelay || isThirdPartyAnthropicRelay) ? stripReasoningParts(uiMessages) : uiMessages;
   const compactionResult = compactMessagesIfNeeded(messagesForModel, model, modelId);
   const modelMessages = compactionResult.then(async ({ messages, wasCompacted }) => {
     if (wasCompacted) {

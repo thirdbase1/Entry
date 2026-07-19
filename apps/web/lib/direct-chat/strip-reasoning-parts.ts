@@ -10,6 +10,16 @@ import type { UIMessage } from 'ai';
  * of the SAME chat: finishReason 'other', zero tool calls, zero text,
  * and every usage field `undefined`, no thrown error anywhere).
  *
+ * EXTENDED (2026-07-19): the identical relay-imitating-a-real-provider
+ * problem also showed up on ANTHROPIC compatibility mode — a 'Free'
+ * BYOK provider (model id "claude-fable-5", clearly a third-party relay,
+ * not real Anthropic) produced 80+ "unsupported reasoning metadata"
+ * warnings on a single turn, one per historical reasoning part that
+ * lacked a genuine Anthropic `signature`/`redactedData` (see
+ * node_modules/@ai-sdk/anthropic/src/convert-to-anthropic-prompt.ts).
+ * Same fix, now gated on `isThirdPartyResponsesRelay || isThirdPartyAnthropicRelay`
+ * in direct/chat/route.ts — see resolve-model.ts for both flags' detection.
+ *
  * Root cause, confirmed directly in
  * node_modules/@ai-sdk/openai/src/responses/convert-to-openai-responses-input.ts:
  * turn 1's reasoning output part carries whatever `id` the relay put on
