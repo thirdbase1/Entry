@@ -14,6 +14,15 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Auto-scroll finally follows agent work, long messages fold away, versioning gets safer',
+    items: [
+      'Fixed "the chat doesn\'t auto scroll at all while the agent works": the follow logic only kept scrolling if you were within 120px of the bottom — but a tool card or big result lands as one large jump that instantly puts you "too far" from the bottom, so it concluded you\'d scrolled up and stopped following for the rest of the turn. It now tracks your actual intent: it keeps following through any size of content jump, stops only when you genuinely scroll up (wheel, drag, keyboard), and resumes the moment you return to the bottom or a new turn starts. Both chat paths now share one engine so this can\'t regress on just one of them.',
+      'Very long messages you send (pasted logs, whole files) now collapse to a short preview with a "Show more (N characters)" button — and a "Show less" to fold them back — instead of permanently dominating the conversation. Applies only to your messages; replies always render in full.',
+      'Version history no longer corrupts binary files: a changed image/zip/database used to have its raw bytes stored as text, and restoring after a sandbox eviction would write that garbage back over the real file. Binary and oversized (2MB+) files are now recorded on the version card but excluded from content storage, so restore can never damage them.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Fixed a real log-spam/reasoning bug on third-party "Claude-compatible" BYOK providers',
     items: [
       'A BYOK provider set to ANTHROPIC compatibility mode but actually pointing at a third-party relay (not real Anthropic) was producing 80+ "unsupported reasoning metadata" warnings on a single turn -- one per past reasoning part in that chat\'s history, every single turn, forever. Root cause: only genuine Anthropic-issued thinking blocks carry the signature needed to resend them; a relay imitating Anthropic\'s API shape without that real signing mechanism can never satisfy it. Same fix already used for third-party OpenAI-Responses relays (Kie.ai, 2026-07-16) now also applies here: past reasoning is never resent to a relay that cannot actually replay it.',
