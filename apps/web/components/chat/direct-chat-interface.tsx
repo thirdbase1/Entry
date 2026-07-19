@@ -571,7 +571,15 @@ function DirectChatSession({
                     }
                   >
                     {m.parts.map((part, i) => {
-                      if (part.type === 'text') return <MarkdownText key={i} text={part.text} />;
+                      if (part.type === 'text') {
+                        // Long USER messages collapse behind "Show more"
+                        // (collapsible-user-text.tsx) -- assistant text
+                        // renders in full, always.
+                        if (m.role === 'user') {
+                          return <CollapsibleUserText key={i} text={part.text} full={<MarkdownText text={part.text} />} />;
+                        }
+                        return <MarkdownText key={i} text={part.text} />;
+                      }
                       if (part.type === 'data-version-card') {
                         return <VersionCard key={i} data={(part as any).data} onOpen={() => requestOpenHistory((part as any).data.versionNumber)} />;
                       }
