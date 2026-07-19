@@ -14,6 +14,15 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Fast agent output no longer locks up scrolling, and finished tools close themselves',
+    items: [
+      'Fixed the page becoming unscrollable while a very fast agent streamed: even after batching updates to one per animation frame, each update still had urgent priority, so a non-stop stream could consume every frame rendering markdown and tool cards before the browser got a chance to process wheel/touch input. Stream painting now runs as an interruptible React transition; scrolling, typing, clicking, and navigation take priority, while every token and tool update still arrives.',
+      'Tool cards still open automatically while a call is running, but now collapse when it reaches Completed or Error. You can reopen any result yourself; later output updates do not keep snapping a manually opened card shut.',
+      'BYOK/direct-model chats now start their working-memory lookup at the same time as provider/key resolution instead of waiting for it. Those independent database reads overlap, shortening the path to the first provider request without changing the prompt or provider behavior.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Reloading mid-reply no longer loses the agent, and chats connect faster',
     items: [
       "Fixed the real reason a reload during a working turn could show a stuck chat missing the agent's progress: the server-side catch-up that reattaches to a still-running turn only enforced its time limit AFTER an event arrived -- so while the agent was quietly deep in a long tool call (a build, a browser task) it emitted nothing, and the catch-up request just sat blocked instead of returning. It now returns promptly with whatever has actually happened so far, and the normal background polling keeps topping the chat up until the turn finishes. The turn itself always kept running server-side -- reloading never killed it -- it was catching UP that hung.",
