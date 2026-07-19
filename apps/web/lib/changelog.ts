@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: "You can scroll again while the agent is streaming fast",
+    items: [
+      'Real bug ("when the agent is super fast the whole page hangs and I can\'t even scroll until it stops"): while streaming, the auto-follow engine snaps the view to the bottom every frame, and its user-vs-programmatic scroll detection classified your scrollbar drags and touch drags as its own follow scrolls -- so every attempt to scroll up got snapped straight back down until the turn ended. Any upward scroll or touch drag now always counts as you taking control: following stops immediately and re-arms only when you return to the bottom yourself (or a new turn starts). Applies to both the default and BYOK/direct chat paths, which share this engine.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Added a real file-read tool, and hallucinated tool-name typos no longer crash the whole turn',
     items: [
       'Real bug, reproduced live: the agent called a tool named "Read" that never existed here -- there was write_file/edit_file/append_file/list_files, but no matching read tool, so any model that (reasonably) expected one crashed the entire turn instead of falling back to bash. Added a proper `read_file` tool (with optional line-range reads for large files) so this now just works.',
