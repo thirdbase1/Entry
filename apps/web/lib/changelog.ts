@@ -14,6 +14,17 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Sandbox can no longer be wiped by going idle, plus a smarter, less "AI-looking" agent',
+    items: [
+      'Fixed the last remaining way a chat\'s sandbox could silently lose your files: the workspace used by BYOK/direct-model chats still hard-deleted itself after idle timeout (the July 18 pause-instead-of-kill fix had only covered the default agent\'s path). Both paths now pause with a full filesystem+memory snapshot that E2B retains indefinitely, and transparently resume on your next message — nothing is deleted on idle anymore.',
+      'The agent is now told exactly which tools it has each turn (including your Tools-menu picks), so it can no longer try to call a tool that doesn\'t exist and die mid-task — the bug class behind the July 15 "todo tool" incident.',
+      'Generated web pages/apps (code artifacts) now get an automatic sanity check before you see them — truncated markup, empty shells, broken tags, and rule violations get flagged so the agent revises instead of presenting broken output. Artifacts can also be revised incrementally now ("make the button green" edits the existing page instead of regenerating everything from scratch).',
+      'Stronger design rules against generic AI-generated looks: emoji are banned outright in generated interfaces (real SVG icons or text labels instead), plus a completeness checklist — working buttons, empty/error states, mobile-to-desktop layout — before any UI is presented as done.',
+      'If the agent\'s environment does get reset mid-conversation, it now recovers on its own (re-clones, re-runs setup, continues) instead of stopping to report a missing directory.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Sandbox work can no longer be deleted by going idle, plus a smarter, honest agent harness',
     items: [
       'Fixed the last remaining "sandbox reset and deleted my files" hole: chats with a specific model picked (including BYOK) used a second, independent sandbox implementation that was still hard-deleting the entire sandbox after idle timeout. It now pauses instead — a full filesystem+memory snapshot kept indefinitely — and transparently resumes on your next message, matching the fix the default-agent path got on 2026-07-18. Restore failures are also no longer silently swallowed.',
