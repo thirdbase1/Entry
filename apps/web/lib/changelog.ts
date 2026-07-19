@@ -14,6 +14,14 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Faster model start: repeated auth checks taken off the critical path',
+    items: [
+      "Default/Eve chat path: every send, stream open, and reconnect on /eve/v1/* performed an internal HTTP authentication round trip before the model could even start -- a purely serial cost paid on every single turn. Successful authentication is now cached for 60 seconds per session cookie, removing that repeated request from the model-start path. Failures are never cached, so a fresh login is picked up immediately.",
+      "BYOK/direct chat path: verified it already avoids this class of cost -- its auth check runs in-process against Better Auth's signed cookie cache (no HTTP hop, no DB hit), and its pre-model work (history save, compaction, working memory) was already parallelized ahead of the model call in an earlier pass.",
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Tool-call cards now auto-close when they finish',
     items: [
       "A tool card auto-opens the moment a call starts (kept -- that part was already right), but used to stay expanded forever after the call completed or errored, burying the conversation under a stack of open cards. Cards now auto-collapse the moment their call reaches completed or error state, on both the default and BYOK/direct chat paths. Manually expanding or collapsing a card still always wins: once you've clicked one, the auto behavior leaves that card alone.",
