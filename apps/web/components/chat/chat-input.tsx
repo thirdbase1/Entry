@@ -343,10 +343,17 @@ export function ChatInput({
             value={input}
             onChange={e => setInput(e.currentTarget.value)}
             onKeyDown={e => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                handleSend();
-              }
+              // CHANGED (2026-07-19, explicit user request: "so that
+              // button adds a new line ... only if I click the send
+              // should message be sent"): Enter/Return used to submit the
+              // message (Shift+Enter was the only way to get a newline) --
+              // textarea's own native default. Flipped so Enter always
+              // just inserts a newline like a normal multi-line text box,
+              // and the dedicated Send button (below, its own onClick ->
+              // handleSend()) is the only way a message actually goes
+              // out. No special-casing needed here anymore: simply not
+              // intercepting Enter at all lets the textarea's native
+              // newline behavior through untouched.
               if (e.key === 'Escape' && input.trim() === '' && attached.length === 0 && images.length === 0) {
                 setExpanded(false);
               }

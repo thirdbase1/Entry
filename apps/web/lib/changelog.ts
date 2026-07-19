@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Enter now adds a new line instead of sending your message',
+    items: [
+      'The chat box used to send on Enter (Shift+Enter was the only way to get a new line) -- flipped per user request so Enter always behaves like a normal multi-line text box and just adds a line break. The only way a message actually goes out now is clicking the Send button.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'A fully hung model call no longer silently eats 5 minutes',
     items: [
       "Traced live from a real production incident: a BYOK relay hung completely on a turn (zero output, zero progress) for the full 300-second server limit, at which point the platform hard-killed the request with an opaque, unrecoverable error and nothing saved -- worse than a normal failure, since the usual error handling and message-saving never even got a chance to run. The turn's model call now has its own 90-second \"is anything happening at all\" stall detector (plus a 240s cap on any single step) -- a dead connection now surfaces a real, fast, readable error instead of a silent multi-minute hang. A model that's genuinely still working, no matter how long it takes, is completely unaffected.",
