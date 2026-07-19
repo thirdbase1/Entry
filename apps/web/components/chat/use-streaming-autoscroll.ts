@@ -2,72 +2,118 @@
 
 /**
  * Shared "follow the bottom while streaming" scroll engine (2026-07-17,
- * "improve streaming x5" push).
+ * "improve streaming x5" push; REWRITTEN 2026-07-19, user: "when agent is
+ * working the chat doesn't auto scroll at allll").
  *
- * WHY THIS EXISTS: direct-chat-interface.tsx already got a real fix here
- * (2026-07-17, "improve real time streaming") -- coalesce to one
- * requestAnimationFrame per paint instead of one smooth-scroll animation
- * per raw DOM mutation (which stutters/jiggles during fast streaming,
- * each new ~300ms animation getting cut off mid-flight by the next one a
- * few ms later), and only auto-follow while the user is already near the
- * bottom (so scrolling up to reread earlier context is never yanked back
- * down). chat-interface.tsx (the DEFAULT eve-agent chat path -- the one
- * most chats actually use) never got that same fix; it was still on the
- * old pattern, a plain `useEffect` keyed on `messages.length` alone, which
- * only fires once per whole message rather than continuously as a
- * message's own content grows token-by-token -- so a fast-streaming reply
- * on the default path visibly falls behind the bottom instead of tracking
- * it, then jumps once the NEXT message starts. Same root bug, just never
- * ported to the more commonly hit path. Fixing it once here, shared by
- * both, means it can't silently re-diverge between the two chat
- * implementations again.
+ * WHY THE REWRITE: the previous version decided whether to keep following
+ * by DISTANCE — auto-scroll only if currently within 120px of the bottom.
+ * That heuristic breaks exactly during agent work: a tool card / big
+ * markdown block / tool result lands as ONE large DOM mutation that grows
+ * the container by far more than 120px in a single frame, so by the time
+ * the follow callback runs, the viewport is already "too far" from the
+ * bottom and the check concludes the user must have scrolled up — and
+ * stops following, permanently, until the next turn. Token-by-token text
+ * streaming stayed under the threshold, which is why plain replies
+ * followed fine but tool-heavy agent turns (big appends) "don't auto
+ * scroll at all".
  *
- * ALSO NEW here (neither path had this before): an async image inside the
- * scroll container -- a generated image, a screenshot render, etc. --
- * finishes loading and grows the container's real scrollHeight WITHOUT
- * any DOM mutation firing (the <img> tag itself doesn't change, just its
- * rendered box once decode completes) -- so the previous "auto-follow on
- * DOM mutation" approach on either path silently stopped tracking the
- * bottom the instant an image was the thing that grew the page. A
- * capturing `load` listener on the scroll container catches every
- * descendant image's load event (event capture/bubbling on 'load' works
- * for <img> specifically, confirmed against the DOM spec) and re-runs the
- * exact same follow check.
+ * Fix: replace distance-as-intent with an explicit sticky `following`
+ * flag that models what the user actually did:
+ *  - following starts true (and re-arms on every new turn),
+ *  - it turns OFF only on a genuine user-initiated scroll away from the
+ *    bottom (wheel up, touch drag, PageUp/Home/ArrowUp/etc., or a scroll
+ *    event we didn't programmatically cause),
+ *  - it turns back ON the moment the user returns to the bottom
+ *    themselves (or a new turn starts).
+ * While following, every content growth snaps the view down regardless of
+ * how large the jump was. Programmatic scrolls are marked so the scroll
+ * listener never mistakes our own follow for user intent.
+ *
+ * Retained from the previous version (both were real fixes):
+ *  - coalesce to at most one scroll per animation frame (rAF), instant
+ *    'auto' behavior for per-frame follows — smooth animations per
+ *    mutation stutter/fight each other during fast streaming,
+ *  - capturing 'load' listener so an async <img> finishing decode (which
+ *    grows scrollHeight with NO DOM mutation) still triggers a follow.
  */
 import { useEffect, useRef } from 'react';
 
-const NEAR_BOTTOM_PX = 120;
+// Within this distance of the bottom counts as "at the bottom" — both for
+// re-arming follow when the user returns, and for tolerating sub-pixel /
+// rounding drift without treating it as a scroll-away.
+const AT_BOTTOM_PX = 60;
 
 export function useStreamingAutoScroll(
   scrollRef: React.RefObject<HTMLElement | null>,
   /** Bump-able dependency that should trigger a fresh "snap to bottom"
-   *  (smoothly, once) -- typically `messages.length` so a genuinely NEW
-   *  turn starting always jumps down, distinct from the continuous
-   *  per-frame follow that handles a turn's own content growing. */
+   *  (smoothly, once) and re-arm following -- typically `messages.length`
+   *  so a genuinely NEW turn always jumps down even if the user had
+   *  scrolled away during the previous one. */
   newTurnKey: unknown,
 ) {
   const rafIdRef = useRef<number | null>(null);
+  const followingRef = useRef(true);
+  // True while a scroll event we caused ourselves is expected — lets the
+  // scroll listener tell "our follow moved the bar" apart from "the user
+  // moved the bar". Reset on the next scroll event after each programmatic
+  // move (scrollTo with behavior 'smooth' fires many scroll events; keep
+  // it set until the position actually reaches the bottom).
+  const programmaticRef = useRef(false);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
-    const isNearBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    const isAtBottom = () => el.scrollHeight - el.scrollTop - el.clientHeight < AT_BOTTOM_PX;
 
-    // One deliberate smooth jump on a genuinely new turn starting.
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    const scrollToBottom = (behavior: ScrollBehavior) => {
+      programmaticRef.current = true;
+      el.scrollTo({ top: el.scrollHeight, behavior });
+    };
+
+    // New turn: re-arm and take one deliberate smooth jump down.
+    followingRef.current = true;
+    scrollToBottom('smooth');
 
     const follow = () => {
-      if (rafIdRef.current !== null) return;
+      if (!followingRef.current || rafIdRef.current !== null) return;
       rafIdRef.current = requestAnimationFrame(() => {
         rafIdRef.current = null;
-        if (!el) return;
-        // Re-check near-bottom right before each follow (not just once at
-        // mount) -- a user scrolling away mid-stream should stop being
-        // auto-followed immediately, not just on the next new turn.
-        if (isNearBottom()) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' });
+        if (followingRef.current) scrollToBottom('auto');
       });
     };
+
+    // --- user-intent listeners: the ONLY things that stop following ---
+    // Wheel/touch/keys are unambiguous (only a human produces them);
+    // checking deltaY/key direction means scrolling down to the bottom
+    // never has to fight the follow engine.
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) followingRef.current = false;
+    };
+    const onTouchMove = () => {
+      // Any touch drag counts as taking manual control; re-arms below if
+      // they end up back at the bottom.
+      if (!isAtBottom()) followingRef.current = false;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') followingRef.current = false;
+    };
+    // Scrollbar drags produce scroll events with no wheel/touch/key — any
+    // scroll we didn't cause ourselves that lands away from the bottom is
+    // user intent too. And ANY path back to the bottom re-arms following.
+    const onScroll = () => {
+      if (isAtBottom()) {
+        followingRef.current = true;
+        programmaticRef.current = false;
+      } else if (!programmaticRef.current) {
+        followingRef.current = false;
+      }
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: true });
+    el.addEventListener('keydown', onKeyDown);
+    el.addEventListener('scroll', onScroll, { passive: true });
 
     const observer = new MutationObserver(follow);
     observer.observe(el, { childList: true, subtree: true, characterData: true });
@@ -80,6 +126,10 @@ export function useStreamingAutoScroll(
 
     return () => {
       observer.disconnect();
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('keydown', onKeyDown);
+      el.removeEventListener('scroll', onScroll);
       el.removeEventListener('load', onImageLoad, true);
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current);
