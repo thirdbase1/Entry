@@ -100,6 +100,52 @@ export function ToolStatusBadge({ state }: { state: ToolState }) {
   );
 }
 
+/**
+ * Controlled auto-open/auto-close Tool wrapper (2026-07-19, "it auto
+ * opens the card when a tool call starts, which is good, but it doesn't
+ * auto close when it's completed or errored"). `defaultOpen` on the plain
+ * <Tool> is uncontrolled, so a card opened while running just stays open
+ * forever once the call finishes. This wrapper drives `open` from the
+ * tool part's live state instead: open while input-streaming /
+ * input-available, auto-collapsed the moment state transitions to
+ * output-available or output-error. A manual expand/collapse click opts
+ * this instance out of auto-management for the rest of its life -- the
+ * user's explicit choice always wins (same opt-out pattern as
+ * generic-tool-result.tsx's autoExpand handling on the eve path).
+ */
+export function AutoCollapseTool({
+  state,
+  className,
+  children,
+}: {
+  state: ToolState;
+  className?: string;
+  children: ReactNode;
+}) {
+  const running = state === 'input-streaming' || state === 'input-available';
+  const [open, setOpen] = useState(running);
+  const userToggledRef = useRef(false);
+  const prevRunningRef = useRef(running);
+  useEffect(() => {
+    if (prevRunningRef.current === running) return;
+    prevRunningRef.current = running;
+    if (userToggledRef.current) return;
+    setOpen(running);
+  }, [running]);
+  return (
+    <Tool
+      className={className}
+      open={open}
+      onOpenChange={o => {
+        userToggledRef.current = true;
+        setOpen(o);
+      }}
+    >
+      {children}
+    </Tool>
+  );
+}
+
 export interface ToolHeaderProps {
   title: ReactNode;
   state: ToolState;

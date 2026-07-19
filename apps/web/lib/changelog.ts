@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Tool-call cards now auto-close when they finish',
+    items: [
+      "A tool card auto-opens the moment a call starts (kept -- that part was already right), but used to stay expanded forever after the call completed or errored, burying the conversation under a stack of open cards. Cards now auto-collapse the moment their call reaches completed or error state, on both the default and BYOK/direct chat paths. Manually expanding or collapsing a card still always wins: once you've clicked one, the auto behavior leaves that card alone.",
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: "You can scroll again while the agent is streaming fast",
     items: [
       'Real bug ("when the agent is super fast the whole page hangs and I can\'t even scroll until it stops"): while streaming, the auto-follow engine snaps the view to the bottom every frame, and its user-vs-programmatic scroll detection classified your scrollbar drags and touch drags as its own follow scrolls -- so every attempt to scroll up got snapped straight back down until the turn ended. Any upward scroll or touch drag now always counts as you taking control: following stops immediately and re-arms only when you return to the bottom yourself (or a new turn starts). Applies to both the default and BYOK/direct chat paths, which share this engine.',
