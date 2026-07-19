@@ -185,4 +185,21 @@ New tabs to add:
 
 ## 8. Architecture sketch
 
-See the attached diagram (routeAndCallModel sits between every caller and the provider pool; UsageEvent is written on every call; Balance/Ledger and Admin Billing are both just readers of that same event stream).
+![Admin/billing/routing architecture sketch](/admin-architecture-sketch.png)
+
+`routeAndCallModel()` sits between every caller (eve-root agent path and the
+BYOK direct-chat path both call it) and the pool of `AIProviderRoute`s. Every
+call writes one `UsageEvent` row regardless of which route served it.
+`UserCreditBalance` + `CreditTransaction` and the admin Billing/Analysis page
+are both just readers of that same event stream -- neither one is a separate
+source of truth, so they can never drift out of sync with each other.
+
+## 9. Process note: admin-page work does not go in the changelog
+
+`apps/web/lib/changelog.ts` is user-facing product changelog -- it's meant to
+tell *users* what changed for *them* (new features, fixes to things they'd
+notice). Admin-page work (this whole doc) is internal tooling for the owner
+only and must never be logged there. Continue recording admin/internal work
+as an `AppVersion` row (via `POST /api/admin/versions`, see the Versions tab)
+for rollback purposes -- that's a separate, correct place for it -- just never
+in `changelog.ts`.

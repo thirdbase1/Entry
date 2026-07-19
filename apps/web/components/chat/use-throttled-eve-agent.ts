@@ -41,7 +41,7 @@
  * node_modules, safe across an `eve` version bump as long as this public
  * surface stays stable.
  */
-import { startTransition, useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
 import { EveAgentStore, defaultMessageReducer } from 'eve/client';
 import type {
   EveMessageData,
@@ -87,21 +87,33 @@ export function useThrottledEveAgent<TData = EveMessageData>(
         if (rafId !== null) return; // a flush is already scheduled for this frame
         rafId = requestAnimationFrame(() => {
           rafId = null;
-          // FIXED (2026-07-19, explicit report: "when the agent is super
-          // fast the whole page hangs and I can't even scroll until it
-          // stops"): rAF batching capped Eve's raw 50-100+ notifications
-          // per second to the display rate, but each flush was still a
-          // DEFAULT-priority React update. A fast agent can keep putting a
-          // new default-priority render in every frame, so React quite
-          // correctly spends every frame rendering the ever-growing
-          // markdown/tool tree and starves browser input work (wheel/touch
-          // events) indefinitely. Streaming content is progressive, not
-          // urgent interaction: demote the visual refresh to a transition
-          // so scrolling, typing, clicking Stop, and navigation preempt it.
-          // The Eve store already has the newest event synchronously; this
-          // only lets React skip/interupt stale PAINT work, never drops an
-          // event, token, tool state, or persisted message.
-          startTransition(onStoreChange);
+          // REVERTED (2026-07-19, same day -- confirmed real regression,
+          // reported as "streaming doesn't work at all now, hangs, then a
+          // wall of text dumps in once the agent stops"): wrapping this in
+          // `startTransition` was meant to stop a fast agent's constant
+          // stream of rAF-scheduled updates from starving input, but
+          // `startTransition` renders are explicitly interruptible/
+          // supersedable -- if a NEW rAF-scheduled transition gets kicked
+          // off (every ~16ms, for as long as the model keeps streaming)
+          // before React finishes committing+painting the PREVIOUS one,
+          // React is allowed to throw the in-progress render away and
+          // start over with the newer state. Under a genuinely fast model
+          // that's every single frame, forever -- so the transition can
+          // legitimately never reach a commit until the source of updates
+          // stops (the agent finishes), which is exactly "hangs the whole
+          // time, then dumps everything at once" from the outside.
+          // The 2026-07-18 fix (messagePropsAreEqual in message-renderer.tsx)
+          // already made each individual frame's render cheap -- only the
+          // actively-streaming message re-renders now, not the whole
+          // thread -- so the ORIGINAL "page hangs, can't scroll" complaint
+          // this was trying to solve should mostly be addressed by that
+          // memoization alone, at default priority, without also needing
+          // to make the render itself preemptible (and, in doing so, risk
+          // it never landing). Back to a plain default-priority update:
+          // rAF still caps this to at most one render per display frame
+          // (~60/sec ceiling) no matter how many raw store notify() calls
+          // land in between, which is the part that's genuinely needed.
+          onStoreChange();
         });
       });
       return () => {
