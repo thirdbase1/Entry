@@ -30,7 +30,7 @@ interface AdminUser {
   createdAt: string;
 }
 
-const ALL_FEATURES = ['administrator', 'early_access', 'unlimited_copilot', 'free_plan_v1', 'pro_plan_v1'] as const;
+const ALL_FEATURES = ['administrator', 'early_access', 'unlimited_copilot', 'free_plan_v1', 'starter_plan_v1', 'pro_plan_v1', 'power_plan_v1', 'studio_plan_v1'] as const;
 type FeatureKey = (typeof ALL_FEATURES)[number];
 
 function FeatureEditor({ userId, onClose }: { userId: string; onClose: () => void }) {

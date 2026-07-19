@@ -16,7 +16,10 @@ const VALID_FEATURES: FeatureNameKey[] = [
   'early_access',
   'unlimited_copilot',
   'free_plan_v1',
+  'starter_plan_v1',
   'pro_plan_v1',
+  'power_plan_v1',
+  'studio_plan_v1',
 ];
 
 export async function PATCH(
