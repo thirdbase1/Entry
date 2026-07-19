@@ -14,6 +14,15 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'Reloading mid-reply no longer loses the agent, and chats connect faster',
+    items: [
+      "Fixed the real reason a reload during a working turn could show a stuck chat missing the agent's progress: the server-side catch-up that reattaches to a still-running turn only enforced its time limit AFTER an event arrived -- so while the agent was quietly deep in a long tool call (a build, a browser task) it emitted nothing, and the catch-up request just sat blocked instead of returning. It now returns promptly with whatever has actually happened so far, and the normal background polling keeps topping the chat up until the turn finishes. The turn itself always kept running server-side -- reloading never killed it -- it was catching UP that hung.",
+      'Faster time-to-first-reply on the default chat: every message send, stream open, and automatic reconnect used to re-verify your login with a full extra internal HTTP round trip before the model was even contacted. That check is now cached for 60 seconds per session, removing a whole serial network hop from the front of nearly every turn.',
+      'Opening a chat with a still-working reply also renders faster: the initial catch-up window was cut from 8 seconds to 2.5 -- reattachment replays everything already generated instantly, so the long wait bought nothing except a slower first paint.',
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'Added a real file-read tool, and hallucinated tool-name typos no longer crash the whole turn',
     items: [
       'Real bug, reproduced live: the agent called a tool named "Read" that never existed here -- there was write_file/edit_file/append_file/list_files, but no matching read tool, so any model that (reasonably) expected one crashed the entire turn instead of falling back to bash. Added a proper `read_file` tool (with optional line-range reads for large files) so this now just works.',

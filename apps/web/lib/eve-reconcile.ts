@@ -67,13 +67,52 @@ export async function reconcileEveSession(
   const client = new Client({ host: origin });
   const session = client.session(state);
   const collected: HandleMessageStreamEvent[] = [];
-  const maxWaitMs = 8000;
-  const deadline = Date.now() + maxWaitMs;
+  // LOWERED 8000 -> 2500 (2026-07-19): now that the timeout above actually
+  // binds (see the FIXED comment below), this window is what a reload of a
+  // mid-turn chat pays BEFORE first render, every time. Reattachment
+  // replays already-buffered events from the stored cursor immediately, so
+  // catching up on backlog needs almost no time at all -- the only thing a
+  // longer window buys is tailing the LIVE stream a little longer, which
+  // the client's own 3s/5s recovery polls already do far better without
+  // blocking the initial paint behind it.
+  const maxWaitMs = 2500;
 
   try {
-    for await (const event of session.stream()) {
-      collected.push(event);
-      if (Date.now() > deadline) break;
+    // FIXED (2026-07-19, root cause of BOTH "reload mid-turn shows a chat
+    // stuck/missing the agent's work" and a large slice of "it takes time
+    // to connect when I open a chat"): the deadline used to be checked
+    // ONLY inside the loop body, i.e. only AFTER an event actually
+    // arrived. `session.stream()` reattaches to the LIVE run -- while the
+    // agent is deep inside a long tool call (bash build, browser_use, a
+    // slow model step) it can emit NOTHING for minutes, so the
+    // `for await` just sat parked on a silent-but-healthy stream with the
+    // 8s "deadline" never even consulted. Every snapshot GET for a chat
+    // with a pending turn (exactly what a reload-mid-turn fetches, and
+    // what the client's recovery polls hit every few seconds) therefore
+    // blocked until the next event happened to arrive -- potentially
+    // minutes -- instead of returning promptly with whatever was
+    // collected so far. Race the iteration against a real timer so the
+    // wall-clock bound actually binds: on expiry, return what we have
+    // (often nothing new -- fine, the next poll tries again) and close
+    // the reattached stream via iterator.return() so orphaned readers
+    // don't pile up server-side across repeated polls.
+    const iterator = session.stream()[Symbol.asyncIterator]();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<{ timedOut: true }>(resolve => {
+      timer = setTimeout(() => resolve({ timedOut: true }), maxWaitMs);
+    });
+    try {
+      for (;;) {
+        const raced = await Promise.race([iterator.next(), expired]);
+        if ('timedOut' in raced) {
+          void iterator.return?.().catch(() => {});
+          break;
+        }
+        if (raced.done) break;
+        collected.push(raced.value);
+      }
+    } finally {
+      clearTimeout(timer);
     }
   } catch {
     // Best-effort only -- a genuinely dead/expired eve session, or a
