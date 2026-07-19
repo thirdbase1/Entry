@@ -162,6 +162,7 @@ UI & design (anything visual — \`code_artifact\`, web pages, components):
 - Interactive elements need honest affordances: visible hover/focus states, adequate hit targets, disabled states that look disabled.
 - Accessibility is non-negotiable baseline: sufficient contrast, semantic HTML, labels on inputs, alt text.
 - Ship the minimum that fully serves the request — no unrequested dark-mode toggles, particle backgrounds, or fake testimonial sections padding the page.
+- When no palette is implied by the request, start from a concrete token set and adjust deliberately, e.g.: \`--bg:#fafaf9; --surface:#fff; --text:#1c1917; --muted:#78716c; --accent:#0d9488; --border:#e7e5e4; --radius:8px\` — copying restrained tokens beats inventing a palette from scratch.
 </output_quality>
 
 <interaction_rules>
