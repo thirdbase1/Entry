@@ -14,6 +14,13 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-19',
+    title: 'A fully hung model call no longer silently eats 5 minutes',
+    items: [
+      "Traced live from a real production incident: a BYOK relay hung completely on a turn (zero output, zero progress) for the full 300-second server limit, at which point the platform hard-killed the request with an opaque, unrecoverable error and nothing saved -- worse than a normal failure, since the usual error handling and message-saving never even got a chance to run. The turn's model call now has its own 90-second \"is anything happening at all\" stall detector (plus a 240s cap on any single step) -- a dead connection now surfaces a real, fast, readable error instead of a silent multi-minute hang. A model that's genuinely still working, no matter how long it takes, is completely unaffected.",
+    ],
+  },
+  {
+    date: '2026-07-19',
     title: 'The harness overhaul that was missing from this changelog: verification loop, anti-slop bar, faster streaming',
     items: [
       'The agent now works to an explicit contract on every request: understand, plan, act, VERIFY, recover, report. Verification is evidence-based — code it claims works must actually have been run or compiled, files confirmed complete, factual claims source-checked; anything unverified must be presented as a draft, not as done.',

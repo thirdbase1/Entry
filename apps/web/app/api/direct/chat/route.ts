@@ -530,6 +530,32 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const result = streamText({
     model,
     stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
+    // FIXED (2026-07-19, confirmed live from production logs): a 'Free'
+    // BYOK relay (model id "claude-fable-5") hung completely on a turn --
+    // zero chunks, zero onStepFinish, nothing -- for the FULL 300s
+    // maxDuration, at which point Vercel hard-kills the entire function
+    // with an opaque "Vercel Runtime Timeout Error". That's a strictly
+    // worse failure mode than a normal thrown error: the kill happens at
+    // the platform level, so onError/onFinish never run, nothing gets
+    // saved or reported, and the client is left hanging with no visible
+    // feedback for 5 full minutes. The nested tool-impls
+    // (code_artifact/python_coding/task_analysis, see
+    // with-timeout-signal.ts) already learned this lesson for their OWN
+    // internal model calls; this is the identical gap at the TOP level,
+    // for the turn's actual model call itself. chunkMs is the AI SDK's
+    // own built-in stall detector (see
+    // node_modules/ai/src/util/set-abort-timeout.ts) -- aborts a step if
+    // NO chunk (not even the first) arrives within the window, which
+    // turns into a normal catchable error (onError fires, a clean message
+    // reaches the client) instead of a bare platform kill. Deliberately
+    // scoped to "no data at all for 90s", not a cap on total step
+    // duration -- a model that's genuinely still producing output stays
+    // completely unaffected no matter how long that takes; only a truly
+    // dead connection gets cut. stepMs is a secondary safety net for
+    // the "trickles a few bytes forever but never finishes" variant,
+    // capped well under the 300s hard ceiling so there's still real
+    // margin for onFinish/version-capture/save work to run afterward.
+    timeout: { chunkMs: 90_000, stepMs: 240_000 },
     // See modelMessages' own comment above for why this (persona prompt +
     // optional compaction summary) moved here instead of being spliced
     // into `messages` as fake `role: 'system'` entries -- this is the
