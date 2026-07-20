@@ -30,24 +30,38 @@ import { sandboxAppendFile } from './sandbox-file-io.js';
  * embedded content like SVGs/base64/long generated markup) -- write a
  * few dozen lines at a time across several append_file calls rather than
  * attempting the whole thing in one write_file call.
+ *
+ * ADVANCED PASS (2026-07-20): `encoding: 'base64'` lets a binary file
+ * (image, zip, font, etc. too large or awkward to write in one
+ * write_file call) be built up chunk-by-chunk the same way a long text
+ * file already could -- each chunk is a base64 slice of the real bytes,
+ * decoded and appended in the sandbox, so nothing gets mangled by
+ * treating binary data as UTF-8 text along the way.
  */
 export const appendFileTool = {
   description:
     'Build up a NEW file (or fully replace an existing one) across MULTIPLE calls, each carrying only a small chunk of ' +
     'content -- use this instead of `write_file` when creating a file you expect to be long, to avoid the whole-file-in-one-call ' +
     'output-length ceiling that silently truncates and corrupts long single-shot writes. Call with mode: "start" once to create/' +
-    'truncate the file with the first chunk, then mode: "append" for each following chunk, in order, until the file is complete.',
+    'truncate the file with the first chunk, then mode: "append" for each following chunk, in order, until the file is complete. ' +
+    "Set encoding: 'base64' to build up a binary file (image, zip, etc.) chunk by chunk instead of text.",
   inputSchema: z.object({
     path: z.string().describe('Relative path (from the project root) of the file to build up.'),
-    content: z.string().describe('This chunk of content to write/append. Keep each chunk modest in size (e.g. well under what a single write_file call would risk truncating).'),
+    content: z.string().describe(
+      "This chunk of content to write/append. Keep each chunk modest in size (e.g. well under what a single write_file call would risk truncating). If encoding is 'base64', this chunk must already be base64-encoded.",
+    ),
     mode: z
       .enum(['start', 'append'])
       .describe('"start" creates/truncates the file with this chunk (call this first). "append" adds this chunk to the end of an already-started file.'),
+    encoding: z.enum(['utf8', 'base64']).optional().describe("'utf8' (default) for text. 'base64' for binary chunks."),
   }),
-  async execute({ path, content, mode }: { path: string; content: string; mode: 'start' | 'append' }, ctx: ToolExecCtx) {
-    const result = await sandboxAppendFile(ctx, path, content, mode);
+  async execute(
+    { path, content, mode, encoding }: { path: string; content: string; mode: 'start' | 'append'; encoding?: 'utf8' | 'base64' },
+    ctx: ToolExecCtx,
+  ) {
+    const result = await sandboxAppendFile(ctx, path, content, mode, { encoding });
     if (!result.ok) return { ok: false, error: result.error };
-    return { ok: true, path, mode, bytesWritten: Buffer.byteLength(content, 'utf8') };
+    return { ok: true, path, mode, bytesWritten: result.bytesWritten };
   },
 };
 
