@@ -42,6 +42,13 @@ export interface RecordUsageArgs {
   /** "gateway" | "byok:<providerLabel>" | future AIProviderRoute ids. */
   provider: string;
   usage: UsageTokens;
+  /**
+   * Cost the provider itself reported for this exact call (e.g. Vercel AI
+   * Gateway's providerMetadata.gateway.cost). When present this IS the
+   * face value -- more authoritative than our own rate-table math, since
+   * the provider bills us off this number. Rate lookup is skipped.
+   */
+  providerReportedCostUsd?: number;
   finishReason?: string;
   success?: boolean;
 }
@@ -64,7 +71,7 @@ export async function findRateForModel(model: string, at: Date) {
     orderBy: { effectiveFrom: 'desc' },
   });
   return (
-    candidates.find(rate => {
+    candidates.find((rate: (typeof candidates)[number]) => {
       const barePattern = rate.modelPattern.split('/').pop() ?? rate.modelPattern;
       return bareModel === barePattern || bareModel.startsWith(barePattern);
     }) ?? null
@@ -94,9 +101,13 @@ export async function recordUsageEvent(args: RecordUsageArgs): Promise<string | 
   try {
     const now = new Date();
     const byok = isByok(args.provider);
+    const reported = args.providerReportedCostUsd;
+    const hasReportedCost = typeof reported === 'number' && Number.isFinite(reported) && reported >= 0;
     // BYOK: user's own key, costs us $0 -- skip the rate lookup entirely.
-    const rate = byok ? null : await findRateForModel(args.model, now);
-    const faceValueUsd = rate ? priceUsage(args.usage, rate) : 0;
+    // Provider-reported cost (e.g. Gateway's own metadata.cost): use it
+    // verbatim, it's what we're actually billed -- rate table not needed.
+    const rate = byok || hasReportedCost ? null : await findRateForModel(args.model, now);
+    const faceValueUsd = hasReportedCost ? reported : rate ? priceUsage(args.usage, rate) : 0;
     const row = await prisma.usageEvent.create({
       data: {
         userId: args.userId,
@@ -112,7 +123,10 @@ export async function recordUsageEvent(args: RecordUsageArgs): Promise<string | 
         // Single implicit route at 1.0x until the multi-key router lands
         // (admin.md §4) -- actual == face for gateway calls, 0 for BYOK.
         actualCostUsd: byok ? 0 : faceValueUsd,
-        priceRateId: rate?.id ?? null,
+        // 'provider-reported' sentinel = priced by the provider's own cost
+        // figure, not our rate table (column has no FK, safe). null still
+        // means UNPRICED -- the admin Billing tab's alarm state.
+        priceRateId: hasReportedCost ? 'provider-reported' : (rate?.id ?? null),
         finishReason: args.finishReason,
         success: args.success ?? true,
       },
