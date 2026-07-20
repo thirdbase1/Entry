@@ -82,6 +82,7 @@ import {
   convertToModelMessages,
   smoothStream,
   createUIMessageStreamResponse,
+  InvalidToolInputError,
   type UIMessage,
   type UIMessageChunk,
 } from 'ai';
@@ -89,6 +90,7 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
 import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
+import { recordUsageEvent } from '@entry/db/usage-metering';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
@@ -622,10 +624,44 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // genuinely different tool (e.g. does not try to guess `Read` means
     // `bash` or `list_files`) -- returns null (no repair, original error
     // surfaces normally) whenever there's no case-insensitive match.
-    repairToolCall: async ({ toolCall, tools }) => {
+    repairToolCall: async ({ toolCall, tools, error }) => {
       const realName = Object.keys(tools).find(name => name.toLowerCase() === toolCall.toolName.toLowerCase());
-      if (realName === undefined || realName === toolCall.toolName) return null;
-      return { ...toolCall, toolName: realName };
+      if (realName !== undefined && realName !== toolCall.toolName) {
+        return { ...toolCall, toolName: realName };
+      }
+      // ADDED (2026-07-20, real bug reported live: write_file threw a raw
+      // Zod "expected: string, received undefined, path: ['path']" straight
+      // to the user). Root cause: models -- including this one, apparently
+      // cross-contaminated by the very common `file_path` tool-arg
+      // convention used elsewhere (this exact repo's OWN sandbox exposes a
+      // DIFFERENT platform's tool as `file_path`, and plenty of training
+      // data does too) -- sometimes call write_file/read_file/append_file/
+      // edit_file with `file_path`/`filePath`/`filename`/`fileName` instead
+      // of the real, required `path` key. That's an InvalidToolInputError
+      // (schema validation failure on otherwise well-formed JSON), not a
+      // NoSuchToolError, so it needs its own repair branch: parse the raw
+      // input, and if `path` is missing but exactly one known alias is
+      // present, rename it and let the SDK re-validate. Never invents a
+      // value that wasn't in the original call -- returns null (original
+      // error surfaces normally) whenever there's no such alias to rescue.
+      const PATH_ALIASING_TOOLS = new Set(['write_file', 'read_file', 'append_file', 'edit_file']);
+      const PATH_ALIASES = ['file_path', 'filePath', 'filename', 'fileName', 'file'];
+      if (InvalidToolInputError.isInstance(error) && PATH_ALIASING_TOOLS.has(toolCall.toolName)) {
+        try {
+          const parsed = JSON.parse(error.toolInput) as Record<string, unknown>;
+          if (typeof parsed.path !== 'string') {
+            const aliasKey = PATH_ALIASES.find(key => typeof parsed[key] === 'string');
+            if (aliasKey !== undefined) {
+              const { [aliasKey]: aliasValue, ...rest } = parsed;
+              const repaired = { ...rest, path: aliasValue };
+              return { ...toolCall, input: JSON.stringify(repaired) };
+            }
+          }
+        } catch {
+          // Not parseable JSON -- fall through to no-repair below.
+        }
+      }
+      return null;
     },
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
@@ -665,6 +701,41 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         usage,
         warnings,
       });
+
+      // USAGE METERING (Phase 1 of admin.md §2, 2026-07-19): one
+      // UsageEvent row per completed step, captured verbatim from the
+      // provider's own usage object -- never estimated. Metered per-STEP
+      // (not once in onFinish) deliberately: a turn hard-killed at the
+      // 300s maxDuration ceiling never reaches onFinish, but its already-
+      // completed steps DID consume tokens -- admin.md flags exactly this
+      // as "the most common way a metering system quietly under-bills".
+      // waitUntil (not await): recordUsageEvent never throws, but its DB
+      // write must not add latency to the hot streaming path either.
+      // Usage shape verified against THIS repo's installed ai package
+      // (LanguageModelUsage): cache reads/writes live in
+      // usage.inputTokenDetails, not in providerMetadata.
+      if (usage && (usage.inputTokens != null || usage.outputTokens != null)) {
+        waitUntil(
+          recordUsageEvent({
+            userId,
+            chatId,
+            source: 'direct-chat',
+            model: modelId,
+            provider: byokModelId ? `byok:${providerLabel}` : 'gateway',
+            usage: {
+              // inputTokens on LanguageModelUsage is the TOTAL (cached
+              // included) -- price only the non-cached portion at the
+              // input rate, or cache reads double-bill at full price.
+              inputTokens: usage.inputTokenDetails?.noCacheTokens ?? usage.inputTokens ?? 0,
+              outputTokens: usage.outputTokens ?? 0,
+              cacheCreationTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+              cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
+            },
+            finishReason,
+            success: toolErrors.length === 0,
+          })
+        );
+      }
       // A step that finished for any reason OTHER than actually making
       // more tool calls or a normal stop, OR a tool call that came back
       // as an actual error, is exactly the "stopped after one tool call"
@@ -701,7 +772,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // no real cost beyond that.
       if (sandboxPromise && toolCalls.length > 0) {
         const sandbox = await sandboxPromise;
-        await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
+        // skipCard=true: the card must only be appended AFTER onFinish
+        // persists the final sanitized messages -- appending it here races
+        // with that write and causes the card to be overwritten (the card
+        // lands in events, then onFinish overwrites events with
+        // sanitizedFinalMessages which has no card). The version rows
+        // (ChatVersion/ChatVersionFile) are still written here for
+        // incremental durability; only the UI card is deferred.
+        await captureVersionFromSandboxDiff(chatId, sandbox, { skipCard: true }).catch(err => {
           console.error('[direct chat] incremental step version capture failed', chatId, err);
         });
       }

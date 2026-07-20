@@ -11,11 +11,11 @@ _Last updated: 2026-07-19. Author: Lyra (Claude Sonnet, via Base44 Superagent), 
 6. Usage cost per AI turn must be as close to 100% accurate as possible.
 7. This doc is the spec — Fable 5 builds against it inside Entry.
 
-## 1. Where we are today (as of this doc)
+## 1. Where we are today
 
 Already live:
 - `Feature` / `UserFeature` tables — flag-based plan system (`free_plan_v1`, `starter_plan_v1`, `pro_plan_v1`, `power_plan_v1`, `studio_plan_v1`, `administrator`, `early_access`, `unlimited_copilot`).
-- Each plan config now carries `aiCreditAllowance` (a face-value $ allowance concept) — added 2026-07-19, not yet wired to anything that spends it.
+- Each plan config carries `aiCreditAllowance` — added 2026-07-19, **hardcoded in `packages/features/src/common.ts`**. This violates Goal #7 (repricing lever) and must move to a DB table (see §3.1).
 - Admin page at `/admin` — Users tab (list, ban/enable, feature toggles) and Versions tab (deploy history + instant rollback). Gated by `featureService.isAdmin` (session-based), not the debug bearer token.
 - All chat/agent traffic currently goes through Vercel AI Gateway (zero token markup per Vercel's own pricing page, but real costs: $0.10 per 1,000 requests per allow-listed provider, and no native concept of "which of my own resold keys should serve this request" — Gateway routes to *providers*, not to *our specific negotiated deals*).
 - **No usage metering exists yet.** No table records tokens, cost, or which model/provider served a request. This is the single biggest gap and blocks literally everything else in this doc — billing, balance, margin visibility, routing decisions, all depend on this existing first.
@@ -88,6 +88,32 @@ model ModelPriceRate {
 
 ## 3. Credit balance & billing
 
+### 3.1 PlanConfig — the repricing lever (NEW, load-bearing)
+
+Plans must NOT live in `common.ts` — they need to be DB rows the admin edits live:
+
+```
+model PlanConfig {
+  id                String   @id @default(uuid())
+  featureName       String   @unique  // "free_plan_v1" | "starter_plan_v1" | ...
+  displayName       String            // "Free" | "Starter" | "Pro" | "Power" | "Studio"
+  priceNaira        Int               // monthly price in ₦ (0 = free tier)
+  priceUsd          Decimal?          // optional USD price for non-NGN markets
+  aiCreditAllowance Decimal           // Entry Credits granted per month
+  shownMultiplier   Decimal           // advertised value multiple, e.g. 3.4
+  blobLimitMb       Int
+  storageQuotaGb    Int
+  allowedModels     String[]          // model access gate (e.g. no Fable 5 on Free)
+  rolloverCredits   Boolean @default(false)
+  active            Boolean @default(true)
+  updatedAt         DateTime @updatedAt
+}
+```
+
+Supplier dies at 2am → owner opens Admin Plans tab → cuts `aiCreditAllowance` → saves → every new grant uses the new number. Existing balances are honored (never retroactively reprice). `common.ts` becomes a read-only seed; the source of truth is this table.
+
+### 3.2 Balance & transaction ledger
+
 ```
 model UserCreditBalance {
   userId          String   @id
@@ -99,7 +125,7 @@ model UserCreditBalance {
 model CreditTransaction {
   id              String   @id @default(uuid())
   userId          String
-  type            String   // "subscription_grant" | "topup_fiat" | "topup_crypto" | "usage" | "refund" | "admin_adjustment"
+  type            String   // "subscription_grant" | "topup_fiat" | "topup_crypto" | "usage" | "refund" | "admin_adjustment" | "expiry"
   amountUsd       Decimal  // positive = credit added, negative = spent
   balanceAfterUsd Decimal  // denormalized running balance, fast history rendering without re-summing
   relatedUsageEventId String?
@@ -153,6 +179,15 @@ Router algorithm (per request):
 
 This is also a bigger conceptual replacement of Vercel AI Gateway than it might sound — Gateway gives per-request provider fallback today, but has no concept of "route B is secretly 15x cheaper than route A for the same model," because Gateway assumes you're paying list price everywhere. Our own router is the only place that arbitrage can live.
 
+## 4.5 Pre-flight gate & kill switch (NEW — sits in front of the router)
+
+Before `routeAndCallModel()` picks a route, a gate runs. This stops a runaway agent loop from draining a whale's credit or blowing through the supplier's prepaid block:
+
+1. **Balance check:** reject if balance <= 0 (unless plan allows a small overdraft grace). Return a clear in-product "out of credit — top up" state, never a silent 402.
+2. **Reserve-then-settle for agent runs:** estimate a turn's likely cost up front, reserve it, settle actual on finish (refund the difference). Prevents a 40-step agent loop running 39 steps past a zero balance.
+3. **Per-user daily spend cap:** configurable ceiling so one compromised/abusive account can't burn a month of supply in an hour.
+4. **GLOBAL KILL SWITCH:** one admin toggle that pauses ALL paid routes instantly (BYOK still works — it's the user's own key). The "supplier key just got revoked" panic button. Lives in the Provider Routes tab; router checks it first, cached, negligible latency.
+
 ## 5. Admin page — full scope
 
 Existing tabs (already live): **Users**, **Versions**.
@@ -173,7 +208,7 @@ New tabs to add:
 3. **Admin Billing + Usage Events tabs** — now that data exists, expose it.
 4. **Multi-key router** — build `AIProviderRoute` + `routeAndCallModel`, cut traffic over from direct Gateway calls, keep Gateway as one more configured route during transition rather than a hard cutover.
 5. **Admin Provider Routes + Plans tabs.**
-6. **Payment gateway wiring** (Nigeria gateway + crypto, once the PDF spec lands) — feeds `CreditTransaction.topup_*`.
+6. **Payment gateway wiring** (Moniepoint/Monnify + crypto, once the payment PDF lands) — feeds `CreditTransaction.topup_*` via webhooks: verify signature, re-query gateway for amount, idempotent by tx reference.
 7. **Diagnostics tab migration + Audit Log** — good practice, lowest urgency, do last.
 
 ## 7. Open risks worth flagging now, not after
