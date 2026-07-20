@@ -107,7 +107,19 @@ export async function getCredential(userId: string, service: string, label = 'de
     where: { userId_service_label: { userId, service, label } },
   });
   if (!row) return null;
-  return decrypt(row.encryptedValue);
+  try {
+    return decrypt(row.encryptedValue);
+  } catch (err) {
+    // FIXED (2026-07-20, same CREDENTIAL_VAULT_KEY-rotation incident as
+    // byok.ts's decryptApiKey — see resolve-model.ts's fix comment for the
+    // full story). A stale-key decrypt failure here must never throw a raw
+    // crypto error up into a tool's execute() — this is server-side-only
+    // credential injection, and inject_credential's caller (the persona)
+    // is told an unreadable credential means "not actually usable", same
+    // as it not existing at all, so it re-prompts the user to save it
+    // again instead of the whole turn crashing.
+    return null;
+  }
 }
 
 export async function deleteCredential(userId: string, service: string, label = 'default') {

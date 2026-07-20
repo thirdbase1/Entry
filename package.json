@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": "24.x"
+    "node": ">=24 <27"
   },
   "scripts": {
     "dev": "next dev apps/web",

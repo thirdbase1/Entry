@@ -71,7 +71,25 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
   }
 
   const { provider } = modelRow;
-  const apiKey = provider.encryptedApiKey ? decryptApiKey(provider.encryptedApiKey) : undefined;
+  let apiKey: string | undefined;
+  if (provider.encryptedApiKey) {
+    try {
+      apiKey = decryptApiKey(provider.encryptedApiKey);
+    } catch (err) {
+      // FIXED (2026-07-20, real incident: BYOK_ENCRYPTION_KEY got rotated
+      // in production, instantly bricking every saved BYOK provider with a
+      // raw, opaque "Unsupported state or unable to authenticate data"
+      // crypto crash on every single turn). A decrypt failure here always
+      // means the stored ciphertext can no longer be read with whatever
+      // key is currently configured — surface a clear, actionable message
+      // instead of the raw crypto internals, and never crash the route for
+      // an otherwise-recoverable per-provider problem (user just needs to
+      // re-enter the key in Settings).
+      throw new Error(
+        `Your saved API key for "${provider.label}" could not be read (likely re-encrypted with a different server key) — please re-enter it in Settings > Providers.`
+      );
+    }
+  }
 
   // Shared with the settings page's "Test connection" route
   // (build-model-client.ts) -- identical construction either way, just
