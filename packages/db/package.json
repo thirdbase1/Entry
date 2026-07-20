@@ -19,6 +19,7 @@
   "exports": {
     ".": "./src/db.ts",
     "./error-log": "./src/error-log.ts",
-    "./chat-versioning": "./src/chat-versioning.ts"
+    "./chat-versioning": "./src/chat-versioning.ts",
+    "./usage-metering": "./src/usage-metering.ts"
   }
 }

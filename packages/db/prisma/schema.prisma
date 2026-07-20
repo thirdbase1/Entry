@@ -913,3 +913,75 @@ model ChatVersionFile {
   @@index([versionId])
   @@map("chat_version_files")
 }
+
+// ============================================================
+// USAGE METERING (Phase 1 of admin.md §2, 2026-07-19)
+// ============================================================
+
+// One row per AI model call -- chat turn step, agent tool-loop step, BYOK
+// request, everything. This is the foundation everything in admin.md is a
+// view over: billing page, credit balance, router cost-awareness. Token
+// counts are captured VERBATIM from the provider's `usage` object (never
+// estimated -- see admin.md §2.1); a row with priceRateId = null means no
+// ModelPriceRate matched the model at event time, i.e. faceValueUsd is 0
+// NOT because the call was free but because it is UNPRICED -- surfaced as
+// an alarm in the admin Billing tab, never silently billed as zero.
+model UsageEvent {
+  id        String  @id @default(cuid())
+  userId    String  @map("user_id") @db.VarChar
+  chatId    String? @map("chat_id") @db.VarChar
+  // Which path served this: "direct-chat" | "eve-root" | future route ids
+  // from admin.md §4's AIProviderRoute once the router exists.
+  source    String  @db.VarChar
+  model     String  @db.VarChar
+  // "byok:<providerLabel>" for user-key calls (never burns credits,
+  // actualCostUsd/faceValueUsd both 0), "gateway" for the current default.
+  provider  String  @db.VarChar
+
+  inputTokens         Int @map("input_tokens")
+  outputTokens        Int @map("output_tokens")
+  cacheCreationTokens Int @default(0) @map("cache_creation_tokens")
+  cacheReadTokens     Int @default(0) @map("cache_read_tokens")
+
+  // Cost at official vendor list price (what a user's credits will burn,
+  // Phase 2). Decimal(12,6) -- costs are fractions of a cent per step.
+  faceValueUsd Decimal @default(0) @map("face_value_usd") @db.Decimal(12, 6)
+  // Cost at what our actual route charged us. Until the multi-key router
+  // exists there is one implicit route at multiplier 1.0, so this equals
+  // faceValueUsd; BYOK rows are 0.
+  actualCostUsd Decimal @default(0) @map("actual_cost_usd") @db.Decimal(12, 6)
+  // Which ModelPriceRate row priced this event; null = unpriced alarm.
+  priceRateId String? @map("price_rate_id")
+
+  finishReason String? @map("finish_reason") @db.VarChar
+  success      Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([userId, createdAt])
+  @@index([model, createdAt])
+  @@map("usage_events")
+}
+
+// Canonical, versioned rate table (admin.md §2.1) -- faceValueUsd is
+// computed against the rate row effective at event time, never a "current"
+// constant, so a vendor price change NEVER retroactively reprices history.
+// Rates are per MILLION tokens, matching how every vendor publishes them.
+model ModelPriceRate {
+  id            String   @id @default(cuid())
+  // Matched against UsageEvent.model with a prefix match (gateway model
+  // ids look like "anthropic/claude-sonnet-4-5"; bare ids like
+  // "claude-sonnet-4-5" must hit the same row).
+  modelPattern  String   @map("model_pattern") @db.VarChar
+  effectiveFrom DateTime @map("effective_from") @db.Timestamptz(3)
+
+  inputPerMTok      Decimal @map("input_per_mtok") @db.Decimal(10, 4)
+  outputPerMTok     Decimal @map("output_per_mtok") @db.Decimal(10, 4)
+  cacheWritePerMTok Decimal @default(0) @map("cache_write_per_mtok") @db.Decimal(10, 4)
+  cacheReadPerMTok  Decimal @default(0) @map("cache_read_per_mtok") @db.Decimal(10, 4)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([modelPattern, effectiveFrom])
+  @@map("model_price_rates")
+}

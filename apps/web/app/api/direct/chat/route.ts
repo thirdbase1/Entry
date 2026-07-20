@@ -89,6 +89,7 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
 import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
+import { recordUsageEvent } from '@entry/db/usage-metering';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
@@ -665,6 +666,41 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         usage,
         warnings,
       });
+
+      // USAGE METERING (Phase 1 of admin.md §2, 2026-07-19): one
+      // UsageEvent row per completed step, captured verbatim from the
+      // provider's own usage object -- never estimated. Metered per-STEP
+      // (not once in onFinish) deliberately: a turn hard-killed at the
+      // 300s maxDuration ceiling never reaches onFinish, but its already-
+      // completed steps DID consume tokens -- admin.md flags exactly this
+      // as "the most common way a metering system quietly under-bills".
+      // waitUntil (not await): recordUsageEvent never throws, but its DB
+      // write must not add latency to the hot streaming path either.
+      // Usage shape verified against THIS repo's installed ai package
+      // (LanguageModelUsage): cache reads/writes live in
+      // usage.inputTokenDetails, not in providerMetadata.
+      if (usage && (usage.inputTokens != null || usage.outputTokens != null)) {
+        waitUntil(
+          recordUsageEvent({
+            userId,
+            chatId,
+            source: 'direct-chat',
+            model: modelId,
+            provider: byokModelId ? `byok:${providerLabel}` : 'gateway',
+            usage: {
+              // inputTokens on LanguageModelUsage is the TOTAL (cached
+              // included) -- price only the non-cached portion at the
+              // input rate, or cache reads double-bill at full price.
+              inputTokens: usage.inputTokenDetails?.noCacheTokens ?? usage.inputTokens ?? 0,
+              outputTokens: usage.outputTokens ?? 0,
+              cacheCreationTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+              cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
+            },
+            finishReason,
+            success: toolErrors.length === 0,
+          })
+        );
+      }
       // A step that finished for any reason OTHER than actually making
       // more tool calls or a normal stop, OR a tool call that came back
       // as an actual error, is exactly the "stopped after one tool call"
