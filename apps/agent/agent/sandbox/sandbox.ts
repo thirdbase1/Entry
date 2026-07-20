@@ -104,7 +104,7 @@ export default defineSandbox({
         'libpango-1.0-0 libcairo2 fonts-liberation libappindicator3-1 xdg-utils ' +
         'libgtk-3-0 ca-certificates',
     });
-    await sandbox.run({ command: 'npm install -g agent-browser' });
+    await sandbox.run({ command: 'sudo npm install -g agent-browser' });
     const browserInstall = await sandbox.run({ command: 'agent-browser install' });
     if (browserInstall.exitCode !== 0) {
       // Don't let a flaky download silently poison the whole cached
@@ -161,6 +161,6 @@ export default defineSandbox({
         'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 ' +
         '&& chmod +x /usr/local/bin/cloudflared',
     });
-    await sandbox.run({ command: 'npm install -g localtunnel' });
+    await sandbox.run({ command: 'sudo npm install -g localtunnel' });
   },
 });
