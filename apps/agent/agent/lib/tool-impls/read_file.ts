@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { sandboxReadFile } from './sandbox-file-io.js';
 
 /**
@@ -29,6 +30,12 @@ import { sandboxReadFile } from './sandbox-file-io.js';
  * inspect part of a large file can ask for just that slice. Total
  * returned content is additionally hard-capped (not just line-sliced) so
  * a request for a huge range of a huge file can't still blow the ceiling.
+ *
+ * ADVANCED PASS (2026-07-20): `encoding: 'base64'` reads a file's raw
+ * bytes back out as base64 instead of running them through `cat` +
+ * JS-string decoding (which mangles anything that isn't valid UTF-8 --
+ * images, zips, fonts, etc). startLine/endLine only make sense for text,
+ * so they're ignored (and noted as ignored) when encoding is 'base64'.
  */
 const MAX_CONTENT_CHARS = 100_000;
 
@@ -36,15 +43,30 @@ export const readFileTool = {
   description:
     "Read a file's content from the sandbox's project directory. Returns the full file by default; pass " +
     'startLine/endLine (1-indexed, inclusive) to read only part of a large file. Use this before `edit_file` ' +
-    'so you have the exact existing text to match against.',
+    "so you have the exact existing text to match against. Set encoding: 'base64' to read a binary file " +
+    '(image, zip, etc.) without corrupting it -- startLine/endLine are ignored in that mode.',
   inputSchema: z.object({
     path: z.string().describe('Relative path (from the project root) of the file to read.'),
-    startLine: z.number().int().positive().optional().describe('First line to include (1-indexed). Omit to start from the beginning.'),
-    endLine: z.number().int().positive().optional().describe('Last line to include (1-indexed, inclusive). Omit to read to the end.'),
+    startLine: z.number().int().positive().optional().describe('First line to include (1-indexed). Omit to start from the beginning. Ignored if encoding is base64.'),
+    endLine: z.number().int().positive().optional().describe('Last line to include (1-indexed, inclusive). Omit to read to the end. Ignored if encoding is base64.'),
+    encoding: z.enum(['utf8', 'base64']).optional().describe("'utf8' (default) for text files. 'base64' for binary files."),
   }),
-  async execute({ path, startLine, endLine }: { path: string; startLine?: number; endLine?: number }, ctx: ToolExecCtx) {
-    const result = await sandboxReadFile(ctx, path);
+  async execute(
+    { path, startLine, endLine, encoding }: { path: string; startLine?: number; endLine?: number; encoding?: 'utf8' | 'base64' },
+    ctx: ToolExecCtx,
+  ) {
+    const result = await sandboxReadFile(ctx, path, { encoding });
     if (!result.ok) return { ok: false, error: result.error };
+
+    if (encoding === 'base64') {
+      let content = result.content;
+      let truncated = false;
+      if (content.length > MAX_CONTENT_CHARS) {
+        content = content.slice(0, MAX_CONTENT_CHARS);
+        truncated = true;
+      }
+      return { ok: true, path, encoding: 'base64' as const, content, truncated };
+    }
 
     let content = result.content;
     const lines = content.split('\n');
@@ -70,3 +92,4 @@ export const readFileTool = {
 };
 
 readFileTool.execute = safeExecute('read_file', readFileTool.execute) as typeof readFileTool.execute;
+Object.assign(readFileTool, withAgentTimeout('read_file', readFileTool));

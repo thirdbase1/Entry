@@ -141,7 +141,23 @@ function betterAuthSession(): AuthFn<Request> {
 
 const secret = process.env.EVE_INTERNAL_JWT_SECRET;
 
+/**
+ * CORS -- Pxxl migration (PXXL_MIGRATION.md). Only actually matters once
+ * this agent is deployed standalone (Pxxl) and the browser calls it
+ * cross-origin instead of same-origin via `withEve()`; harmless no-op
+ * shape for the still-live in-process Vercel mount (same-origin calls
+ * never trigger CORS regardless). Narrowed to the real production origin
+ * (plus whatever ENTRY_WEB_ORIGIN is set to, e.g. a preview URL) rather
+ * than `cors: true`'s permissive any-origin default.
+ */
+const webOrigin = process.env.ENTRY_WEB_ORIGIN ?? 'https://entry.oneshotsx.cv';
+
 export default eveChannel({
+  cors: {
+    origin: webOrigin,
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['authorization', 'content-type'],
+  },
   auth: [
     betterAuthSession(),
     ...(secret

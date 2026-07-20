@@ -4,6 +4,7 @@ import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { DEFAULT_TOOL_TIMEOUT_MS } from './with-agent-timeout.js';
 import { withTransientRetry } from '../transient-provider-error.js';
 
 function stripCodeFence(raw: string): string {
@@ -16,15 +17,22 @@ function stripCodeFence(raw: string): string {
   return stripped;
 }
 
-// See with-timeout-signal.ts / code_artifact.ts's identical constant.
-const TIMEOUT_MS = 75_000;
+// BUMPED 75s -> 600s/10min default, model-overridable (2026-07-20,
+// "bump the limit of everything up to 10 minutes by default" -- moving
+// off Vercel serverless onto the standalone worker removes the outer
+// 300s maxDuration this used to leave headroom under). `timeout_seconds`
+// on the input below lets the model ask for more/less per call.
+const TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
 
 export const pythonCoding = {
   description: 'Generate Python code that satisfies a natural-language requirements description.',
   inputSchema: z.object({
     requirements: z.string().describe('The requirements to generate python code for'),
+    timeout_seconds: z.number().int().positive().max(3600).optional()
+      .describe('Optional override for how long this generation may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),
-  async execute({ requirements }: { requirements: string }, ctx?: ToolExecCtx) {
+  async execute({ requirements, timeout_seconds }: { requirements: string; timeout_seconds?: number }, ctx?: ToolExecCtx) {
+    const effectiveTimeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : TIMEOUT_MS;
     // FIXED (2026-07-15, real bug: "AI just stays stuck working on a long
     // file, nothing happens") — this used to be `generateObject` against a
     // `{ code: string, explanation?: string }` zod schema. Structured
@@ -70,7 +78,7 @@ export const pythonCoding = {
     // timeout window, and `truncated: finishReason === 'length'` in the
     // return value.
     const { text, finishReason } = await withTransientRetry(async () => {
-      const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'python_coding');
+      const t = withTimeoutSignal(ctx?.abortSignal, effectiveTimeoutMs, 'python_coding');
       try {
         return await generateText({
           model: await model(undefined, ctx?.byokModel),

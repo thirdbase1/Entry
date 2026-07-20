@@ -91,7 +91,19 @@ export async function resolveUserCustomProviderModel(
     : await prisma.userModelProviderModel.findFirst({ where: { providerId: provider.id, isEnabled: true }, orderBy: { createdAt: 'asc' } });
   if (!modelRow) return null;
 
-  const apiKey = provider.encryptedApiKey ? decryptApiKey(provider.encryptedApiKey) : undefined;
+  let apiKey: string | undefined;
+  if (provider.encryptedApiKey) {
+    try {
+      apiKey = decryptApiKey(provider.encryptedApiKey);
+    } catch (err) {
+      // See resolve-model.ts's identical 2026-07-20 fix comment — same
+      // BYOK_ENCRYPTION_KEY-rotation incident, same fix (clear message,
+      // never a raw crypto crash) for the sub-agent delegate path.
+      throw new Error(
+        `Your saved API key for "${provider.label}" could not be read (likely re-encrypted with a different server key) — please re-enter it in Settings > Providers.`
+      );
+    }
+  }
   const model = buildCustomModelClient(
     { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl, apiKey },
     modelRow.modelId

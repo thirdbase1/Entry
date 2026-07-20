@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { listCredentials } from '../credential-vault.js';
 
 /**
@@ -23,3 +24,4 @@ export const listCredentialsTool = {
 };
 
 listCredentialsTool.execute = safeExecute('list_credentials', listCredentialsTool.execute) as typeof listCredentialsTool.execute;
+Object.assign(listCredentialsTool, withAgentTimeout('list_credentials', listCredentialsTool));

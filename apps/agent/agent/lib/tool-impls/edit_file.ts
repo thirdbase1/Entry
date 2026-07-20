@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { sandboxReadFile, sandboxWriteFile } from './sandbox-file-io.js';
 
 /**
@@ -62,3 +63,4 @@ export const editFileTool = {
 };
 
 editFileTool.execute = safeExecute('edit_file', editFileTool.execute) as typeof editFileTool.execute;
+Object.assign(editFileTool, withAgentTimeout('edit_file', editFileTool));

@@ -6,6 +6,7 @@ import { put } from '@vercel/blob';
 import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import {
   createOrDispatchBrowserUseTask,
   getBrowserUseSession,
@@ -1383,3 +1384,4 @@ export const browserUse = {
 };
 
 browserUse.execute = safeExecute('browser_use', browserUse.execute) as typeof browserUse.execute;
+Object.assign(browserUse, withAgentTimeout('browser_use', browserUse));

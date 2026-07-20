@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { getWorkingMemory, setWorkingMemory, WORKING_MEMORY_MAX_LEN } from '../working-memory.js';
 
 /**
@@ -50,3 +51,4 @@ export const rememberAboutUserTool = {
 };
 
 rememberAboutUserTool.execute = safeExecute('remember_about_user', rememberAboutUserTool.execute) as typeof rememberAboutUserTool.execute;
+Object.assign(rememberAboutUserTool, withAgentTimeout('remember_about_user', rememberAboutUserTool));

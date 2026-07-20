@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 /**
  * "Let the model create new skills by itself." Deliberately NOT arbitrary
@@ -46,3 +47,4 @@ export const createSkillTool = {
 };
 
 createSkillTool.execute = safeExecute('create_skill', createSkillTool.execute) as typeof createSkillTool.execute;
+Object.assign(createSkillTool, withAgentTimeout('create_skill', createSkillTool));

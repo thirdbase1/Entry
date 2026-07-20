@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { saveCredential } from '../credential-vault.js';
 
 /**
@@ -39,3 +40,4 @@ export const saveCredentialTool = {
 };
 
 saveCredentialTool.execute = safeExecute('save_credential', saveCredentialTool.execute) as typeof saveCredentialTool.execute;
+Object.assign(saveCredentialTool, withAgentTimeout('save_credential', saveCredentialTool));

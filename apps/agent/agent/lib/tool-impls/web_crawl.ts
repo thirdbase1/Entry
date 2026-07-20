@@ -1,6 +1,7 @@
 import Parallel from 'parallel-web';
 import { z } from 'zod';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 let client: Parallel | null = null;
 function getClient(): Parallel {
@@ -39,3 +40,4 @@ export const webCrawl = {
 };
 
 webCrawl.execute = safeExecute('web_crawl', webCrawl.execute) as typeof webCrawl.execute;
+Object.assign(webCrawl, withAgentTimeout('web_crawl', webCrawl));

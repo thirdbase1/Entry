@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 /**
  * Powers the chat header's "Files" tab (2026-07-13) — the eve-default-
@@ -89,3 +90,4 @@ export const listFilesTool = {
 };
 
 listFilesTool.execute = safeExecute('list_files', listFilesTool.execute) as typeof listFilesTool.execute;
+Object.assign(listFilesTool, withAgentTimeout('list_files', listFilesTool));

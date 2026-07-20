@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 /**
  * "A browser preview powered by the sandbox of each chat" — the
@@ -188,3 +189,4 @@ export const getPreviewUrlTool = {
 };
 
 getPreviewUrlTool.execute = safeExecute('get_preview_url', getPreviewUrlTool.execute) as typeof getPreviewUrlTool.execute;
+Object.assign(getPreviewUrlTool, withAgentTimeout('get_preview_url', getPreviewUrlTool));

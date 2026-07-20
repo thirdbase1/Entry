@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { stopBrowserUseSession, type BrowserUseSlot } from '../browser-use-cloud-client.js';
 import { stopSteelSession } from '../steel-client.js';
 
@@ -69,3 +70,4 @@ export const browserStop = {
 };
 
 browserStop.execute = safeExecute('browser_stop', browserStop.execute) as typeof browserStop.execute;
+Object.assign(browserStop, withAgentTimeout('browser_stop', browserStop));

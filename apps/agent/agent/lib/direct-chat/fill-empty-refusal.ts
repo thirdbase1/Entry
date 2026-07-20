@@ -1,0 +1,70 @@
+import type { UIMessage } from 'ai';
+
+/**
+ * Confirmed real bug (2026-07-17, from production logs): a turn can finish
+ * with `finishReason: 'content-filter'` (`rawFinishReason: 'refusal'` for
+ * Anthropic) and ZERO text, ZERO tool calls — the model declined to answer
+ * at all, on step 0, before producing anything. The AI SDK does not treat
+ * this as an "error" (no exception is thrown, `onError` never fires), so
+ * without this fix the assistant's message in both the live stream AND the
+ * persisted chat history ends up with an empty `parts` array. From the
+ * user's side that's total silence: the "Thinking…" indicator disappears
+ * (turn is no longer busy) and nothing ever appears in its place — no
+ * error, no explanation, not even an empty bubble to look at.
+ *
+ * This gives the user an honest, visible reason instead of dead air.
+ * Applied in two independent places in route.ts (both use this same text
+ * so a page refresh shows the identical message the user already saw
+ * live): (1) wrapping the live UI message stream, appended as real
+ * text-start/text-delta/text-end chunks only if nothing else was ever
+ * emitted; (2) in the persistence `onFinish`, appended as a plain
+ * TextUIPart on the last assistant message before saving, under the same
+ * "nothing else is there" condition.
+ */
+export function describeRefusal(finishReason: string | undefined, rawFinishReason: string | undefined): string {
+  const isContentFilter = finishReason === 'content-filter' || rawFinishReason === 'refusal';
+  if (isContentFilter) {
+    return (
+      "The model declined to respond to this message (content filter / refusal) and returned no output at all. " +
+      "This is coming from the provider's own safety filtering, not an app error — try rephrasing your message, " +
+      "or switch to a different model if this keeps happening."
+    );
+  }
+  const reasonLabel = rawFinishReason || finishReason;
+  return (
+    `The model finished this turn without returning any text or taking any action${reasonLabel ? ` (reason: ${reasonLabel})` : ''}. ` +
+    'Try rephrasing your message, or try again — this can happen from a provider-side hiccup.'
+  );
+}
+
+function hasRealContent(message: UIMessage): boolean {
+  if (!Array.isArray(message.parts)) return false;
+  return message.parts.some((part: any) => {
+    if (part?.type === 'text') return typeof part.text === 'string' && part.text.trim().length > 0;
+    if (typeof part?.type === 'string' && (part.type.startsWith('tool-') || part.type === 'dynamic-tool')) return true;
+    return false;
+  });
+}
+
+/**
+ * Mutates-in-effect (returns a new array, doesn't touch the input) a
+ * persisted UIMessage[] history: if the LAST message is an assistant
+ * message with no real content at all, appends a synthetic text part
+ * explaining why, using the same wording the live stream already showed.
+ */
+export function fillEmptyAssistantReply(
+  messages: UIMessage[],
+  finishReason: string | undefined,
+  rawFinishReason: string | undefined
+): UIMessage[] {
+  if (messages.length === 0) return messages;
+  const last = messages[messages.length - 1];
+  if (last.role !== 'assistant' || hasRealContent(last)) return messages;
+
+  const fallbackText = describeRefusal(finishReason, rawFinishReason);
+  const patched: UIMessage = {
+    ...last,
+    parts: [...(Array.isArray(last.parts) ? last.parts : []), { type: 'text', text: fallbackText, state: 'done' }],
+  };
+  return [...messages.slice(0, -1), patched];
+}

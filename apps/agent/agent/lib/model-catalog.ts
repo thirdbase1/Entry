@@ -35,17 +35,50 @@ interface CatalogResponse {
 let cached: { data: CatalogResponse; fetchedAt: number } | null = null;
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 
+// FIXED (2026-07-20): every agent.ts calls resolveModelIdForProvider at
+// MODULE-EVAL time via a top-level await (see file header), which means
+// this fetch has to finish before the app can even bind its HTTP port on
+// ANY host. Confirmed on Pxxl this fetch either hangs or is slow enough
+// from that runtime's egress path to blow well past the platform's proxy
+// route promotion window (server logs zero application stdout at all --
+// not even the framework's own startup banner -- for 70+s after container
+// start, then Pxxl gives up with "application route did not become ready
+// before timeout"). A single external network call must never be able to
+// block process startup indefinitely on ANY host, so this is now
+// hard-bounded with an abort timeout and a static per-provider fallback --
+// module eval always completes in well under CATALOG_FETCH_TIMEOUT_MS
+// either way.
+const CATALOG_FETCH_TIMEOUT_MS = 4000;
+
+// Static, conservative fallback used only if the live catalog fetch times
+// out or errors -- keeps app startup non-blocking on any host. Refreshed
+// opportunistically: every successful resolveModelIdForProvider call after
+// startup still re-fetches the live catalog (subject to CATALOG_TTL_MS) and
+// will prefer a live "fast"-tagged result over this static list the moment
+// the network allows it.
+const STATIC_FALLBACK_MODEL_ID: Record<string, string> = {
+  anthropic: 'anthropic/claude-sonnet-4.5',
+  openai: 'openai/gpt-5',
+  google: 'google/gemini-2.5-pro',
+};
+
 async function fetchCatalog(): Promise<CatalogResponse> {
   if (cached && Date.now() - cached.fetchedAt < CATALOG_TTL_MS) {
     return cached.data;
   }
-  const res = await fetch('https://ai-gateway.vercel.sh/v1/models/catalog');
-  if (!res.ok) {
-    throw new Error(`AI Gateway model catalog request failed: HTTP ${res.status} ${res.statusText}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CATALOG_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch('https://ai-gateway.vercel.sh/v1/models/catalog', { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`AI Gateway model catalog request failed: HTTP ${res.status} ${res.statusText}`);
+    }
+    const data = (await res.json()) as CatalogResponse;
+    cached = { data, fetchedAt: Date.now() };
+    return data;
+  } finally {
+    clearTimeout(timer);
   }
-  const data = (await res.json()) as CatalogResponse;
-  cached = { data, fetchedAt: Date.now() };
-  return data;
 }
 
 function bestContextWindow(model: CatalogModel): number {
@@ -79,11 +112,27 @@ function hasTag(model: CatalogModel, tag: string): boolean {
  * where the catalog actually offers one.
  */
 export async function resolveModelIdForProvider(provider: string): Promise<string> {
-  const { models } = await fetchCatalog();
+  let models: CatalogModel[];
+  try {
+    ({ models } = await fetchCatalog());
+  } catch (err) {
+    // Catalog unreachable/timed out (see CATALOG_FETCH_TIMEOUT_MS above) --
+    // never let this block or crash startup. Fall back to a static known-good
+    // id for providers we have one for; only throw for providers with no
+    // static fallback (e.g. an exotic provider a user explicitly picked).
+    const fallback = STATIC_FALLBACK_MODEL_ID[provider];
+    if (fallback) {
+      console.error(`[model-catalog] live catalog fetch failed (${(err as Error)?.message ?? err}); using static fallback ${fallback} for provider "${provider}"`);
+      return fallback;
+    }
+    throw err;
+  }
   const candidates = models.filter(
     m => m.slug.startsWith(`${provider}/`) && m.providers.some(p => (p.contextWindowTokens ?? 0) > 0)
   );
   if (candidates.length === 0) {
+    const fallback = STATIC_FALLBACK_MODEL_ID[provider];
+    if (fallback) return fallback;
     throw new Error(`No AI Gateway models found for provider "${provider}" in the live catalog.`);
   }
   const rank = (a: CatalogModel, b: CatalogModel) => bestContextWindow(b) - bestContextWindow(a) || b.slug.localeCompare(a.slug);

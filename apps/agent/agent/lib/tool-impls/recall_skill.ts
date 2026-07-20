@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 /** Fetches the full instructions for one previously self-authored skill
  *  by name (from list_skills). */
@@ -21,3 +22,4 @@ export const recallSkillTool = {
 };
 
 recallSkillTool.execute = safeExecute('recall_skill', recallSkillTool.execute) as typeof recallSkillTool.execute;
+Object.assign(recallSkillTool, withAgentTimeout('recall_skill', recallSkillTool));

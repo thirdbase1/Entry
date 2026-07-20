@@ -4,6 +4,7 @@ import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { DEFAULT_TOOL_TIMEOUT_MS } from './with-agent-timeout.js';
 import { withPeriodicVersionCapture } from '@entry/db/chat-versioning';
 
 /**
@@ -74,20 +75,33 @@ async function maybeRememberServeCommand(chatId: string, command: string): Promi
  * the pattern this codebase already uses elsewhere) rather than pushing
  * this number any closer to 300s.
  */
-const TIMEOUT_MS = 240_000;
+// BUMPED again 240s -> 600s/10min default, model-overridable (2026-07-20,
+// "bump the limit of everything up to 10 minutes by default", moving off
+// Vercel serverless onto the standalone worker -- the 240s ceiling above
+// existed only to leave a buffer under Vercel Hobby's 300s maxDuration,
+// which doesn't apply to a persistent worker process. `timeout_seconds`
+// on the input below lets the model ask for more or less per call.
+const TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
 
 export const bash = {
   description:
     'Execute a shell command in a persistent sandbox (same one browser_use runs in). ' +
     'Use this to actually run code — e.g. `python3 script.py` after drafting it with ' +
     'python_coding, install packages with pip3/npm, inspect files, run curl, etc. ' +
-    'Returns real stdout/stderr/exitCode from actual execution. Commands have a 240s ceiling — ' +
+    'Returns real stdout/stderr/exitCode from actual execution. Commands have a 10-minute default ceiling (override with `timeout_seconds`) — ' +
     'for anything longer-running (dev servers, long builds), background it with `nohup cmd > /tmp/out.log 2>&1 &` ' +
     'instead of running it directly.',
   inputSchema: z.object({
     command: z.string().describe('The shell command to execute'),
+    timeout_seconds: z
+      .number()
+      .int()
+      .positive()
+      .max(3600)
+      .optional()
+      .describe('Optional override for how long this command may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),
-  async execute({ command }: { command: string }, ctx: ToolExecCtx) {
+  async execute({ command, timeout_seconds }: { command: string; timeout_seconds?: number }, ctx: ToolExecCtx) {
     // SECURITY (2026-07-15): this used to auto-`source ~/.entry_env`
     // before every command, because inject_credential used to write
     // decrypted secrets there for later commands like this one to pick
@@ -98,7 +112,8 @@ export const bash = {
     // call to source, intentionally. Do not reintroduce this pattern.
     const sandbox = await ctx.getSandbox();
     void maybeRememberServeCommand(ctx.session.id, command);
-    const t = withTimeoutSignal(ctx.abortSignal, TIMEOUT_MS, 'bash');
+    const effectiveTimeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : TIMEOUT_MS;
+    const t = withTimeoutSignal(ctx.abortSignal, effectiveTimeoutMs, 'bash');
     try {
       // Periodic in-flight version capture (2026-07-18, "improve sandbox
       // saving x6") -- see withPeriodicVersionCapture's own doc comment.

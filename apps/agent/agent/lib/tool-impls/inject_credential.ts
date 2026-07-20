@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { resolveServiceCredential } from '../connect-service-tokens.js';
 
 /**
@@ -198,3 +199,4 @@ export const injectCredentialTool = {
 };
 
 injectCredentialTool.execute = safeExecute('inject_credential', injectCredentialTool.execute) as typeof injectCredentialTool.execute;
+Object.assign(injectCredentialTool, withAgentTimeout('inject_credential', injectCredentialTool));

@@ -17,6 +17,7 @@ import { browserStop } from './browser_stop.js';
 import { safeExecute } from './safe-execute.js';
 import { withTransientRetry } from '../transient-provider-error.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { DEFAULT_TOOL_TIMEOUT_MS } from './with-agent-timeout.js';
 import type { ToolExecCtx } from './types.js';
 
 /**
@@ -139,6 +140,16 @@ const AgentDelegateInputSchema = z.object({
         'several sources and cross-referencing them, iterative drafting — where 15 steps of tool calls + reasoning realistically will not be enough. ' +
         "Leave it at the default for anything bounded/simple; a bigger budget just means a truncated failure takes longer to surface if it WAS simple."
     ),
+  timeout_seconds: z
+    .number()
+    .int()
+    .positive()
+    .max(3600)
+    .optional()
+    .describe(
+      'Optional explicit wall-clock ceiling for this whole delegated subtask, in seconds -- overrides the default budget-derived timeout ' +
+        '(which scales with maxSteps, up to 600s/10min) when given. Set this directly for a subtask you know needs a specific amount of time.'
+    ),
 });
 
 const AgentDelegateResultSchema = z.object({
@@ -213,7 +224,13 @@ function isTruncatedFinish(steps: { finishReason?: string }[], maxSteps: number)
  */
 const BASE_TIMEOUT_MS = 90_000;
 const PER_EXTRA_STEP_MS = 8_000;
-const MAX_TIMEOUT_MS = 280_000;
+// BUMPED 280s -> 600s/10min cap (2026-07-20, "bump the limit of everything
+// up to 10 minutes by default" -- the 280s cap existed to leave headroom
+// under Vercel Hobby's 300s serverless maxDuration, which doesn't apply to
+// the standalone worker). `timeout_seconds` on the tool's input now also
+// lets the model set an explicit ceiling directly, bypassing this
+// budget-derived formula entirely when given.
+const MAX_TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
 const DEFAULT_STEP_BUDGET = 15;
 
 function timeoutForBudget(budget: number): number {
@@ -317,9 +334,10 @@ async function runDelegatedTask(
   model: LanguageModel,
   message: string,
   budget: number,
-  outerCtx: ToolExecCtx | undefined
+  outerCtx: ToolExecCtx | undefined,
+  explicitTimeoutMs?: number
 ): Promise<{ text: string; steps: { finishReason?: string }[] }> {
-  const t = withTimeoutSignal(outerCtx?.abortSignal, timeoutForBudget(budget), 'agent');
+  const t = withTimeoutSignal(outerCtx?.abortSignal, explicitTimeoutMs ?? timeoutForBudget(budget), 'agent');
   // Same ctx nested tools bind to, except abortSignal is swapped for `t.signal`
   // -- so if THIS delegation's own timeout fires (not just the outer turn's
   // cancellation), any in-flight bash/browser/file call the sub-agent is
@@ -358,12 +376,13 @@ export const agentDelegate = {
   inputSchema: AgentDelegateInputSchema,
   outputSchema: AgentDelegateResultSchema,
   async execute(
-    { message, provider, model, maxSteps }: { message: string; provider?: string; model?: string; maxSteps?: number },
+    { message, provider, model, maxSteps, timeout_seconds }: { message: string; provider?: string; model?: string; maxSteps?: number; timeout_seconds?: number },
     ctx?: ToolExecCtx
   ) {
     let note: string | undefined;
     let modelId: string;
     const budget = maxSteps ?? 15;
+    const explicitTimeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : undefined;
     const userId = ctx?.session?.auth?.current?.principalId;
 
     // ADDED (2026-07-18, "it can also specify... provider aerolink, model
@@ -381,7 +400,7 @@ export const agentDelegate = {
     if (provider && userId && !catalogMenu.providers.includes(provider)) {
       const custom = await resolveUserCustomProviderModel(userId, provider, model).catch(() => null);
       if (custom) {
-        const { text, steps } = await runDelegatedTask(custom.model, message, budget, ctx);
+        const { text, steps } = await runDelegatedTask(custom.model, message, budget, ctx, explicitTimeoutMs);
         const truncated = isTruncatedFinish(steps, budget);
         return {
           result: text,
@@ -414,7 +433,7 @@ export const agentDelegate = {
             ? ` (If you meant one of your own saved providers, your options are: ${custom.join(', ')}.)`
             : '');
       }
-      const { text, steps } = await runDelegatedTask(ctx.byokModel, message, budget, ctx);
+      const { text, steps } = await runDelegatedTask(ctx.byokModel, message, budget, ctx, explicitTimeoutMs);
       const truncated = isTruncatedFinish(steps, budget);
       return {
         result: text,
@@ -478,7 +497,7 @@ export const agentDelegate = {
       );
     }
 
-    const { text, steps } = await runDelegatedTask(gateway(modelId), message, budget, ctx);
+    const { text, steps } = await runDelegatedTask(gateway(modelId), message, budget, ctx, explicitTimeoutMs);
 
     const truncated = isTruncatedFinish(steps, budget);
     return {

@@ -1,0 +1,56 @@
+# Render Blueprint for the Entry agent worker (apps/agent).
+#
+# Why Render instead of / alongside Pxxl: Pxxl's rollover/proxy-route
+# promotion has a platform bug that reliably fails any redeploy once a
+# project already has a previous deployment live (see pxxl.deployment.md
+# in this repo for the full writeup) -- reproduced 8 times across 2
+# projects. Render deploys straight from this GitHub repo (no CLI
+# zip-upload step, no local .pxxlignore to manage/reset), so there's no
+# equivalent of that failure mode to hit.
+#
+# To use: in the Render dashboard, "New +" -> "Blueprint", connect this
+# GitHub repo, Render will read this file automatically.
+#
+# Free tier note: free web services spin down after 15 minutes with no
+# inbound traffic, and take ~30-60s to cold-start on the next request.
+# A keep-alive ping (every ~10 min) prevents the spin-down entirely --
+# ask the agent to set this up as a scheduled workflow once the service
+# has a live URL. For a worker meant to be always-instantly-available in
+# production, upgrade `plan` below to `starter` ($7/mo) instead -- that
+# removes the sleep behavior entirely rather than working around it.
+services:
+  - type: web
+    name: entry-agent-worker
+    runtime: node
+    plan: free
+    region: oregon
+    branch: pxxl-migration-worker-standalone
+    rootDir: .
+    buildCommand: npm install && npm run build --workspace=apps/agent
+    startCommand: npm run start --workspace=apps/agent -- --host 0.0.0.0
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 24.15.0
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_UNPOOLED
+        sync: false
+      - key: CREDENTIAL_VAULT_KEY
+        sync: false
+      - key: BYOK_ENCRYPTION_KEY
+        sync: false
+      - key: EVE_INTERNAL_JWT_SECRET
+        sync: false
+      - key: BLOB_READ_WRITE_TOKEN
+        sync: false
+      - key: ADMIN_DEBUG_TOKEN
+        sync: false
+      - key: WORKFLOW_TARGET_WORLD
+        value: "@workflow/world-postgres"
+      - key: WORKFLOW_POSTGRES_JOB_PREFIX
+        value: entry-agent-render
+      - key: ENTRY_WEB_ORIGIN
+        value: https://entry.oneshotsx.cv
