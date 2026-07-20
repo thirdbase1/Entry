@@ -27,3 +27,5 @@ apps/agent/.output/
 .vercel/output/
 apps/web/.next/
 admin_sketch.png
+pxxl.env
+.env.production.pull

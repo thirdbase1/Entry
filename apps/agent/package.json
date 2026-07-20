@@ -40,7 +40,7 @@
     "ai": "^7.0.0"
   },
   "engines": {
-    "node": "24.x"
+    "node": ">=24 <27"
   },
   "exports": {
     "./tool-impls/*": "./agent/lib/tool-impls/*.ts",
