@@ -82,6 +82,7 @@ import {
   convertToModelMessages,
   smoothStream,
   createUIMessageStreamResponse,
+  InvalidToolInputError,
   type UIMessage,
   type UIMessageChunk,
 } from 'ai';
@@ -623,10 +624,44 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // genuinely different tool (e.g. does not try to guess `Read` means
     // `bash` or `list_files`) -- returns null (no repair, original error
     // surfaces normally) whenever there's no case-insensitive match.
-    repairToolCall: async ({ toolCall, tools }) => {
+    repairToolCall: async ({ toolCall, tools, error }) => {
       const realName = Object.keys(tools).find(name => name.toLowerCase() === toolCall.toolName.toLowerCase());
-      if (realName === undefined || realName === toolCall.toolName) return null;
-      return { ...toolCall, toolName: realName };
+      if (realName !== undefined && realName !== toolCall.toolName) {
+        return { ...toolCall, toolName: realName };
+      }
+      // ADDED (2026-07-20, real bug reported live: write_file threw a raw
+      // Zod "expected: string, received undefined, path: ['path']" straight
+      // to the user). Root cause: models -- including this one, apparently
+      // cross-contaminated by the very common `file_path` tool-arg
+      // convention used elsewhere (this exact repo's OWN sandbox exposes a
+      // DIFFERENT platform's tool as `file_path`, and plenty of training
+      // data does too) -- sometimes call write_file/read_file/append_file/
+      // edit_file with `file_path`/`filePath`/`filename`/`fileName` instead
+      // of the real, required `path` key. That's an InvalidToolInputError
+      // (schema validation failure on otherwise well-formed JSON), not a
+      // NoSuchToolError, so it needs its own repair branch: parse the raw
+      // input, and if `path` is missing but exactly one known alias is
+      // present, rename it and let the SDK re-validate. Never invents a
+      // value that wasn't in the original call -- returns null (original
+      // error surfaces normally) whenever there's no such alias to rescue.
+      const PATH_ALIASING_TOOLS = new Set(['write_file', 'read_file', 'append_file', 'edit_file']);
+      const PATH_ALIASES = ['file_path', 'filePath', 'filename', 'fileName', 'file'];
+      if (InvalidToolInputError.isInstance(error) && PATH_ALIASING_TOOLS.has(toolCall.toolName)) {
+        try {
+          const parsed = JSON.parse(error.toolInput) as Record<string, unknown>;
+          if (typeof parsed.path !== 'string') {
+            const aliasKey = PATH_ALIASES.find(key => typeof parsed[key] === 'string');
+            if (aliasKey !== undefined) {
+              const { [aliasKey]: aliasValue, ...rest } = parsed;
+              const repaired = { ...rest, path: aliasValue };
+              return { ...toolCall, input: JSON.stringify(repaired) };
+            }
+          }
+        } catch {
+          // Not parseable JSON -- fall through to no-repair below.
+        }
+      }
+      return null;
     },
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
