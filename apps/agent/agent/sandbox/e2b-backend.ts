@@ -406,6 +406,18 @@ export function e2b(options: E2BBackendOptions = {}): SandboxBackend {
       // cloned from the resulting snapshot.
       const sandbox = await withRetry('Sandbox.create', () => E2BSandbox.create(BASE_TEMPLATE, { apiKey, timeoutMs: options.timeoutMs ?? 5 * 60 * 1000, lifecycle: SANDBOX_LIFECYCLE }));
       try {
+        // FIXED (2026-07-20): the `entry-agent-base` template's actual root fs has no
+        // /workspace dir baked in (confirmed live via E2B API: only /code and /home/user
+        // exist out of the box). `resolvePath()` / every default `cwd` in this file assume
+        // /workspace exists, but that was previously only true by accident -- whenever
+        // `input.seedFiles` was non-empty, `sandbox.files.write()`'s implicit `mkdir -p`
+        // on the parent path created it as a side effect before `bootstrap()` ran. If a
+        // caller ever prewarms with zero seed files, the very first bootstrap command
+        // (cwd defaulting to /workspace) hard-fails with
+        // "[invalid_argument] cwd '/workspace' does not exist" before anything else runs.
+        // Explicitly ensuring the dir exists up front removes that ordering dependency
+        // entirely, for every future template/config combination, not just this one.
+        await withRetry('mkdir /workspace', () => sandbox.commands.run('sudo mkdir -p /workspace && sudo chown "$(whoami)":"$(whoami)" /workspace', { cwd: '/' }));
         for (const seed of input.seedFiles) {
           const data = typeof seed.content === 'string' ? seed.content : toArrayBuffer(seed.content);
           await withRetry('files.write (seed)', () => sandbox.files.write(resolvePath(seed.path), data));
