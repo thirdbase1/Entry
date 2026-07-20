@@ -245,14 +245,17 @@ function DirectChatSession({
       // immediate in-chat card would be delayed to next reload.
       const activeId = sessionId ?? chat.id;
       if (!activeId) return;
-      for (const delayMs of [400, 900, 1600]) {
+      // Extended retry window (400ms→5s): covers card appended late by
+      // Vercel after(). >= not > so we adopt even when message count is
+      // equal (version card appended = same count but new content).
+      for (const delayMs of [400, 900, 1600, 3000, 5000]) {
         await new Promise(r => setTimeout(r, delayMs));
         try {
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) continue;
           const snap = await res.json();
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
-          if (persisted && persisted.length > chat.messages.length) {
+          if (persisted && persisted.length >= chat.messages.length) {
             chat.setMessages(persisted);
             return;
           }
@@ -371,8 +374,12 @@ function DirectChatSession({
     const onVisibility = () => {
       if (document.visibilityState === 'visible') tryRecover();
     };
+    // focus fires on mobile when the user returns to the tab even when
+    // visibilitychange doesn't (some Android WebViews, PWA mode).
+    const onFocus = () => tryRecover();
     window.addEventListener('online', onOnline);
     document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onFocus);
     // Belt-and-suspenders third trigger, independent of the browser
     // actually firing 'online'/'visibilitychange' at all: some networks
     // drop/restore Wi-Fi or cellular without ever firing a real 'offline'
@@ -391,6 +398,7 @@ function DirectChatSession({
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onFocus);
       window.clearInterval(pollId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
