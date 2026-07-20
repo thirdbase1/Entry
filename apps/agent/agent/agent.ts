@@ -36,8 +36,38 @@ import { resolveModelIdForProvider } from './lib/model-catalog.js';
  */
 const primaryModelId = await resolveModelIdForProvider('anthropic');
 
+/**
+ * Self-hosted (Pxxl) workflow world override -- 2026-07-20, part of the
+ * "agent must be able to run a full hour, not die every ~300s" migration
+ * (see PXXL_MIGRATION.md). ONLY takes effect when
+ * WORKFLOW_TARGET_WORLD=@workflow/world-postgres is explicitly set in the
+ * deployment env (that's set on the Pxxl worker only, never on Vercel).
+ * Leaving this unset anywhere else (today's production Vercel deployment
+ * included) means `experimental` stays undefined and eve keeps its
+ * default behavior exactly as-is: Vercel Workflow when hosted on Vercel,
+ * the on-disk local world everywhere else. This is purely additive --
+ * zero behavior change for the existing in-process (apps/web-mounted)
+ * eve instance.
+ *
+ * Why Postgres, not the default local-disk world, for the Pxxl worker:
+ * a plain container's filesystem is not guaranteed to survive a redeploy
+ * (a fresh container = fresh disk), so an in-flight durable turn's
+ * checkpoint history would be lost on exactly the kind of redeploy this
+ * whole migration is meant to make routine. `@workflow/world-postgres`
+ * (pinned to 5.0.0-beta.26 -- the exact `@workflow/core` line eve itself
+ * bundles, see node_modules/eve/package.json) stores that state in the
+ * same Neon Postgres this app already talks to via DATABASE_URL (its own
+ * connection-string fallback, no separate secret needed), so a turn
+ * survives a redeploy the same way it survives a crash.
+ */
+const usePostgresWorld = process.env.WORKFLOW_TARGET_WORLD === '@workflow/world-postgres';
+
 export default defineAgent({
   model: primaryModelId,
+
+  ...(usePostgresWorld
+    ? { experimental: { workflow: { world: '@workflow/world-postgres' as const } } }
+    : {}),
 
   // Confirmed real bug (2026-07-11): root agent never set this, so Claude
   // never produced reasoning/thinking tokens at all for the default (no
@@ -93,6 +123,14 @@ export default defineAgent({
     // build (Next traces node_modules deps rather than bundling them).
     externalDependencies: [
       '@prisma/client',
+      // Same class of problem as @prisma/client below (native/complex
+      // package -- graphile-worker + drizzle + pg -- that forces a second
+      // Rolldown output chunk if inlined). Only ever actually loaded at
+      // runtime when usePostgresWorld is true (Pxxl), but eve's build-time
+      // static analysis doesn't know that, so it must be externalized
+      // unconditionally or the build fails for every target, Vercel
+      // included.
+      '@workflow/world-postgres',
       // Pulled in transitively via @prisma/adapter-pg (our driver adapter
       // for Neon/pg) -> @vercel/oidc, which has its own internal dynamic
       // import('./token.js') for OIDC token exchange. That created a THIRD
