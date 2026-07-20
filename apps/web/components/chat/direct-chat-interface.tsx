@@ -58,6 +58,7 @@ import { ChooseResult } from './renderers/choose-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
 import { getKnownService } from '@/lib/integration-services';
 import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
+import { silentlyUpdateChatUrl } from './silent-url-update';
 
 interface DirectChatInterfaceProps {
   sessionId?: string;
@@ -253,7 +254,7 @@ function DirectChatSession({
       setTurnError(null);
       if (!createdRef.current) {
         createdRef.current = true;
-        if (!sessionId) router.replace(`/chats/${chat.id}`);
+        if (!sessionId) silentlyUpdateChatUrl(`/chats/${chat.id}`);
       }
       // The turn's version card (if any file changed) is appended
       // server-side slightly AFTER this stream finishes -- see
@@ -386,7 +387,7 @@ function DirectChatSession({
             // under `activeId` -- a refresh later would lose it from view.
             if (!createdRef.current) {
               createdRef.current = true;
-              if (!sessionId) router.replace(`/chats/${activeId}`);
+              if (!sessionId) silentlyUpdateChatUrl(`/chats/${activeId}`);
             }
           }
         } catch {

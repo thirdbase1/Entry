@@ -22,6 +22,7 @@ import { useOnlineStatus } from './use-online-status';
 import { useStreamingAutoScroll } from './use-streaming-autoscroll';
 import { ThinkingIndicator } from './chat-thinking-indicator';
 import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
+import { silentlyUpdateChatUrl } from './silent-url-update';
 
 interface ChatInterfaceProps {
   /** Existing eve sessionId, if resuming a saved chat. */
@@ -290,7 +291,7 @@ export function ChatInterface({
             // under `activeId`.
             if (!createdRef.current) {
               createdRef.current = true;
-              if (!sessionId) router.replace(`/chats/${activeId}`);
+              if (!sessionId) silentlyUpdateChatUrl(`/chats/${activeId}`);
             }
           }
         } finally {
@@ -669,8 +670,14 @@ function ChatInterfaceInner({
     onEvent(event) {
       if (event.type === 'turn.completed') {
         const activeId = chatIdRef.current;
+        // Same not-created-yet guard as the mount effect above (2026-07-20
+        // "404 on log" fix) -- on a brand-new chat's first turn, this event
+        // fires before onFinish's /api/chats POST has created the row, so
+        // the immediate check below would 404. Skip straight to the
+        // 1200ms retry, which lands comfortably after that POST resolves.
+        const chatRowExists = sessionId || createdRef.current;
+        if (activeId && chatRowExists) void checkForNewVersion(activeId);
         if (activeId) {
-          void checkForNewVersion(activeId);
           // Safety-net retry: the server-side git-diff capture hook
           // (apps/agent/agent/hooks/version-capture.ts) runs concurrently
           // with this same event reaching the client, so give it a beat
@@ -697,7 +704,7 @@ function ChatInterfaceInner({
           body: JSON.stringify({ sessionId: sid, title }),
         }).catch(() => {});
         if (!sessionId) {
-          router.replace(`/chats/${sid}`);
+          silentlyUpdateChatUrl(`/chats/${sid}`);
         }
       }
       await persistSnapshot(sid, snapshot, title).catch(() => {});
@@ -715,7 +722,17 @@ function ChatInterfaceInner({
     onSessionIdKnown(agent.session?.sessionId);
     const activeId = agent.session?.sessionId ?? sessionId;
     chatIdRef.current = activeId;
-    if (activeId && lastSeenVersionRef.current === null) void checkForNewVersion(activeId);
+    // BUG (2026-07-20, user-reported "404 on log" on every first prompt):
+    // this used to fire as soon as eve confirmed a sessionId, which -- on
+    // a brand-new chat -- is well BEFORE the /api/chats POST in onFinish
+    // below ever creates that chat's row. GET .../versions 404s (by
+    // design, see its own route file) whenever the chat row doesn't
+    // exist yet, so every single new chat's first turn logged a 404 to
+    // the console/network tab. `sessionId` (the route param) is only
+    // ever present for a chat that's already persisted, so it's always
+    // safe to check immediately; `createdRef.current` covers the
+    // brand-new-chat case once its row genuinely exists.
+    if (activeId && lastSeenVersionRef.current === null && (sessionId || createdRef.current)) void checkForNewVersion(activeId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.session?.sessionId, sessionId]);
 

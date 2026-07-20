@@ -9,6 +9,8 @@ dist
 dist/**
 build
 build/**
+.next
+.next/**
 .turbo
 .turbo/**
 .cache
@@ -17,16 +19,3 @@ build/**
 .config/pxxl/**
 .pxxlignore
 pxxl-source.zip
-.eve
-.eve/**
-.output
-.output/**
-.vercel
-.vercel/**
-apps/web
-apps/web/**
-apps/agent/.agents
-apps/agent/.agents/**
-apps/agent/agent/skills
-apps/agent/agent/skills/**
-*.tsbuildinfo
