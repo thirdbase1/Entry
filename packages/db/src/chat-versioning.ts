@@ -139,7 +139,7 @@ async function findPreviousContent(chatId: string, path: string): Promise<string
 async function writeVersionRows(
   chatId: string,
   changes: PendingChange[],
-  opts: { revertedFromVersionNumber?: number; summaryOverride?: string },
+  opts: { revertedFromVersionNumber?: number; summaryOverride?: string; skipCard?: boolean },
 ): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
   if (changes.length === 0) return null;
 
@@ -190,7 +190,7 @@ async function writeVersionRows(
   });
 
   const info = { versionNumber: result.versionNumber, summary, filesChanged: fileRows.length, linesAdded: totalAdded, linesRemoved: totalRemoved, revertedFromVersionNumber: opts.revertedFromVersionNumber };
-  await appendVersionCardMessage(chatId, info);
+  if (!opts.skipCard) await appendVersionCardMessage(chatId, info);
   return info;
 }
 
@@ -375,13 +375,15 @@ async function runGit(
 export function captureVersionFromSandboxDiff(
   chatId: string,
   sandbox: VersionCaptureSandbox,
+  opts: { skipCard?: boolean } = {},
 ): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
-  return withChatSerialized(chatId, () => captureVersionFromSandboxDiffInner(chatId, sandbox));
+  return withChatSerialized(chatId, () => captureVersionFromSandboxDiffInner(chatId, sandbox, opts));
 }
 
 async function captureVersionFromSandboxDiffInner(
   chatId: string,
   sandbox: VersionCaptureSandbox,
+  opts: { skipCard?: boolean } = {},
 ): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
   try {
     const initCheck = await runGit(sandbox, 'git rev-parse --is-inside-work-tree 2>/dev/null || echo NO_REPO');
@@ -522,7 +524,7 @@ async function captureVersionFromSandboxDiffInner(
       }
     }
 
-    const info = await writeVersionRows(chatId, changes, {});
+    const info = await writeVersionRows(chatId, changes, { skipCard: opts.skipCard });
 
     // Re-commit so next turn's `git diff --cached` starts from a clean
     // baseline -- runs regardless of whether writeVersionRows actually

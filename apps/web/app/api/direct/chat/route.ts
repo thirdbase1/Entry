@@ -737,7 +737,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // no real cost beyond that.
       if (sandboxPromise && toolCalls.length > 0) {
         const sandbox = await sandboxPromise;
-        await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
+        // skipCard=true: the card must only be appended AFTER onFinish
+        // persists the final sanitized messages -- appending it here races
+        // with that write and causes the card to be overwritten (the card
+        // lands in events, then onFinish overwrites events with
+        // sanitizedFinalMessages which has no card). The version rows
+        // (ChatVersion/ChatVersionFile) are still written here for
+        // incremental durability; only the UI card is deferred.
+        await captureVersionFromSandboxDiff(chatId, sandbox, { skipCard: true }).catch(err => {
           console.error('[direct chat] incremental step version capture failed', chatId, err);
         });
       }
