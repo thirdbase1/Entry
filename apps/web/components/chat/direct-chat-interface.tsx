@@ -40,6 +40,7 @@
  */
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport } from 'ai';
+import { EVE_AGENT_HOST, fetchAgentBearerToken } from '@/lib/eve-agent-host';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
@@ -189,8 +190,31 @@ function DirectChatSession({
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
-        api: '/api/direct/chat',
+        // Pxxl migration (PXXL_MIGRATION.md): when NEXT_PUBLIC_EVE_AGENT_HOST
+        // is set, this hits the standalone worker's `/message` route
+        // (apps/agent/agent/channels/direct-chat.ts) directly, cross-origin,
+        // instead of this deployment's own Vercel-Function-bound
+        // /api/direct/chat -- same removal of the 300s ceiling the default
+        // (eve) chat path already got via useThrottledEveAgent's `host`
+        // option in chat-interface.tsx. Undefined/local (today's default)
+        // keeps byte-for-byte today's same-origin behavior.
+        api: EVE_AGENT_HOST ? `${EVE_AGENT_HOST}/message` : '/api/direct/chat',
         body: byokModelId ? { byokModelId } : { requestedModel },
+        // Cross-origin calls can't rely on the browser sending the Better
+        // Auth session cookie (and CORS on the worker side doesn't request
+        // credentialed mode) -- auth instead rides a short-lived bearer JWT,
+        // minted fresh via /api/agent-token immediately before every actual
+        // HTTP call this transport makes (both the initial POST and any
+        // reconnect), same pattern eve-agent-host.ts documents for the
+        // default path's ClientAuth.bearer thunk.
+        fetch: EVE_AGENT_HOST
+          ? async (input, init) => {
+              const token = await fetchAgentBearerToken();
+              const headers = new Headers(init?.headers);
+              headers.set('authorization', `Bearer ${token}`);
+              return fetch(input as RequestInfo, { ...init, headers, credentials: 'omit' });
+            }
+          : undefined,
       }),
     [byokModelId, requestedModel]
   );
