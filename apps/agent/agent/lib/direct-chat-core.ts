@@ -727,13 +727,32 @@ export async function runDirectChatTurn(
     // 10ms of ARTIFICIAL delay inserted between every single word purely
     // for visual smoothing, stacking linearly with response length (a
     // ~500-word reply loses a full 5 real seconds to this alone, on top
-    // of actual generation time). Explicit `delayInMs: 0` keeps the
-    // re-chunking behavior (still decouples from upstream's raw byte
-    // boundaries, still renders word-by-word) while removing the
-    // synthetic per-word wait entirely -- pure time-to-completion win,
-    // no downside for a chat UI that's already rendering tokens as they
-    // arrive.
-    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 0 }),
+    // of actual generation time). Explicit `delayInMs: 0` kept the
+    // re-chunking behavior while removing the synthetic per-word wait
+    // entirely.
+    //
+    // REVERTED PARTIALLY 2026-07-20 (Pxxl worker port, explicit user
+    // report: "streaming is fast but not smooth"): `delayInMs: 0` means
+    // smoothStream re-chunks by word boundary but flushes every chunk on
+    // the very next microtask with zero pacing -- so a provider that
+    // bursts its own SSE bytes (buffers several sentences into one
+    // network chunk, common for OpenAI-compatible proxies/relays, see
+    // gateway-retry-fetch.ts's file comment for one confirmed example of
+    // this class of relay) still renders as one big visual jump, just
+    // chopped at word boundaries instead of mid-word -- the ORIGINAL
+    // 2026-07-11 bug this transform exists to fix, reintroduced by
+    // zeroing the one knob that actually paces delivery. `delayInMs: 6`
+    // is a deliberate middle ground, not a reversion back to the SDK
+    // default of 10: at 6ms/word a genuinely long 500-word reply loses
+    // 3s total (vs the default's 5s), which is real but small next to
+    // the bigger win this same port already banked (no more Vercel
+    // cold-starts or the 300s ceiling) -- and unlike raw time-to-
+    // completion, perceived responsiveness for a STREAMING chat UI is
+    // dominated by cadence smoothness, not final-token arrival time: a
+    // steady word-by-word reveal reads as faster to a human than the
+    // same total duration delivered in bursts, even though the burst
+    // finishes marginally sooner on the clock.
+    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 6 }),
   });
 
   // Make sure the durability write has actually landed before the

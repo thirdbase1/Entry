@@ -49,8 +49,28 @@ function createClient(): PrismaClient {
   }
   const connectionString = normalizeSslMode(rawConnectionString);
 
+  // Pool sizing (2026-07-20, Pxxl worker port): pg's own default `max`
+  // is 10 connections. That was never a real constraint on Vercel --
+  // every Serverless Function invocation got its OWN process (and
+  // therefore its own pool), so aggregate concurrency across many
+  // simultaneous requests scaled with however many invocations Vercel
+  // spun up, not with any single pool's size. apps/agent's Pxxl worker
+  // is the opposite shape on purpose (one long-lived process, no
+  // cold starts) -- which means EVERY concurrent chat turn on that
+  // worker now genuinely shares this one pool. Left at the pg default,
+  // a real traffic spike (several BYOK turns doing their pre/post-save
+  // prisma writes at once) would queue behind only 10 connections
+  // instead of erroring OR slowing down proportionally to actual DB
+  // load, a strictly worse failure mode. `max: 20` (still comfortably
+  // under typical managed-Postgres connection caps, e.g. Neon's pooled
+  // endpoint) and explicit timeouts so a genuinely exhausted pool fails
+  // fast with a catchable error instead of hanging a request forever.
+  // Overridable via env for either host without a code change.
   const adapter = new PrismaPg({
     connectionString,
+    max: Number(process.env.DATABASE_POOL_MAX) || 20,
+    idleTimeoutMillis: Number(process.env.DATABASE_POOL_IDLE_MS) || 30_000,
+    connectionTimeoutMillis: Number(process.env.DATABASE_POOL_CONN_TIMEOUT_MS) || 10_000,
     // v7 uses node-pg which enforces valid SSL certs by default.
     // Default: strict (undefined = pg uses its default strict behavior).
     // Set DATABASE_SSL_STRICT=false only if your provider's cert chain isn't
