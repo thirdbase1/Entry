@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { sandboxWriteFile } from './sandbox-file-io.js';
 
 /**
@@ -44,3 +45,4 @@ export const writeFileTool = {
 };
 
 writeFileTool.execute = safeExecute('write_file', writeFileTool.execute) as typeof writeFileTool.execute;
+Object.assign(writeFileTool, withAgentTimeout('write_file', writeFileTool));

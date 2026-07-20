@@ -4,6 +4,7 @@ import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { DEFAULT_TOOL_TIMEOUT_MS } from './with-agent-timeout.js';
 
 const TaskAnalysisResultSchema = z.object({
   needsPhases: z.boolean(),
@@ -25,8 +26,12 @@ const TaskAnalysisResultSchema = z.object({
 
 const DEFAULT_TOOLS = ['browser_use', 'web_search', 'web_fetch', 'bash', 'task_analysis'];
 
-// See with-timeout-signal.ts / code_artifact.ts's identical constant.
-const TIMEOUT_MS = 75_000;
+// BUMPED 75s -> 600s/10min default, model-overridable (2026-07-20,
+// "bump the limit of everything up to 10 minutes by default" -- moving
+// off Vercel serverless onto the standalone worker removes the outer
+// 300s maxDuration this used to leave headroom under). `timeout_seconds`
+// on the input below lets the model ask for more/less per call.
+const TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
 
 export const taskAnalysis = {
   description:
@@ -38,14 +43,17 @@ export const taskAnalysis = {
     task: z.string().min(1, 'Task description cannot be empty'),
     context: z.string().optional(),
     availableTools: z.array(z.string()).optional(),
+    timeout_seconds: z.number().int().positive().max(3600).optional()
+      .describe('Optional override for how long this analysis may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),
   outputSchema: TaskAnalysisResultSchema,
-  async execute({ task, context, availableTools }: { task: string; context?: string; availableTools?: string[] }, ctx?: ToolExecCtx) {
+  async execute({ task, context, availableTools, timeout_seconds }: { task: string; context?: string; availableTools?: string[]; timeout_seconds?: number }, ctx?: ToolExecCtx) {
+    const effectiveTimeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : TIMEOUT_MS;
     // Added 2026-07-16 (same fix as code_artifact.ts / python_coding.ts):
     // bounds worst-case latency for this call itself, so a slow/hung
     // upstream model fails fast and visibly instead of riding along until
     // the outer request's own maxDuration silently kills the whole turn.
-    const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'task_analysis');
+    const t = withTimeoutSignal(ctx?.abortSignal, effectiveTimeoutMs, 'task_analysis');
     try {
       const { object } = await generateObject({
         model: await model(undefined, ctx?.byokModel),

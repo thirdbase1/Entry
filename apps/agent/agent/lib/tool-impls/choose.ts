@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 export const choose = {
   description:
@@ -19,3 +20,4 @@ export const choose = {
 };
 
 choose.execute = safeExecute('choose', choose.execute) as typeof choose.execute;
+Object.assign(choose, withAgentTimeout('choose', choose));

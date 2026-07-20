@@ -1,6 +1,7 @@
 import Parallel from 'parallel-web';
 import { z } from 'zod';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 let client: Parallel | null = null;
 function getClient(): Parallel {
@@ -36,3 +37,4 @@ export const webSearch = {
 };
 
 webSearch.execute = safeExecute('web_search', webSearch.execute) as typeof webSearch.execute;
+Object.assign(webSearch, withAgentTimeout('web_search', webSearch));

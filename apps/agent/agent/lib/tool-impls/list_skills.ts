@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 /** Lists this user's self-authored skills (name + description only —
  *  call recall_skill to get the full instructions for one). */
@@ -24,3 +25,4 @@ export const listSkillsTool = {
 };
 
 listSkillsTool.execute = safeExecute('list_skills', listSkillsTool.execute) as typeof listSkillsTool.execute;
+Object.assign(listSkillsTool, withAgentTimeout('list_skills', listSkillsTool));

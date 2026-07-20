@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { sandboxAppendFile } from './sandbox-file-io.js';
 
 /**
@@ -51,3 +52,4 @@ export const appendFileTool = {
 };
 
 appendFileTool.execute = safeExecute('append_file', appendFileTool.execute) as typeof appendFileTool.execute;
+Object.assign(appendFileTool, withAgentTimeout('append_file', appendFileTool));

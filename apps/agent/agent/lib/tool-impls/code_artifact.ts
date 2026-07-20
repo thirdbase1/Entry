@@ -4,6 +4,7 @@ import { model } from '../gateway.js';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
+import { DEFAULT_TOOL_TIMEOUT_MS } from './with-agent-timeout.js';
 import { withTransientRetry } from '../transient-provider-error.js';
 
 function stripCodeFence(raw: string): string {
@@ -46,14 +47,12 @@ export function lintArtifactHtml(html: string): string[] {
   return warnings;
 }
 
-// How long this tool's OWN internal model call is allowed to run before it
-// fails itself, with a clear message, instead of riding along silently
-// until the outer request's own maxDuration (300s, direct/chat/route.ts)
-// kills the entire turn with zero error surfaced — see
-// with-timeout-signal.ts. 75s leaves real headroom under 300s even as the
-// last tool call in a multi-step turn, while staying generous for a
-// single-file HTML artifact.
-const TIMEOUT_MS = 75_000;
+// BUMPED 75s -> 600s/10min default, model-overridable (2026-07-20,
+// "bump the limit of everything up to 10 minutes by default" -- moving
+// off Vercel serverless onto the standalone worker removes the outer
+// 300s maxDuration this used to leave headroom under). `timeout_seconds`
+// on the input below lets the model ask for more/less per call.
+const TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
 
 export const codeArtifact = {
   description:
@@ -67,8 +66,11 @@ export const codeArtifact = {
     // strictly one-shot — any tweak ("make the button green") forced a
     // from-scratch regeneration that usually changed unrelated things.
     previousHtml: z.string().optional().describe('Pass the html from a previous code_artifact result to REVISE it (userPrompt becomes a change request against it) instead of regenerating from scratch. Strongly preferred for any follow-up tweak.'),
+    timeout_seconds: z.number().int().positive().max(3600).optional()
+      .describe('Optional override for how long this generation may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),
-  async execute({ title, userPrompt, previousHtml }: { title: string; userPrompt: string; previousHtml?: string }, ctx?: ToolExecCtx) {
+  async execute({ title, userPrompt, previousHtml, timeout_seconds }: { title: string; userPrompt: string; previousHtml?: string; timeout_seconds?: number }, ctx?: ToolExecCtx) {
+    const effectiveTimeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : TIMEOUT_MS;
     // UPDATED (2026-07-17, "improve the whole AI process for long term
     // task") — same two fixes as python_coding.ts's identical rewrite:
     // a transient upstream capacity blip used to fail this whole call
@@ -78,7 +80,7 @@ export const codeArtifact = {
     // `withTransientRetry` now wraps a per-attempt fresh timeout window,
     // and `truncated: finishReason === 'length'` surfaces the latter.
     const { text, finishReason } = await withTransientRetry(async () => {
-      const t = withTimeoutSignal(ctx?.abortSignal, TIMEOUT_MS, 'code_artifact');
+      const t = withTimeoutSignal(ctx?.abortSignal, effectiveTimeoutMs, 'code_artifact');
       try {
         return await generateText({
           model: await model(undefined, ctx?.byokModel),

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@entry/db';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 
 /**
  * "Make sure the agent can restart it itself in case of an error." For
@@ -60,3 +61,4 @@ export const restartSandboxTool = {
 };
 
 restartSandboxTool.execute = safeExecute('restart_sandbox', restartSandboxTool.execute) as typeof restartSandboxTool.execute;
+Object.assign(restartSandboxTool, withAgentTimeout('restart_sandbox', restartSandboxTool));

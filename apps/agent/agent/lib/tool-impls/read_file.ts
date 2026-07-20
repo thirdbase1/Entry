@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolExecCtx } from './types.js';
 import { safeExecute } from './safe-execute.js';
+import { withAgentTimeout } from './with-agent-timeout.js';
 import { sandboxReadFile } from './sandbox-file-io.js';
 
 /**
@@ -70,3 +71,4 @@ export const readFileTool = {
 };
 
 readFileTool.execute = safeExecute('read_file', readFileTool.execute) as typeof readFileTool.execute;
+Object.assign(readFileTool, withAgentTimeout('read_file', readFileTool));
