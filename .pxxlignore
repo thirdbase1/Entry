@@ -9,8 +9,6 @@ dist
 dist/**
 build
 build/**
-.next
-.next/**
 .turbo
 .turbo/**
 .cache

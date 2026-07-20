@@ -6,3 +6,4 @@ buildCommand = "npm run build --workspace=apps/agent"
 startCommand = "npm run start --workspace=apps/agent -- --host 0.0.0.0"
 port = 3000
 domainChoice = "pxxl.run"
+projectId = "proj_eu2cuj0efa3s7xks0dhl"
