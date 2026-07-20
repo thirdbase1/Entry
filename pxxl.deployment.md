@@ -271,3 +271,45 @@ manage or reset:
 | Brand-new Pxxl project's first deploy | works, goes live immediately |
 | Any subsequent deploy needing rollover from a previous deployment | fails ~70-90s in, every time (Pxxl-side bug) |
 | Custom domain on Pxxl (beyond the free `*.pxxl.run` subdomain) | blocked separately by this account's custom-domain limit |
+
+## Gotcha #4: `entry-agent-base` E2B template has no `/workspace` dir
+
+The custom `entry-agent-base` template (2vCPU/2GB) that fixes the OOM
+issue (see above) has a real root fs of just `/code`, `/home/user`, etc.
+`/workspace` does NOT exist on a fresh sandbox from it. Confirmed live via
+E2B's REST API: creating a bare sandbox from this template and running
+`sbx.commands.run('pwd', { cwd: '/workspace' })` fails immediately with
+`[invalid_argument] cwd '/workspace' does not exist`.
+
+Every default `cwd` and `resolvePath()` call in `e2b-backend.ts` assumes
+`/workspace` exists. It only worked before by accident: whenever
+`prewarm()`'s `seedFiles` list was non-empty, `sandbox.files.write()`'s
+implicit parent-dir creation created `/workspace` as a side effect before
+`bootstrap()` ran any commands. The first time prewarm ran with an empty
+(or differently-shaped) seed list, this surfaced as the deploy-time crash:
+```
+eve: failed to initialize sandbox template "root" on backend "e2b":
+[invalid_argument] cwd '/workspace' does not exist
+```
+
+**Fix (2026-07-20, `apps/agent/agent/sandbox/e2b-backend.ts`):**
+unconditionally run this immediately after `Sandbox.create()`, before
+seeding files or running bootstrap:
+```ts
+await sandbox.commands.run(
+  'sudo mkdir -p /workspace && sudo chown "$(whoami)":"$(whoami)" /workspace',
+  { cwd: '/' },
+);
+```
+Note the `sudo` is required — the sandbox's default user (`user`) has no
+write permission on `/` itself, confirmed live (plain `mkdir -p /workspace`
+without sudo fails with `Permission denied`).
+
+Once a snapshot is captured with `/workspace` present, every session
+cloned from that snapshot inherits it — this is strictly a first-boot
+(prewarm) issue, not something that recurs per-session.
+
+Verified end to end on Pxxl (`entry-agent-worker-v5`, deploy
+`dep_hssibf76mm9vpsg5r69a3`): logs went from the cwd crash to
+`[e2b] captured snapshot ... for template ...` → `initialized 1 sandbox
+template (0 reused, 1 built)` → server up and serving 200s.
