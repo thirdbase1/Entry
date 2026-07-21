@@ -23,6 +23,9 @@ export interface ChatSessionSummary {
   requestedModel: string | null;
   createdAt: Date;
   updatedAt: Date;
+  /** True while a durable Trigger.dev worker run is continuing this chat's
+   *  turn in the background -- see EveChatSession model comment. */
+  backgroundRunActive: boolean;
 }
 
 export interface ChatSessionSnapshot extends ChatSessionSummary {
@@ -45,7 +48,7 @@ export async function createChatSession(
       docId: opts.docId ?? null,
     },
     update: {},
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true },
   });
 }
 
@@ -130,16 +133,35 @@ export async function getChatSession(userId: string, sessionId: string): Promise
     requestedModel: row.requestedModel,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    backgroundRunActive: row.backgroundRunActive,
     events: row.events,
     cursor: row.cursor,
   };
+}
+
+/**
+ * Flip the background-handoff flag -- called by the sync direct-chat route
+ * the instant it hands a turn off to the durable Trigger.dev worker
+ * (true), and by the orchestrator task's own try/finally once that worker
+ * run genuinely finishes, one way or another (false). Deliberately no
+ * userId filter: both callers are trusted server-side code (the route
+ * already validated the user earlier in the same request; the Trigger.dev
+ * task runs with the payload's own already-authenticated userId), and
+ * gating on userId here would just be one more way this could silently
+ * no-op if a future caller ever got the id slightly wrong.
+ */
+export async function setBackgroundRunActive(sessionId: string, active: boolean): Promise<void> {
+  await prisma.eveChatSession.update({
+    where: { id: sessionId },
+    data: { backgroundRunActive: active },
+  }).catch(() => {});
 }
 
 export async function listChatSessions(userId: string): Promise<ChatSessionSummary[]> {
   const rows = await prisma.eveChatSession.findMany({
     where: { userId },
     orderBy: { updatedAt: 'desc' },
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true },
   });
   return rows;
 }
@@ -150,7 +172,7 @@ export async function toggleChatCollected(userId: string, sessionId: string): Pr
   return prisma.eveChatSession.update({
     where: { id: sessionId, userId },
     data: { collected: !existing.collected },
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true },
   });
 }
 

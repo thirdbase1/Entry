@@ -96,6 +96,8 @@ import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
+import { agentTurnOrchestratorTask } from '@/src/trigger/agent-turn-orchestrator';
+import { setBackgroundRunActive } from '@entry/copilot';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
 import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
@@ -511,6 +513,19 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // silently patching in a generic message.
   let lastFinishReason: string | undefined;
   let lastRawFinishReason: string | undefined;
+  let stepCount = 0;
+  // Soft, in-process deadline INSIDE the sync route's own 300s Vercel
+  // ceiling (2026-07-21) -- mirrors agent-turn.ts's identical pattern for
+  // the durable worker's 3600s ceiling, just scaled to this route's much
+  // tighter budget. 230s leaves ~70s of real headroom for the current
+  // step's model call to actually finish, onFinish's persistence/version-
+  // capture work, and the background-handoff trigger call below, all
+  // before Vercel's hard 300s kill (which -- same as agent-turn.ts's
+  // comment on its own hard ceiling -- would otherwise leave onFinish
+  // never running at all).
+  const requestStartedAt = Date.now();
+  const SOFT_DEADLINE_MS = 230_000;
+  let softDeadlineHit = false;
 
   // CRITICAL-SAVE GATE (2026-07-19, real data-loss bug: "agent done and
   // stop, instantly the whole page reload, and all AI response and work
@@ -614,6 +629,17 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       if (stepNumber > 0 && FLAKY_PROVIDERS_DROP_TOOLS_AFTER_STEP_1.has(providerLabel)) {
         return { activeTools: [] };
       }
+      // BACKGROUND HANDOFF SOFT DEADLINE (2026-07-21) -- once this turn's
+      // own wall-clock time is past SOFT_DEADLINE_MS, stop handing the
+      // model tools on its NEXT step so it wraps up in plain text this
+      // step instead of starting new tool work doomed to be cut off by
+      // Vercel's hard 300s kill. onFinish below sees softDeadlineHit and
+      // hands whatever's left off to the durable Trigger.dev worker
+      // (agent-chat-turn-orchestrator) instead of just losing it.
+      if (Date.now() - requestStartedAt > SOFT_DEADLINE_MS) {
+        softDeadlineHit = true;
+        return { activeTools: [] };
+      }
       return {};
     },
     // ADDED (2026-07-19, real bug: AI_NoSuchToolError: Model tried to call
@@ -687,6 +713,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // result vs errored, and token usage -- so a "stopped after one tool
     // call" report is a five-second log lookup instead of a guess.
     async onStepFinish(step) {
+      stepCount += 1;
       const { stepNumber, finishReason, rawFinishReason, toolCalls, toolResults, usage, text, warnings, content } = step;
       lastFinishReason = finishReason;
       lastRawFinishReason = rawFinishReason;
@@ -923,6 +950,44 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
           console.error('[direct chat] version capture failed', chatId, err);
         });
+      }
+
+      // BACKGROUND HANDOFF (2026-07-21) -- "natural" completion mirrors
+      // agent-turn.ts's own identical formula exactly: the model stopped
+      // on its own (never forced into tool-less wrap-up by the soft
+      // deadline above) AND never hit the 120-step safety cap AND its
+      // last step didn't end mid tool-calls. Anything else means real
+      // work is still pending that this sync route's 300s ceiling can't
+      // safely finish -- hand the rest to the durable Trigger.dev worker
+      // (agent-chat-turn-orchestrator, which itself auto-continues across
+      // up to 6 chained 1h runs) instead of just letting it die silently
+      // at the hard Vercel kill. `sanitizedFinalMessages` is exactly what
+      // was just persisted above, so the worker picks up from the true
+      // last checkpoint, not a stale/duplicated view.
+      const finishedNaturally = !softDeadlineHit && stepCount < 120 && lastFinishReason !== 'tool-calls';
+      if (!finishedNaturally) {
+        console.log('[direct chat] handing off to durable background worker', { chatId, softDeadlineHit, stepCount, lastFinishReason });
+        await setBackgroundRunActive(chatId, true);
+        waitUntil(
+          agentTurnOrchestratorTask
+            .trigger({
+              chatId,
+              userId,
+              messages: sanitizedFinalMessages,
+              byokModelId: byokModelId || undefined,
+              requestedModel: byokModelId ? undefined : requestedModel || undefined,
+              disabledTools: Array.isArray(disabledTools) ? disabledTools : undefined,
+            })
+            .catch(async err => {
+              console.error('[direct chat] background handoff trigger failed', chatId, err);
+              logError({ source: 'direct-chat-background-handoff', error: err, userId, chatId });
+              // Never leave the flag stuck true if the enqueue itself
+              // never even landed -- the client's recovery poll would
+              // otherwise wait forever for a background run that never
+              // started.
+              await setBackgroundRunActive(chatId, false);
+            })
+        );
       }
     },
   });

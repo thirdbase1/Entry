@@ -18,8 +18,9 @@
  * this can never loop or bill forever on a model that's stuck repeating
  * itself instead of making progress.
  */
-import { task, tasks } from '@trigger.dev/sdk/v3';
+import { task } from '@trigger.dev/sdk/v3';
 import { prisma } from '@entry/db';
+import { setBackgroundRunActive } from '@entry/copilot';
 import { agentTurnTask, type AgentTurnPayload } from './agent-turn';
 import type { UIMessage } from 'ai';
 
@@ -47,43 +48,60 @@ export const agentTurnOrchestratorTask = task({
   // to 3600s each, plus headroom for the triggerAndWait overhead itself.
   maxDuration: 3600 * MAX_HOPS + 600,
   run: async (payload: AgentTurnPayload) => {
-    let currentMessages = payload.messages;
-    let hop = 0;
-    let lastResult: { finishedNaturally: boolean; finishReason?: string } | undefined;
+    // Set once at the very start of the chain (idempotent -- the sync
+    // route already sets this true itself right before enqueuing, but a
+    // future direct/manual trigger of this task should still behave
+    // correctly on its own) and ALWAYS cleared in the finally below, no
+    // matter how this exits -- natural finish, MAX_HOPS exhausted, or an
+    // uncaught throw. This is the flag direct-chat-interface.tsx's
+    // recovery poll checks to know whether to keep refetching a chat
+    // whose initiating HTTP response already closed.
+    await setBackgroundRunActive(payload.chatId, true);
+    try {
+      return await runOrchestration(payload);
+    } finally {
+      await setBackgroundRunActive(payload.chatId, false);
+    }
+  },
+});
 
-    while (hop < MAX_HOPS) {
-      const run = await agentTurnTask.triggerAndWait({ ...payload, messages: currentMessages });
+async function runOrchestration(payload: AgentTurnPayload) {
+  let currentMessages = payload.messages;
+  let hop = 0;
+  let lastResult: { finishedNaturally: boolean; finishReason?: string } | undefined;
 
-      if (!run.ok) {
-        // Worker run itself errored/crashed/got killed by its own hard
-        // ceiling -- its own incremental per-step save is the recovery
-        // point. Re-read what actually landed in Postgres (the worker's
-        // last successful onStepFinish save) rather than trusting
-        // anything client-side, then continue from there.
-        console.error('[agent-turn orchestrator] worker run failed, re-reading persisted state to continue', payload.chatId, run.error);
-        const row = await prisma.eveChatSession.findUnique({ where: { id: payload.chatId }, select: { events: true } });
-        const persisted = (row?.events as unknown as UIMessage[]) ?? currentMessages;
-        hop += 1;
-        currentMessages = [...persisted, continueMessage(hop)];
-        lastResult = { finishedNaturally: false };
-        continue;
-      }
+  while (hop < MAX_HOPS) {
+    const run = await agentTurnTask.triggerAndWait({ ...payload, messages: currentMessages });
 
-      lastResult = run.output;
-      if (run.output.finishedNaturally) {
-        return { chatId: payload.chatId, hops: hop + 1, finishReason: run.output.finishReason, autoContinued: hop > 0 };
-      }
-
-      // Cut off (soft deadline / step cap) with real work still pending
-      // -- re-read the freshest persisted messages (the worker just
-      // saved them in its own final save) and chain another hop.
+    if (!run.ok) {
+      // Worker run itself errored/crashed/got killed by its own hard
+      // ceiling -- its own incremental per-step save is the recovery
+      // point. Re-read what actually landed in Postgres (the worker's
+      // last successful onStepFinish save) rather than trusting
+      // anything client-side, then continue from there.
+      console.error('[agent-turn orchestrator] worker run failed, re-reading persisted state to continue', payload.chatId, run.error);
       const row = await prisma.eveChatSession.findUnique({ where: { id: payload.chatId }, select: { events: true } });
       const persisted = (row?.events as unknown as UIMessage[]) ?? currentMessages;
       hop += 1;
       currentMessages = [...persisted, continueMessage(hop)];
+      lastResult = { finishedNaturally: false };
+      continue;
     }
 
-    console.warn('[agent-turn orchestrator] hit MAX_HOPS without a natural finish', payload.chatId, MAX_HOPS);
-    return { chatId: payload.chatId, hops: hop, finishReason: lastResult?.finishedNaturally === false ? 'max-hops-reached' : lastResult?.finishReason, autoContinued: hop > 0 };
-  },
-});
+    lastResult = run.output;
+    if (run.output.finishedNaturally) {
+      return { chatId: payload.chatId, hops: hop + 1, finishReason: run.output.finishReason, autoContinued: hop > 0 };
+    }
+
+    // Cut off (soft deadline / step cap) with real work still pending --
+    // re-read the freshest persisted messages (the worker just saved
+    // them in its own final save) and chain another hop.
+    const row = await prisma.eveChatSession.findUnique({ where: { id: payload.chatId }, select: { events: true } });
+    const persisted = (row?.events as unknown as UIMessage[]) ?? currentMessages;
+    hop += 1;
+    currentMessages = [...persisted, continueMessage(hop)];
+  }
+
+  console.warn('[agent-turn orchestrator] hit MAX_HOPS without a natural finish', payload.chatId, MAX_HOPS);
+  return { chatId: payload.chatId, hops: hop, finishReason: lastResult?.finishedNaturally === false ? 'max-hops-reached' : lastResult?.finishReason, autoContinued: hop > 0 };
+}
