@@ -205,6 +205,10 @@ function DirectChatSession({
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const createdRef = useRef(!!sessionId);
+  // Give-up counters for the 3s recovery poll below (2026-07-21 fix --
+  // see the poll's own comment for why this exists).
+  const missedPollsRef = useRef(0);
+  const pollIdRef = useRef<number | undefined>(undefined);
   const [turnError, setTurnError] = useState<string | null>(null);
   // True while a durable Trigger.dev worker (agent-chat-turn-orchestrator)
   // is continuing this chat's turn in the background, past the point
@@ -421,7 +425,31 @@ function DirectChatSession({
         if (chat.status !== 'error' && !looksIncomplete && !backgroundRunActive) return;
         try {
           const res = await fetch(`/api/chats/${activeId}`);
-          if (!res.ok) return;
+          if (!res.ok) {
+            // FIXED (2026-07-21, real production trace: `vercel logs`
+            // showed this exact GET 404-ing every 3s for MINUTES straight,
+            // nonstop, for a chat whose very first turn never actually got
+            // persisted server-side at all -- e.g. the initiating POST
+            // itself never reached the server (a genuine client-network
+            // failure, see send-with-retry.ts). Previously there was no
+            // give-up condition here: a chat id that will NEVER resolve
+            // (there is nothing server-side to recover, ever) polled
+            // silently forever, burning a request every 3s with no visible
+            // feedback to the user at all beyond whatever the original
+            // send's own catch handler showed. 8 consecutive misses (~24s
+            // of real wall time given the 3s cadence) is well past any
+            // plausible transient blip -- surface a clear terminal error
+            // and stop, instead of polling a dead endpoint indefinitely.
+            missedPollsRef.current += 1;
+            if (missedPollsRef.current >= 8) {
+              window.clearInterval(pollIdRef.current);
+              if (looksIncomplete) {
+                setTurnError("Couldn't send that message -- check your connection and try again.");
+              }
+            }
+            return;
+          }
+          missedPollsRef.current = 0;
           const snap = await res.json();
           if (typeof snap?.backgroundRunActive === 'boolean') setBackgroundRunActive(snap.backgroundRunActive);
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
@@ -469,12 +497,13 @@ function DirectChatSession({
     // up-to-date answer as fast as possible instead of waiting up to 3s
     // doing nothing first.
     tryRecover();
-    const pollId = window.setInterval(tryRecover, 3000);
+    missedPollsRef.current = 0;
+    pollIdRef.current = window.setInterval(tryRecover, 3000);
     return () => {
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('focus', onFocus);
-      window.clearInterval(pollId);
+      window.clearInterval(pollIdRef.current);
     };
     // backgroundRunActive included deliberately (not just eslint-suppressed
     // away): tryRecover's closure captures whatever this was at the time the

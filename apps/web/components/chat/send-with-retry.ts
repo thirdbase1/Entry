@@ -76,5 +76,17 @@ export function readableChatErrorMessage(err: unknown): string {
       // not actually JSON despite the leading brace -- fall through
     }
   }
+  // FIXED (2026-07-21, real complaint: "nothing happens, no error shown" --
+  // it WAS showing, it just showed the raw browser-native string, which
+  // reads as meaningless noise, not an actual explanation): a bare fetch()
+  // rejection (the exact set looksLikeNetworkFailure above already
+  // recognizes: "Failed to fetch", Safari's "Load failed", any plain
+  // TypeError, etc.) means the request never even reached the server, or a
+  // response never came back -- that's a real connectivity problem on the
+  // user's own network, not a server/model failure, and deserves a message
+  // that says so instead of leaking a Chrome/Firefox/Safari internal string.
+  if (looksLikeNetworkFailure(err)) {
+    return "Couldn't reach the server -- check your connection and try again.";
+  }
   return trimmed || 'Something went wrong generating a response. Please try again.';
 }
