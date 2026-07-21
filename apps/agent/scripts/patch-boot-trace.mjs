@@ -53,24 +53,3 @@ for (const { file, label, withSafetyNet } of targets) {
   console.log(`[patch-boot-trace] patched: ${file}${withSafetyNet ? ' (+ safety net)' : ''}`);
 }
 
-// Also drop a CJS safety-net file that gets loaded via `node --require`
-// (NODE_OPTIONS) BEFORE any ESM module resolution begins. This matters
-// because ESM import graphs are evaluated depth-first BEFORE any of the
-// *importing* file's own top-level statements run, regardless of where
-// those statements are textually positioned -- so putting process.on(...)
-// handlers at the "top" of index.mjs is not actually early enough; eve.mjs's
-// entire transitive import graph (where the crash originates) still runs
-// first. A `--require` preload is a genuinely separate, earlier phase.
-const safetyNetPath = join(outputDir, 'safety-net.cjs');
-const safetyNetContent = [
-  "process.on('uncaughtException', (err) => {",
-  "  console.error('[BOOT-HANG FIX] uncaughtException survived (server keeps running):', err && err.stack || err);",
-  "});",
-  "process.on('unhandledRejection', (err) => {",
-  "  console.error('[BOOT-HANG FIX] unhandledRejection survived (server keeps running):', err && err.stack || err);",
-  "});",
-  "console.error('[BOOT-TRACE] safety-net.cjs preloaded via --require, pid=' + process.pid, new Date().toISOString());",
-  "",
-].join('\n');
-writeFileSync(safetyNetPath, safetyNetContent);
-console.log(`[patch-boot-trace] wrote safety net: ${safetyNetPath}`);
