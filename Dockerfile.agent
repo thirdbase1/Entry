@@ -1,0 +1,20 @@
+FROM node:24-slim
+
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl ca-certificates python3 make g++ \
+  && find /var/lib/apt/lists -mindepth 1 -delete
+
+# Copy full monorepo (npm workspaces need root manifest + all workspace package.json files)
+COPY . .
+
+ENV NODE_ENV=production
+
+RUN npm install --no-audit --no-fund
+
+RUN npm run build --workspace=apps/agent
+
+EXPOSE 3000
+
+CMD ["npm", "run", "start", "--workspace=apps/agent", "--", "--host", "0.0.0.0"]
