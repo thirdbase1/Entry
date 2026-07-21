@@ -414,7 +414,18 @@ export function ChatInterface({
   // `rowIsDirect` on `!initial` (null while loading) rather than only on
   // `sessionId` so `crossedBucket` can't false-positive during that gap.
   const rowIsDirect = !initial ? null : sessionId ? !!(initial.byokModelId || initial.requestedModel) : null; // null = still loading, or brand-new (bucket not decided yet)
-  const liveIsDirect = model.startsWith('byok:') || model.startsWith('gateway:');
+  // RETIRED (2026-07-21): eve is no longer the default path. Every NEW
+  // chat now goes straight to /api/direct/chat regardless of which model
+  // string is picked -- when it's neither `byok:` nor `gateway:` prefixed
+  // (i.e. still DEFAULT_MODEL_ID / unset), byokModelId/requestedModel both
+  // resolve to undefined below and the route itself resolves the same
+  // catalog-picked default model eve's root agent used to
+  // (resolveModelIdForProvider('anthropic'), see model-catalog.ts). Existing
+  // rows already persisted in eve's own event shape (rowIsDirect computed
+  // from their persisted byokModelId/requestedModel above) are unaffected --
+  // they keep resuming via the eve-mounted renderer below exactly as
+  // before; only NEW conversations skip eve entirely now.
+  const liveIsDirect = true;
   const isDirect = rowIsDirect === null ? liveIsDirect : rowIsDirect;
   // Crossing eve<->direct on an EXISTING thread can't be hot-applied (see
   // above) — instead of silently ignoring the pick (the original bug,

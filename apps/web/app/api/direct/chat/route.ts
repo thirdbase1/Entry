@@ -94,6 +94,7 @@ import { recordUsageEvent } from '@entry/db/usage-metering';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
+import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
@@ -161,9 +162,13 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   const body = await req.json().catch(() => ({}));
   const { id, messages, byokModelId, requestedModel, disabledTools } = body ?? {};
-  if (!byokModelId && !requestedModel) {
-    return Response.json({ error: 'byokModelId or requestedModel is required' }, { status: 400 });
-  }
+  // No explicit model picked (byokModelId/requestedModel both absent) --
+  // this is the "Default" chat bucket, formerly eve's root-agent path
+  // (apps/agent/agent/agent.ts's fixed `model:`). Same Gateway-routed,
+  // catalog-resolved model eve always picked (see model-catalog.ts's
+  // resolveModelIdForProvider), just resolved here instead, so this one
+  // route now serves every chat -- eve is no longer in the loop at all
+  // (see DEPLOY.md / ROADMAP for the removal writeup).
   if (!Array.isArray(messages) || messages.length === 0) {
     return Response.json({ error: 'messages is required' }, { status: 400 });
   }
@@ -190,7 +195,9 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // stream.
   const resolved = byokModelId
     ? await resolveByokModel(byokModelId, userId)
-    : resolveGatewayModel(requestedModel);
+    : requestedModel
+      ? resolveGatewayModel(requestedModel)
+      : resolveGatewayModel(await resolveModelIdForProvider('anthropic'));
   const { model, providerLabel, modelId } = resolved;
   // See strip-reasoning-parts.ts's file comment for the exact bug this
   // fixes (only set on the BYOK path -- resolveGatewayModel's return type
