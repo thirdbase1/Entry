@@ -48,6 +48,7 @@ import { CollapsibleUserText } from './collapsible-user-text';
 import { useStreamingAutoScroll } from './use-streaming-autoscroll';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
+import { useBackgroundChunkStreamPreview } from './use-background-chunk-stream';
 import { VersionCard } from './renderers/version-card';
 import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
 import type { AttachedContext } from './chat-context';
@@ -484,7 +485,16 @@ function DirectChatSession({
   const { requestOpenHistory } = useChatPanel();
 
   const isBusy = chat.status === 'submitted' || chat.status === 'streaming';
-  const messages = chat.messages;
+  // Live preview overlay for a turn currently running in the durable
+  // background worker (2026-07-21, see use-background-chunk-stream.ts) --
+  // appended as a synthetic extra message purely for display while
+  // `backgroundRunActive` is true, so a handed-off turn keeps rendering
+  // live text + tool cards instead of freezing until the next 3s DB poll.
+  // Never mixed into `chat.messages` itself -- the poll's eventual
+  // `chat.setMessages(persisted)` remains the one source of truth the
+  // instant the worker actually finishes.
+  const liveBackgroundMessage = useBackgroundChunkStreamPreview(sessionId ?? chat.id ?? null, backgroundRunActive);
+  const messages = backgroundRunActive && liveBackgroundMessage ? [...chat.messages, liveBackgroundMessage] : chat.messages;
   const lastMessage = messages[messages.length - 1];
   // True right after a fresh mount (e.g. a reload) that landed mid-turn --
   // the last thing in history is the user's own message with no assistant

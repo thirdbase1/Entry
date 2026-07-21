@@ -30,7 +30,8 @@
  * deliberately rather than a blind shared-module refactor). Follow-up:
  * extract a shared module once this has real production mileage.
  */
-import { task, metadata } from '@trigger.dev/sdk/v3';
+import { task } from '@trigger.dev/sdk/v3';
+import { chatUiStream } from './streams';
 import {
   streamText,
   tool,
@@ -45,6 +46,7 @@ import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
 import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
 import { recordUsageEvent } from '@entry/db/usage-metering';
+import { setBackgroundRunId } from '@entry/copilot';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
@@ -124,10 +126,19 @@ export const agentTurnTask = task({
   id: 'agent-chat-turn',
   // Well beyond Vercel's ceiling -- the entire point of this task.
   maxDuration: 3600,
-  run: async (payload: AgentTurnPayload): Promise<AgentTurnResult> => {
+  run: async (payload: AgentTurnPayload, { ctx }): Promise<AgentTurnResult> => {
     const startedAt = Date.now();
     const { chatId, userId, byokModelId, requestedModel, disabledTools } = payload;
     const uiMessages = sanitizeDanglingToolCalls(payload.messages);
+
+    // Point the chat row at THIS run as the currently-active background
+    // worker (2026-07-21) -- lets /api/chats/[sessionId]/realtime-token
+    // mint a scoped public access token for it, so the frontend can
+    // subscribe to this run's live chunk stream instead of relying only
+    // on 3s DB polling. Re-set on every hop (a fresh run ID each time the
+    // orchestrator auto-continues), so the client always subscribes to
+    // whichever hop is actually live right now.
+    await setBackgroundRunId(chatId, ctx.run.id).catch(() => {});
 
     const userWorkingMemoryPromise = getWorkingMemory(userId);
 
@@ -299,9 +310,6 @@ export const agentTurnTask = task({
           }).catch(() => {});
         }
 
-        await metadata.stream('step', (async function* () {
-          yield { stepNumber, finishReason, toolNames: toolCalls.map((c: any) => c.toolName), textLength: text.length };
-        })()).catch(() => {});
 
         if (sandboxPromise && toolCalls.length > 0) {
           const sandbox = await sandboxPromise;
@@ -338,13 +346,24 @@ export const agentTurnTask = task({
       experimental_transform: smoothStream({ chunking: 'word', delayInMs: 0 }),
     });
 
-    await metadata.stream('text', result.textStream).catch(() => {});
-
-    const chunkStream = (result as any).toUIMessageStream({
+    // Pipe the SAME toUIMessageStream() protocol the sync route streams
+    // over SSE through the defined realtime stream (2026-07-21) -- gives
+    // a subscribed frontend live text + tool-call chunks for this
+    // background-handed-off turn, then fall through to consuming the
+    // (tee'd) returned stream exactly as before to build the final
+    // persisted message. Piping failure is non-fatal: the client just
+    // falls back to 3s DB polling, so this must never block the turn.
+    const rawChunkStream = (result as any).toUIMessageStream({
       originalMessages: uiMessages,
       generateMessageId: () => crypto.randomUUID(),
       sendReasoning: true,
     });
+    let chunkStream: any = rawChunkStream;
+    try {
+      chunkStream = chatUiStream.pipe(rawChunkStream).stream;
+    } catch (err) {
+      console.error('[agent-turn task] realtime chunk stream pipe failed (non-fatal, falling back to DB polling)', chatId, err);
+    }
     let finalNewMessage: UIMessage | undefined;
     for await (const msg of readUIMessageStream({ stream: chunkStream })) {
       finalNewMessage = msg;

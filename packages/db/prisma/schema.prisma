@@ -595,6 +595,13 @@ model EveChatSession {
   // of assuming the turn is done just because the initiating HTTP response
   // already closed.
   backgroundRunActive Boolean @default(false) @map("background_run_active")
+  // The Trigger.dev run ID of the currently-active background worker
+  // (agent-chat-turn-orchestrator), when backgroundRunActive is true.
+  // Used to mint a scoped, short-lived public access token so the
+  // frontend can subscribe to that specific run's realtime chunk
+  // stream (see /api/chats/[sessionId]/realtime-token) instead of
+  // relying solely on 3s DB polling for live updates.
+  backgroundRunId String? @map("background_run_id")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 

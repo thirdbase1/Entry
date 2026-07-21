@@ -26,6 +26,10 @@ export interface ChatSessionSummary {
   /** True while a durable Trigger.dev worker run is continuing this chat's
    *  turn in the background -- see EveChatSession model comment. */
   backgroundRunActive: boolean;
+  /** Trigger.dev run ID of the active background worker, when
+   *  backgroundRunActive is true -- lets the frontend mint a scoped
+   *  realtime token to subscribe to that run's live chunk stream. */
+  backgroundRunId: string | null;
 }
 
 export interface ChatSessionSnapshot extends ChatSessionSummary {
@@ -48,7 +52,7 @@ export async function createChatSession(
       docId: opts.docId ?? null,
     },
     update: {},
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true, backgroundRunId: true },
   });
 }
 
@@ -134,6 +138,7 @@ export async function getChatSession(userId: string, sessionId: string): Promise
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     backgroundRunActive: row.backgroundRunActive,
+    backgroundRunId: row.backgroundRunId,
     events: row.events,
     cursor: row.cursor,
   };
@@ -157,11 +162,26 @@ export async function setBackgroundRunActive(sessionId: string, active: boolean)
   }).catch(() => {});
 }
 
+/**
+ * Persist the Trigger.dev run ID for the currently-active background
+ * worker run, right after `.trigger()` resolves in route.ts's handoff --
+ * this is what /api/chats/[sessionId]/realtime-token reads to know which
+ * run to mint a scoped public access token for. Cleared (set to null)
+ * whenever setBackgroundRunActive(sessionId, false) fires, so a stale run
+ * ID from a previous turn can never be handed out once that run is done.
+ */
+export async function setBackgroundRunId(sessionId: string, runId: string | null): Promise<void> {
+  await prisma.eveChatSession.update({
+    where: { id: sessionId },
+    data: { backgroundRunId: runId },
+  }).catch(() => {});
+}
+
 export async function listChatSessions(userId: string): Promise<ChatSessionSummary[]> {
   const rows = await prisma.eveChatSession.findMany({
     where: { userId },
     orderBy: { updatedAt: 'desc' },
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true, backgroundRunId: true },
   });
   return rows;
 }
@@ -172,7 +192,7 @@ export async function toggleChatCollected(userId: string, sessionId: string): Pr
   return prisma.eveChatSession.update({
     where: { id: sessionId, userId },
     data: { collected: !existing.collected },
-    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true },
+    select: { id: true, title: true, collected: true, docId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true, backgroundRunActive: true, backgroundRunId: true },
   });
 }
 

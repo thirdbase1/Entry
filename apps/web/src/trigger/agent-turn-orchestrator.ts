@@ -20,7 +20,7 @@
  */
 import { task } from '@trigger.dev/sdk/v3';
 import { prisma } from '@entry/db';
-import { setBackgroundRunActive } from '@entry/copilot';
+import { setBackgroundRunActive, setBackgroundRunId } from '@entry/copilot';
 import { agentTurnTask, type AgentTurnPayload } from './agent-turn';
 import type { UIMessage } from 'ai';
 
@@ -61,6 +61,11 @@ export const agentTurnOrchestratorTask = task({
       return await runOrchestration(payload);
     } finally {
       await setBackgroundRunActive(payload.chatId, false);
+      // Clear the stale run ID too -- otherwise a client that fetches a
+      // realtime token right after this clears would get handed an ID
+      // for a run that's already finished (harmless -- the token mint
+      // would just 404/fail -- but no reason to leave it dangling).
+      await setBackgroundRunId(payload.chatId, null);
     }
   },
 });
