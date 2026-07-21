@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
   push:
     branches:
-      - fly-io-worker-deploy
+      - main
     paths:
       - 'fly.toml'
       - 'Dockerfile.agent'
