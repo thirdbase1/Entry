@@ -34,6 +34,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { ChatConfigMenu, ModelPickerMenu, DEFAULT_MODEL_ID, useModelOptions } from './chat-config';
 import { ContextSelectorMenu, ContextPreview, type AttachedContext } from './chat-context';
+import { reportClientError } from '@/lib/report-client-error';
 
 const TRANSITION = { type: 'spring' as const, stiffness: 380, damping: 34 };
 
@@ -308,7 +309,20 @@ export function ChatInput({
   );
 
   const handleSend = useCallback(() => {
-    if ((input.trim() === '' && images.length === 0) || sending || uploadingCount > 0) return;
+    if ((input.trim() === '' && images.length === 0) || sending || uploadingCount > 0) {
+      // Breadcrumb (2026-07-21): a click that gets swallowed right here --
+      // e.g. `sending` (the parent's chat-hook `status`) stuck truthy from
+      // a previous, unrelated turn -- looks IDENTICAL to a dead button:
+      // nothing happens, no error, no network request, ever. This was
+      // completely invisible before; now a click that gets blocked here
+      // with actual text typed in (a real, deliberate send attempt, not
+      // just an empty-input no-op) is reported so it shows up server-side
+      // instead of just "the button did nothing" with no trace anywhere.
+      if (input.trim() !== '' || images.length > 0) {
+        reportClientError('Send blocked by guard', { region: 'chat-input-send-blocked', sending, uploadingCount, hasInput: input.trim() !== '' });
+      }
+      return;
+    }
     // Snapshot before clearing -- if onSend throws we restore exactly what
     // was there so nothing typed is ever silently lost on a failed send.
     const snapshotInput = input;

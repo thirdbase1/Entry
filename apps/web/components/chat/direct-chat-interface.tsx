@@ -53,6 +53,7 @@ import { VersionCard } from './renderers/version-card';
 import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
 import type { AttachedContext } from './chat-context';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
+import { reportClientError } from '@/lib/report-client-error';
 import { AutoFixSendProvider } from './chat-auto-fix-context';
 import { AutoCollapseTool, ToolHeader, ToolContent, ToolOutput, type ToolState } from '@/components/ui/tool';
 import { ChooseResult } from './renderers/choose-result';
@@ -274,6 +275,7 @@ function DirectChatSession({
     throttle: 50,
     onError(error) {
       console.error('[direct chat turn error]', error);
+      reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
       setTurnError(readableChatErrorMessage(error));
     },
     async onFinish() {
@@ -618,6 +620,7 @@ function DirectChatSession({
     const files = (opts?.images ?? []).map(img => ({ type: 'file' as const, mediaType: img.mediaType, url: img.url, filename: img.filename }));
     void sendWithRetry(() => chat.sendMessage({ text: input, files: files.length > 0 ? files : undefined }, { body: { disabledTools: opts?.disabledTools ?? [] } })).catch(err => {
       console.error('[direct chat send failed]', err);
+      reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-send-failed', stack: err instanceof Error ? err.stack : undefined });
       setTurnError(readableChatErrorMessage(err));
     });
   };

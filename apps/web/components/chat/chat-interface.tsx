@@ -14,6 +14,7 @@ import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
 import { sendWithRetry, readableChatErrorMessage } from './send-with-retry';
+import { reportClientError } from '@/lib/report-client-error';
 import { AutoFixSendProvider } from './chat-auto-fix-context';
 import { VersionCard, type VersionCardData } from './renderers/version-card';
 import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
@@ -710,6 +711,7 @@ function ChatInterfaceInner({
     maxReconnectAttempts: 20,
     onError(error) {
       console.error('[eve turn error]', error);
+      reportClientError(readableChatErrorMessage(error), { region: 'eve-turn-error', stack: error instanceof Error ? error.stack : undefined });
       setTurnError(readableChatErrorMessage(error));
     },
     // onError above wraps eve's own `Error(event.data.message)` — but for
@@ -944,6 +946,7 @@ function ChatInterfaceInner({
         // even reached the server" gap.
         await sendWithRetry(() => agent.send({ message, clientContext })).catch(err => {
           console.error('[send failed]', err);
+          reportClientError(readableChatErrorMessage(err), { region: 'eve-send-failed', stack: err instanceof Error ? err.stack : undefined });
           setTurnError(readableChatErrorMessage(err));
         });
       })();
