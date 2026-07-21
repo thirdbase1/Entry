@@ -43,19 +43,27 @@ interface ProviderConnection {
   apiKey: string | undefined;
 }
 
-function buildCustomModelClient(provider: ProviderConnection, modelId: string): LanguageModel {
+async function buildCustomModelClient(provider: ProviderConnection, modelId: string): Promise<LanguageModel> {
   switch (provider.compatibility) {
-    case 'ANTHROPIC':
+    case 'ANTHROPIC': {
+      const { createAnthropic } = await import('@ai-sdk/anthropic');
       return createAnthropic({ baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
-    case 'GOOGLE':
+    }
+    case 'GOOGLE': {
+      const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
       return createGoogleGenerativeAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
-    case 'OPENAI_RESPONSES':
+    }
+    case 'OPENAI_RESPONSES': {
       // `apiKey ?? ''` (never undefined) -- same @ai-sdk/openai env-fallback
       // footgun apps/web/lib/byok/resolve-model.ts's identical case avoids.
+      const { createOpenAI } = await import('@ai-sdk/openai');
       return createOpenAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey ?? '' }).responses(modelId);
+    }
     case 'OPENAI':
-    default:
+    default: {
+      const { createOpenAICompatible } = await import('@ai-sdk/openai-compatible');
       return createOpenAICompatible({ name: provider.label, baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
+    }
   }
 }
 
@@ -104,7 +112,7 @@ export async function resolveUserCustomProviderModel(
       );
     }
   }
-  const model = buildCustomModelClient(
+  const model = await buildCustomModelClient(
     { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl, apiKey },
     modelRow.modelId
   );

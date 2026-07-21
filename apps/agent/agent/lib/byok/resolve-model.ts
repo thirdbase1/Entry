@@ -95,7 +95,7 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
   // (build-model-client.ts) -- identical construction either way, just
   // extracted so testing a model doesn't require it to already be
   // isEnabled / looked up the way this function's signature demands.
-  const model: LanguageModel = buildModelClient(
+  const model: LanguageModel = await buildModelClient(
     { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl, apiKey },
     modelRow.modelId
   );
