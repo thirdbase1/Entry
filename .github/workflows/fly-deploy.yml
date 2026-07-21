@@ -1,0 +1,26 @@
+name: Deploy Agent Worker to Fly.io
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - fly-io-worker-deploy
+    paths:
+      - 'fly.toml'
+      - 'Dockerfile.agent'
+      - 'apps/agent/**'
+      - 'packages/**'
+      - '.github/workflows/fly-deploy.yml'
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    concurrency: deploy-group
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy (local docker build on runner, no remote builder)
+        run: flyctl deploy --local-only -c fly.toml --dockerfile Dockerfile.agent
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
