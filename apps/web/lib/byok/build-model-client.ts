@@ -23,7 +23,16 @@ export interface ByokProviderConnection {
   apiKey: string | undefined;
 }
 
-export function buildModelClient(provider: ByokProviderConnection, modelId: string): LanguageModel {
+/** Optional -- only used to tag durable retry/exhaustion logs (see
+ *  gateway-retry-fetch.ts) with who/what was actually affected. Omitting
+ *  it (e.g. from a context where userId isn't cheaply available) just
+ *  means those specific log rows have a blank userId -- never blocks
+ *  building the client. */
+export interface BuildModelClientContext {
+  userId?: string;
+}
+
+export function buildModelClient(provider: ByokProviderConnection, modelId: string, ctx?: BuildModelClientContext): LanguageModel {
   switch (provider.compatibility) {
     case 'ANTHROPIC':
       return createAnthropic({ baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
@@ -40,7 +49,7 @@ export function buildModelClient(provider: ByokProviderConnection, modelId: stri
         name: provider.label,
         baseURL: provider.baseUrl,
         apiKey: provider.apiKey,
-        fetch: createGatewayRetryFetch(),
+        fetch: createGatewayRetryFetch({ providerLabel: provider.label, userId: ctx?.userId }),
       })(modelId);
   }
 }

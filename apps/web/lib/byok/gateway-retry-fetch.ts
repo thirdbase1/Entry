@@ -45,6 +45,8 @@
  * through untouched.
  */
 
+import { logError } from '@entry/db/error-log';
+
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 350;
 const GENERIC_BODY_MAX_LENGTH = 400;
@@ -89,14 +91,41 @@ function matchesKnownTransientBody(status: number, bodyText: string): boolean {
   return false;
 }
 
-export function createGatewayRetryFetch(): typeof fetch {
+export interface GatewayRetryContext {
+  /** Provider label, e.g. "iamhc.cn" -- lets error_logs answer "which
+   *  relay is flaky" without cross-referencing request URLs by hand. */
+  providerLabel?: string;
+  userId?: string;
+}
+
+export function createGatewayRetryFetch(ctx?: GatewayRetryContext): typeof fetch {
   return async function gatewayRetryFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     let lastResponse: Response | undefined;
+    let retriedAtLeastOnce = false;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const response = await fetch(input, init);
 
-      if (response.status < 400) return response;
+      if (response.status < 400) {
+        // RECOVERED-AFTER-RETRY (2026-07-21): previously this success was
+        // completely invisible outside a live `vercel logs` tail --
+        // console.warn on each attempt is ephemeral (gone once Vercel
+        // rotates its short-lived log buffer), so there was literally no
+        // durable record that a given provider/relay needed retries at
+        // all, even when it recovered fine. Persisting this (lightweight,
+        // no full response body) is what lets us later answer "is this
+        // relay getting flakier over time" from error_logs instead of
+        // only ever seeing the final failure (or nothing, if it recovered).
+        if (retriedAtLeastOnce) {
+          logError({
+            source: 'byok-gateway-retry-recovered',
+            error: new Error(`Recovered after ${attempt} retry attempt(s)`),
+            userId: ctx?.userId,
+            context: { providerLabel: ctx?.providerLabel, attempts: attempt + 1, finalStatus: response.status },
+          });
+        }
+        return response;
+      }
 
       // Peek at the body without consuming the one we might return --
       // event-stream or not, this relay's error responses are always a
@@ -113,11 +142,25 @@ export function createGatewayRetryFetch(): typeof fetch {
       if (!matchesKnownTransientBody(response.status, bodyText)) return response;
 
       lastResponse = response;
+      retriedAtLeastOnce = true;
       if (attempt < MAX_RETRIES) {
         console.warn(
           `[byok] gateway transient ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying: ${bodyText.slice(0, 200)}`
         );
         await delay(RETRY_DELAY_MS * (attempt + 1));
+      } else {
+        // EXHAUSTED (2026-07-21): every prior attempt was only ever
+        // console.warn'd -- the final give-up itself now gets a durable
+        // row too (distinct source from the eventual streamText-level
+        // error the caller will also see), specifically so retry-storm
+        // patterns against one relay are queryable later, not just the
+        // symptom the user actually experienced.
+        logError({
+          source: 'byok-gateway-retry-exhausted',
+          error: new Error(`Gave up after ${MAX_RETRIES + 1} attempts, last status ${response.status}: ${bodyText.slice(0, 500)}`),
+          userId: ctx?.userId,
+          context: { providerLabel: ctx?.providerLabel, status: response.status, body: bodyText.slice(0, 1000) },
+        });
       }
     }
 

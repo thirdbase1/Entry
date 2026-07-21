@@ -40,7 +40,8 @@ export const POST = withApiErrorHandling(async (
 
   const model = buildModelClient(
     { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl, apiKey },
-    modelRow.modelId
+    modelRow.modelId,
+    { userId: session.user.id }
   );
 
   // 20s ceiling -- long enough for a real (if slow) first-token response
