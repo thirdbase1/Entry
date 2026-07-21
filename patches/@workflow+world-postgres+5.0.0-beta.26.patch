@@ -1,0 +1,22 @@
+diff --git a/node_modules/@workflow/world-postgres/dist/index.js b/node_modules/@workflow/world-postgres/dist/index.js
+index fd6394c..8830ea7 100644
+--- a/node_modules/@workflow/world-postgres/dist/index.js
++++ b/node_modules/@workflow/world-postgres/dist/index.js
+@@ -31,6 +31,17 @@ export function createWorld(config = {
+     const pool = config.pool ||
+         new Pool({
+             connectionString: config.connectionString || getDefaultConnectionString(),
++            // BOOT-HANG FIX (2026-07-21): the default pg.Pool has NO connection
++            // timeout (connectionTimeoutMillis defaults to 0 = wait forever). On
++            // some hosts (observed on Render), if the very first TCP connect to
++            // Postgres stalls for any network reason, this pool.connect() call
++            // inside createWorld()/queue.start() hangs indefinitely -- and since
++            // eve's own workflow-world init runs synchronously before the HTTP
++            // server ever calls .listen(), the ENTIRE process never binds its
++            // port and never logs anything, looking exactly like a silent boot
++            // hang. Bound it so a real connectivity problem surfaces as a fast,
++            // loud, diagnosable error instead of an infinite silent hang.
++            connectionTimeoutMillis: parseInt(process.env.WORKFLOW_POSTGRES_CONNECT_TIMEOUT_MS || '', 10) || 8000,
+             ...(maxPoolSize !== undefined ? { max: maxPoolSize } : {}),
+         });
+     const drizzle = createClient(pool);

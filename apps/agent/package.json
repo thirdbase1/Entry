@@ -10,7 +10,8 @@
     "build": "eve build",
     "dev": "eve dev",
     "start": "eve start",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "postbuild": "node scripts/patch-boot-trace.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.11",
