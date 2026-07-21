@@ -169,6 +169,14 @@ export function ChatInput({
   const [images, setImages] = useState<ChatImageAttachment[]>([]);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Rewritten (2026-07-21): `handleSend` calling `onSend` used to be a bare,
+  // un-guarded synchronous call -- if the parent's onSend threw (or a
+  // promise it kicked off rejected before its own catch attached), a click
+  // on Send produced literally zero visible feedback: no message appended,
+  // no error, nothing. Indistinguishable from the click not registering at
+  // all. `sendError` closes that gap the same way `uploadError`/`micError`
+  // already do for the other two failure-prone actions in this component.
+  const [sendError, setSendError] = useState<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   const hasValue = input.trim() !== '' || images.length > 0;
@@ -197,6 +205,12 @@ export function ChatInput({
     const t = setTimeout(() => setUploadError(null), 4000);
     return () => clearTimeout(t);
   }, [uploadError]);
+
+  useEffect(() => {
+    if (!sendError) return;
+    const t = setTimeout(() => setSendError(null), 5000);
+    return () => clearTimeout(t);
+  }, [sendError]);
 
   const handlePickImages = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -295,10 +309,24 @@ export function ChatInput({
 
   const handleSend = useCallback(() => {
     if ((input.trim() === '' && images.length === 0) || sending || uploadingCount > 0) return;
-    onSend(input, { attached, disabledTools, model, images });
-    setInput('');
-    setAttached([]);
-    setImages([]);
+    // Snapshot before clearing -- if onSend throws we restore exactly what
+    // was there so nothing typed is ever silently lost on a failed send.
+    const snapshotInput = input;
+    const snapshotAttached = attached;
+    const snapshotImages = images;
+    try {
+      onSend(input, { attached, disabledTools, model, images });
+      setInput('');
+      setAttached([]);
+      setImages([]);
+      setSendError(null);
+    } catch (err) {
+      console.error('[chat-input] onSend threw synchronously', err);
+      setSendError(err instanceof Error ? err.message : 'Failed to send — please try again');
+      setInput(snapshotInput);
+      setAttached(snapshotAttached);
+      setImages(snapshotImages);
+    }
   }, [input, sending, onSend, attached, disabledTools, model, images, uploadingCount]);
 
   return (
@@ -492,9 +520,11 @@ export function ChatInput({
         </AnimatePresence>
       </motion.button>
 
-      {(voiceState === 'recording' || voiceState === 'transcribing' || micError || uploadError) && (
+      {(voiceState === 'recording' || voiceState === 'transcribing' || micError || uploadError || sendError) && (
         <div className="pointer-events-none absolute bottom-2.5 right-12 text-xs font-medium">
-          {uploadError ? (
+          {sendError ? (
+            <span className="text-destructive">{sendError}</span>
+          ) : uploadError ? (
             <span className="text-destructive">{uploadError}</span>
           ) : micError ? (
             <span className="text-destructive">{micError}</span>

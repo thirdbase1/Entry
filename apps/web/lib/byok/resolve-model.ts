@@ -97,7 +97,8 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
   // isEnabled / looked up the way this function's signature demands.
   const model: LanguageModel = buildModelClient(
     { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl, apiKey },
-    modelRow.modelId
+    modelRow.modelId,
+    { userId }
   );
 
   const isThirdPartyResponsesRelay =
