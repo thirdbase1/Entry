@@ -9,7 +9,7 @@ import { useRouter } from 'next/navigation';
 import { MessageRenderer } from './message-renderer';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { resolveContextForSend, type AttachedContext } from './chat-context';
-import { buildConfigContext, DEFAULT_MODEL_ID } from './chat-config';
+import { buildConfigContext, DEFAULT_MODEL_ID, useModelOptions } from './chat-config';
 import { DownArrow, type DownArrowRef } from './chat-arrow';
 import { AggregatedTodoList } from './aggregated-todo-list';
 import { DirectChatInterface } from './direct-chat-interface';
@@ -184,6 +184,49 @@ export function ChatInterface({
     }
   }, []);
   const modelInitializedRef = useRef(false);
+
+  // FIXED (2026-07-21, real live incident: a brand-new chat "stops
+  // instantly" with no visible response and never even creates a chat
+  // row -- root-caused via direct DB inspection, since nothing was
+  // throwing server-side at all to explain it). The `model` state above
+  // seeds itself from localStorage's last-selected value with ZERO
+  // validation -- if that was a `byok:<modelRowId>` pointing at a BYOK
+  // provider model the user has since deleted (e.g. after rotating/
+  // replacing their API keys, exactly as reported), a brand-new chat
+  // sends that dead id straight to /api/direct/chat as byokModelId.
+  // resolveByokModel throws "BYOK model not found, disabled, or not
+  // owned by the current user" BEFORE preSave ever runs (that awaited
+  // resolve happens earlier in the route than the chat-row create/
+  // update), so the row is never created at all -- exactly matching
+  // "the chat doesn't even exist" rather than "existed then got
+  // deleted." Once the live BYOK catalog has actually loaded, silently
+  // fall back to the default model instead of ever sending a
+  // known-dead id. Only runs for a brand-new, not-yet-sent chat (never
+  // yanks the model out from under an existing/in-flight thread), and
+  // only once so it never fights a live user pick made afterward.
+  const staleModelCheckedRef = useRef(false);
+  const liveModelOptions = useModelOptions();
+  useEffect(() => {
+    if (sessionId) return; // only a brand-new chat can have a stale seed
+    if (staleModelCheckedRef.current) return;
+    if (userChangedModelRef.current) return; // user already picked live -- don't override
+    if (!model.startsWith('byok:')) return;
+    if (liveModelOptions.length === 0) return; // catalog hasn't loaded yet -- wait for it
+    const stillValid = liveModelOptions.some(o => o.value === model);
+    if (stillValid) {
+      staleModelCheckedRef.current = true;
+      return;
+    }
+    staleModelCheckedRef.current = true;
+    console.warn('[chat] stale localStorage model no longer exists, falling back to default:', model);
+    setModelState(DEFAULT_MODEL_ID);
+    try {
+      window.localStorage.removeItem(LAST_MODEL_STORAGE_KEY);
+    } catch {
+      // best-effort cleanup only
+    }
+  }, [sessionId, model, liveModelOptions]);
+
 
   // REMOVED (2026-07-15, user confirmed): there used to be a "self-heal"
   // guard here that force-reset `model` back to DEFAULT_MODEL_ID whenever
