@@ -36,6 +36,25 @@ import { cn } from '@/lib/utils';
 
 export type ToolState = 'input-streaming' | 'input-available' | 'output-available' | 'output-error';
 
+/**
+ * A timeout is technically just another tool error (with-agent-timeout.ts
+ * rethrows `"${toolName} timed out after ${s}s"` through the same
+ * output-error path every other failure takes), but it isn't the same
+ * KIND of failure -- the tool didn't break, it just ran out of its
+ * allotted budget, which is common and often expected for a genuinely
+ * long call (2026-07-21, "show it in UI when agent time out"). Detected
+ * by matching the exact rethrow message shape from
+ * apps/agent/agent/lib/tool-impls/with-agent-timeout.ts rather than a
+ * new dedicated ToolState, so every existing call site (which only ever
+ * passes state + errorText, already computed) gets the distinct
+ * treatment for free with no prop-shape changes beyond the new optional
+ * `errorText` param added below.
+ */
+export function isTimeoutError(errorText?: string | null): boolean {
+  if (!errorText) return false;
+  return /timed out after \d+(\.\d+)?s\b/i.test(errorText);
+}
+
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
 export function Tool({ className, ...props }: ToolProps) {
@@ -49,7 +68,7 @@ const STATUS_LABEL: Record<ToolState, string> = {
   'output-error': 'Error',
 };
 
-function StatusIcon({ state }: { state: ToolState }) {
+function StatusIcon({ state, timedOut }: { state: ToolState; timedOut?: boolean }) {
   switch (state) {
     case 'input-streaming':
       return <Circle className="size-3" />;
@@ -58,7 +77,7 @@ function StatusIcon({ state }: { state: ToolState }) {
     case 'output-available':
       return <CheckCircle2 className="size-3 text-green-600" />;
     case 'output-error':
-      return <XCircle className="size-3 text-destructive" />;
+      return timedOut ? <Clock className="size-3 text-amber-500" /> : <XCircle className="size-3 text-destructive" />;
   }
 }
 
@@ -88,13 +107,18 @@ function useElapsedSeconds(running: boolean): number {
   return elapsed;
 }
 
-export function ToolStatusBadge({ state }: { state: ToolState }) {
+export function ToolStatusBadge({ state, errorText }: { state: ToolState; errorText?: string | null }) {
   const running = state === 'input-streaming' || state === 'input-available';
   const elapsed = useElapsedSeconds(running);
+  const timedOut = state === 'output-error' && isTimeoutError(errorText);
+  const label = timedOut ? 'Timed out' : STATUS_LABEL[state];
   return (
-    <Badge variant={state === 'output-error' ? 'destructive' : 'secondary'} className="rounded-full tabular-nums">
-      <StatusIcon state={state} />
-      {STATUS_LABEL[state]}
+    <Badge
+      variant={state === 'output-error' && !timedOut ? 'destructive' : 'secondary'}
+      className={cn('rounded-full tabular-nums', timedOut && 'bg-amber-500/15 text-amber-600 dark:text-amber-400')}
+    >
+      <StatusIcon state={state} timedOut={timedOut} />
+      {label}
       {running && elapsed > 0 && <span className="text-muted-foreground/80">· {elapsed}s</span>}
     </Badge>
   );
@@ -151,9 +175,13 @@ export interface ToolHeaderProps {
   state: ToolState;
   icon?: ReactNode;
   className?: string;
+  /** Passed through to ToolStatusBadge so a timeout renders as a distinct
+   *  amber "Timed out" badge instead of a red "Error" one -- see
+   *  isTimeoutError above. Optional/omittable everywhere else. */
+  errorText?: string | null;
 }
 
-export function ToolHeader({ title, state, icon, className }: ToolHeaderProps) {
+export function ToolHeader({ title, state, icon, className, errorText }: ToolHeaderProps) {
   return (
     <CollapsibleTrigger data-tool-state={state} className={cn('group flex w-full items-center justify-between gap-2 p-2.5 text-left', className)}>
       <div className="flex min-w-0 items-center gap-2">
@@ -161,7 +189,7 @@ export function ToolHeader({ title, state, icon, className }: ToolHeaderProps) {
         <span className="min-w-0 truncate text-xs font-medium text-foreground">{title}</span>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <ToolStatusBadge state={state} />
+        <ToolStatusBadge state={state} errorText={errorText} />
         <ChevronDown className="size-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
       </div>
     </CollapsibleTrigger>
@@ -202,15 +230,16 @@ export function ToolOutput({
   className?: string;
 }) {
   if (!output && !errorText) return null;
+  const timedOut = isTimeoutError(errorText);
   return (
     <div className={cn('space-y-1.5 p-3', className)}>
       <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-        {errorText ? 'Error' : 'Result'}
+        {errorText ? (timedOut ? 'Timed out' : 'Error') : 'Result'}
       </div>
       <div
         className={cn(
           'overflow-x-auto rounded-md text-xs',
-          errorText ? 'bg-destructive/10 text-destructive p-2' : 'text-foreground'
+          errorText ? (timedOut ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 p-2' : 'bg-destructive/10 text-destructive p-2') : 'text-foreground'
         )}
       >
         {errorText ? <div className="whitespace-pre-wrap">{errorText}</div> : output}

@@ -14,6 +14,7 @@
 import type { EveDynamicToolPart } from 'eve/react';
 import { CheckBoxCheckSolidIcon } from '@blocksuite/icons/rc';
 import { GenericToolResult } from './generic-tool-result';
+import { isTimeoutError } from '@/components/ui/tool';
 import { GenericToolCalling } from './generic-tool-calling';
 
 export function GenericToolCard({ part }: { part: EveDynamicToolPart }) {
@@ -25,9 +26,16 @@ export function GenericToolCard({ part }: { part: EveDynamicToolPart }) {
   }
 
   if (part.state === 'output-error') {
+    const timedOut = isTimeoutError(part.errorText);
     return (
-      <GenericToolResult icon={<CheckBoxCheckSolidIcon />} title={`${name} failed`} status="output-error" autoCollapseOnTerminal>
-        <div className="p-3 text-sm text-destructive">{part.errorText}</div>
+      <GenericToolResult
+        icon={<CheckBoxCheckSolidIcon />}
+        title={timedOut ? `${name} timed out` : `${name} failed`}
+        status="output-error"
+        errorText={part.errorText}
+        autoCollapseOnTerminal
+      >
+        <div className={`p-3 text-sm ${timedOut ? 'text-amber-600 dark:text-amber-400' : 'text-destructive'}`}>{part.errorText}</div>
       </GenericToolResult>
     );
   }

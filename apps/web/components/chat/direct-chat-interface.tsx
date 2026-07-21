@@ -699,7 +699,7 @@ function DirectChatSession({
                         // winning for that card (see tool.tsx).
                         return (
                           <AutoCollapseTool key={i} className="my-1" state={state}>
-                            <ToolHeader title={toolName} state={state} />
+                            <ToolHeader title={toolName} state={state} errorText={errorText} />
                             <ToolContent>
                               {errorText ? (
                                 <ToolOutput errorText={errorText} />

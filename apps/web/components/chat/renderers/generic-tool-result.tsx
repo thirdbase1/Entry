@@ -26,7 +26,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { ToolStatusBadge, type ToolState } from '@/components/ui/tool';
+import { ToolStatusBadge, isTimeoutError, type ToolState } from '@/components/ui/tool';
 import { cn } from '@/lib/utils';
 
 export function GenericToolResult({
@@ -41,6 +41,7 @@ export function GenericToolResult({
   autoExpand,
   autoCollapseOnTerminal = false,
   status = 'output-available',
+  errorText,
 }: {
   icon?: ReactNode;
   title: ReactNode;
@@ -64,6 +65,11 @@ export function GenericToolResult({
    *  'input-available' for a still-running call (see GenericToolCalling,
    *  which renders the same shell in those two states). */
   status?: ToolState;
+  /** Passed through to ToolStatusBadge -- when set and `status` is
+   *  'output-error', a timeout (see isTimeoutError) renders as a distinct
+   *  amber "Timed out" badge instead of a red "Error" one. Optional; every
+   *  existing call site that doesn't pass it keeps the plain red badge. */
+  errorText?: string | null;
 }) {
   const [collapsed, setCollapsed] = useState(autoExpand === undefined ? true : !autoExpand);
   const userToggledRef = useRef(false);
@@ -105,7 +111,7 @@ export function GenericToolResult({
           {title}
           {count ? <span className="ml-1 opacity-70">{count}</span> : null}
         </div>
-        <ToolStatusBadge state={status} />
+        <ToolStatusBadge state={status} errorText={errorText} />
         <div className="flex items-center gap-1.5">
           {actions}
           {children ? (
