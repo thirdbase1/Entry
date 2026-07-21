@@ -192,58 +192,31 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // otherwise-wasted wall-clock overlap does.
   const userWorkingMemoryPromise = getWorkingMemory(userId);
 
-  // Resolve BEFORE any streaming starts — a bad/missing key or unknown
-  // model slug surfaces as a clean JSON error, not a broken half-open
-  // stream.
-  const resolved = byokModelId
-    ? await resolveByokModel(byokModelId, userId)
-    : requestedModel
-      ? resolveGatewayModel(requestedModel)
-      : resolveGatewayModel(await resolveModelIdForProvider('anthropic'));
-  const { model, providerLabel, modelId } = resolved;
-  // See strip-reasoning-parts.ts's file comment for the exact bug this
-  // fixes (only set on the BYOK path -- resolveGatewayModel's return type
-  // has no such flag, always undefined/false there).
-  const isThirdPartyResponsesRelay = 'isThirdPartyResponsesRelay' in resolved && resolved.isThirdPartyResponsesRelay;
-  // FIXED (2026-07-19): same relay-imitating-a-real-provider problem, just
-  // on ANTHROPIC compatibility mode instead of OPENAI_RESPONSES -- see
-  // resolve-model.ts's isThirdPartyAnthropicRelay comment for the exact
-  // "unsupported reasoning metadata" warning-storm bug this closes.
-  const isThirdPartyAnthropicRelay = 'isThirdPartyAnthropicRelay' in resolved && resolved.isThirdPartyAnthropicRelay;
-
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
-  // Persist the user's turn to the row BEFORE the turn finishes, not only
-  // in onFinish — so if the model call itself fails outright (network,
-  // bad key, upstream outage) the user's own message is never silently
-  // lost. onFinish below still overwrites `events` with the complete
-  // exchange (including the assistant's reply) once the turn succeeds.
-  //
-  // This DB round-trip (1-2 Neon queries) used to run sequentially BEFORE
-  // streamText() was even called, adding its full latency to time-to-
-  // first-token on every single turn for no reason — the model call
-  // doesn't depend on this write succeeding first, and the write doesn't
-  // depend on the model call either. Kicking it off concurrently with
-  // preparing the model call (below) removes it from the critical path:
-  // it now overlaps with the provider's own connection setup instead of
-  // stacking in front of it. Still fully awaited (see `await preSave`
-  // right before the response is returned) so the durability guarantee
-  // above is unchanged — only the ORDERING relative to streamText's own
-  // network call changed, not whether either one is awaited.
-  // FIXED (2026-07-18, real TTFT regression from the Working Memory
-  // feature): this used to be a plain `await getWorkingMemory(userId)`
-  // sitting well below preSave/compactionResult, so its DB round-trip
-  // ran fully SEQUENTIALLY after those instead of overlapping with
-  // them the way this whole function otherwise carefully avoids (see
-  // preSave's own comment above for the established pattern). Two
-  // independent async DB calls run one after another cost t1+t2; kicked
-  // off together up front and only awaited where actually needed, they
-  // cost max(t1,t2) instead -- a real, direct hit to time-to-first-token
-  // on every single turn, on top of whatever compaction/model-connection
-  // latency was already there. Only the START point moved (now right
-  // alongside preSave, the earliest point userId is known); still fully
-  // awaited before SYSTEM_PROMPT is built below, so behavior is
-  // unchanged -- only the wall-clock overlap improved.
+  // FIXED (2026-07-21, real confirmed bug -- reported as "chat doesn't
+  // create/save in the DB" and independently traced through actual
+  // production DB rows: the user's most recent chats before this fix
+  // stopped dead at whatever day BYOK model resolution started failing
+  // for them, with NOTHING newer ever persisted). preSave (below,
+  // unchanged) used to be defined and invoked only AFTER `await
+  // resolveByokModel(...)` -- since resolveByokModel can throw (unknown/
+  // disabled/not-owned model id, a stale client-side model selection
+  // pointing at a model that got disabled after a past failed test, or a
+  // decrypt failure from a rotated encryption key), and a thrown error
+  // from an earlier `await` in a straight-line async function skips every
+  // line textually after it, ANY resolution failure meant preSave was
+  // simply never reached at all -- the user's own message vanished with
+  // zero trace, no row, nothing to recover, even though the whole POINT
+  // of preSave's design (see its own comment below) was to guarantee the
+  // user's message is never lost even when the model call itself fails.
+  // Moving chatId + preSave up here (their only dependencies -- uiMessages,
+  // byokModelId, requestedModel, chatId itself -- are all already
+  // available at this point) means the row now always gets created/
+  // updated with the user's turn REGARDLESS of whether model resolution
+  // below succeeds, fails, or hangs. resolveByokModel is wrapped below so
+  // a throw there still lets preSave finish before the error response
+  // goes out, instead of racing an unhandled rejection.
   const preSave = (async () => {
     const existing = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId } });
     if (!existing) {
@@ -260,20 +233,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         },
       });
     } else {
-      // FIXED (2026-07-15, real confirmed bug -- "why if I select another
-      // model to work and when I reload page I see that it has already
-      // automatically switched to [the chat's original model]"): this
-      // used to only ever write byokModelId/requestedModel once, at
-      // creation, in the `if (!existing)` branch above -- every later
-      // turn only updated `events`. Switching models mid-thread already
-      // worked live (see chat-interface.tsx's own 2026-07-11 fix for
-      // "switch model, doesn't change, still uses the model I first
-      // used") but the DB row itself never learned about it, so the very
-      // next full page reload re-seeded the picker from that frozen,
-      // creation-time value and silently reverted every later switch.
-      // Now the row's stored model always reflects whichever one was
-      // actually used for the MOST RECENT turn, matching what
-      // chat-interface.tsx's seeding effect reads back on reload.
       await prisma.eveChatSession.update({
         where: { id: chatId, userId },
         data: { events: uiMessages as any, byokModelId: byokModelId ?? null, requestedModel: byokModelId ? null : (requestedModel ?? null) },
@@ -283,6 +242,33 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     console.error('[direct chat] pre-stream save failed', chatId, err);
     logError({ source: 'direct-chat-presave', error: err, userId, chatId });
   });
+
+  // Resolve BEFORE any streaming starts — a bad/missing key or unknown
+  // model slug surfaces as a clean JSON error, not a broken half-open
+  // stream. Wrapped so preSave (already running concurrently above) is
+  // always awaited before a resolution failure's error response goes out
+  // -- the user's message is now guaranteed saved even on this path.
+  let resolved: Awaited<ReturnType<typeof resolveByokModel>> | ReturnType<typeof resolveGatewayModel>;
+  try {
+    resolved = byokModelId
+      ? await resolveByokModel(byokModelId, userId)
+      : requestedModel
+        ? resolveGatewayModel(requestedModel)
+        : resolveGatewayModel(await resolveModelIdForProvider('anthropic'));
+  } catch (err) {
+    await preSave;
+    throw err;
+  }
+  const { model, providerLabel, modelId } = resolved;
+  // See strip-reasoning-parts.ts's file comment for the exact bug this
+  // fixes (only set on the BYOK path -- resolveGatewayModel's return type
+  // has no such flag, always undefined/false there).
+  const isThirdPartyResponsesRelay = 'isThirdPartyResponsesRelay' in resolved && resolved.isThirdPartyResponsesRelay;
+  // FIXED (2026-07-19): same relay-imitating-a-real-provider problem, just
+  // on ANTHROPIC compatibility mode instead of OPENAI_RESPONSES -- see
+  // resolve-model.ts's isThirdPartyAnthropicRelay comment for the exact
+  // "unsupported reasoning metadata" warning-storm bug this closes.
+  const isThirdPartyAnthropicRelay = 'isThirdPartyAnthropicRelay' in resolved && resolved.isThirdPartyAnthropicRelay;
 
   // Minimal structural ctx — enough for the 10 reused tool-impls. See
   // ToolExecCtx: only `session.id` / `session.auth.current.principalId`
