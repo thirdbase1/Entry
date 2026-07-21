@@ -86,6 +86,19 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
   const unavailableStreakRef = useRef(0);
   const selfHealAttemptedRef = useRef(false);
   const firstSeenAtRef = useRef<number | null>(null);
+  // FIXED (2026-07-21, real log spam confirmed live: a chat that no
+  // longer exists for the current user -- deleted, or a stale browser
+  // tab left open past its own deletion -- had its /preview endpoint
+  // polled every 1500ms FOREVER, because a plain 404 was treated
+  // identically to any other transient miss (`if (!res.ok) return`, no
+  // distinction, no give-up condition). A 404 here specifically means
+  // getChatSession found no row for {id, userId} -- that can never
+  // self-resolve by retrying, unlike a real "sandbox not booted yet"
+  // miss (200 with available:false), so retrying it forever was pure
+  // waste and noisy log spam with zero chance of ever succeeding. Now:
+  // stop the interval outright the first time the endpoint itself
+  // 404s (chat gone / not owned).
+  const goneRef = useRef(false);
   const autoFix = useAutoFixSend();
   const hasMessages = autoFix?.hasMessages ?? false;
 
@@ -105,6 +118,17 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
     if (firstSeenAtRef.current === null) firstSeenAtRef.current = Date.now();
     try {
       const res = await fetch(`/api/chats/${sessionId}/preview`);
+      if (res.status === 404) {
+        // Chat no longer exists (or never did) for this user -- retrying
+        // can never succeed. Stop polling permanently instead of hammering
+        // a dead endpoint every 1.5s for as long as the tab stays open.
+        goneRef.current = true;
+        if (pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+        return;
+      }
       if (!res.ok) return;
       const data = (await res.json()) as PreviewStatus;
       setState(data);
@@ -145,7 +169,14 @@ export function usePreviewAutoFix(sessionId: string | undefined) {
   }, [sessionId, hasMessages, restart, autoFix]);
 
   useEffect(() => {
-    if (!sessionId || !hasMessages) return;
+    // Reset the give-up flag whenever we're actually looking at a
+    // different chat -- a dead one shouldn't poison polling for a
+    // legitimately different sessionId mounted later.
+    goneRef.current = false;
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || !hasMessages || goneRef.current) return;
     poll();
     pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
     return () => {
