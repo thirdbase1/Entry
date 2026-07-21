@@ -96,7 +96,9 @@ import type { ToolExecCtx } from './types.js';
  * A cold-start catalog hiccup can't take the tool down: getCatalogMenu()
  * falls back to a small known-good provider list on any fetch failure.
  */
+console.error('[BOOT-TRACE] tool-impls/agent.ts: before getCatalogMenu', new Date().toISOString());
 const catalogMenu = await getCatalogMenu();
+console.error('[BOOT-TRACE] tool-impls/agent.ts: after getCatalogMenu, providers=', catalogMenu.providers.length, new Date().toISOString());
 
 const AgentDelegateInputSchema = z.object({
   message: z

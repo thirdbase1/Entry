@@ -1,6 +1,8 @@
 import { defineAgent } from 'eve';
 import { resolveModelIdForProvider } from './lib/model-catalog.js';
 
+console.error('[BOOT-TRACE] agent.ts: module eval started', new Date().toISOString());
+
 /**
  * The primary model id is resolved DYNAMICALLY from the live AI Gateway
  * catalog at module-eval time (top-level await) -- no model id is
@@ -34,7 +36,9 @@ import { resolveModelIdForProvider } from './lib/model-catalog.js';
  * Compaction is enabled with eve's defaults (threshold 90% of context
  * window, uses the same model for summary generation).
  */
+console.error('[BOOT-TRACE] agent.ts: before resolveModelIdForProvider', new Date().toISOString());
 const primaryModelId = await resolveModelIdForProvider('anthropic');
+console.error('[BOOT-TRACE] agent.ts: after resolveModelIdForProvider ->', primaryModelId, new Date().toISOString());
 
 /**
  * Self-hosted (Pxxl) workflow world override -- 2026-07-20, part of the
