@@ -243,6 +243,26 @@ export const agentTurnTask = task({
     const result = streamText({
       model,
       stopWhen: stepCountIs(120),
+      // FIXED (2026-07-21, mirrors the identical fix already shipped in
+      // /api/direct/chat/route.ts for the sync path -- confirmed live via
+      // direct upstream testing that free/flaky BYOK relays (freemodel.dev,
+      // aerolink.lat, etc.) will straight-up dead-connect: zero bytes, zero
+      // chunks, connection just hangs forever with no TCP-level close or
+      // HTTP error at all). Without this, a dead BYOK connection inside
+      // THIS background worker would hang silently for the task's full
+      // 3600s maxDuration -- worse than the sync route's old bug, since
+      // there's no Vercel kill to even log an opaque timeout: Trigger.dev
+      // just sees a run that's still "executing" for an hour with nothing
+      // to show the user, then the orchestrator's triggerAndWait finally
+      // times out and reports ok:false with a generic run-timeout, not a
+      // clean "this model didn't respond" message. chunkMs mirrors
+      // route.ts's own choice: abort if literally nothing arrives for 90s
+      // (a real, still-generating model is completely unaffected no
+      // matter how long generation legitimately takes); stepMs is the
+      // "trickles a few bytes forever" safety net, capped well under the
+      // SOFT_DEADLINE_MS ceiling below so there's still real margin for
+      // this task's own per-step persistence to run after an abort.
+      timeout: { chunkMs: 90_000, stepMs: 240_000 },
       instructions: instructions as any,
       messages: convertedMessages,
       prepareStep({ stepNumber }) {
@@ -357,6 +377,21 @@ export const agentTurnTask = task({
       originalMessages: uiMessages,
       generateMessageId: () => crypto.randomUUID(),
       sendReasoning: true,
+      // FIXED (2026-07-21, mirrors the identical fix in
+      // /api/direct/chat/route.ts's own toUIMessageStream -- this file's
+      // copy was missing it): omitting onError here means the AI SDK's
+      // default swallows any real error (a dead BYOK connection, upstream
+      // 500, etc.) into a bare generic "An error occurred." with NOTHING
+      // else surfaced or logged -- exactly the silent-failure class the
+      // sync route already fixed once, just unfixed on this sibling
+      // background-worker path since it was written as a separate copy.
+      onError(error: unknown) {
+        console.error('[agent-turn task] turn error', chatId, providerLabel, modelId, error);
+        logError({ source: 'agent-turn-task-turn', error, userId, chatId, context: { providerLabel, modelId } });
+        if (error instanceof Error) return error.message;
+        if (typeof error === 'string') return error;
+        return 'Something went wrong generating a response. Please try again.';
+      },
     });
     let chunkStream: any = rawChunkStream;
     try {

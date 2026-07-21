@@ -30,7 +30,13 @@
 import { useEffect, useState } from 'react';
 import { useRealtimeStream } from '@trigger.dev/react-hooks';
 import { readUIMessageStream, type UIMessage, type UIMessageChunk } from 'ai';
-import { chatUiStream } from '@/src/trigger/streams';
+
+// Deliberately NOT importing chatUiStream from '@/src/trigger/streams' here --
+// that pulls in @trigger.dev/sdk's server-only auth/skills modules (node:fs,
+// node:path, node:async_hooks) which webpack can't bundle client-side.
+// The plain-string-key overload of useRealtimeStream avoids that entirely;
+// 'chat-ui' must stay in sync with the id passed to streams.define() in
+// src/trigger/streams.ts.
 
 export function useBackgroundChunkStreamPreview(sessionId: string | null, active: boolean): UIMessage | undefined {
   const [runId, setRunId] = useState<string | null>(null);
@@ -63,7 +69,7 @@ export function useBackgroundChunkStreamPreview(sessionId: string | null, active
     };
   }, [sessionId, active]);
 
-  const { parts } = useRealtimeStream(chatUiStream, runId ?? '', {
+  const { parts } = useRealtimeStream<UIMessageChunk>(runId ?? '', 'chat-ui', {
     accessToken: accessToken ?? undefined,
     enabled: !!(runId && accessToken),
     // Generous idle timeout -- a long tool call (bash/browser/sub-agent)
