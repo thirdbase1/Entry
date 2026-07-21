@@ -1,77 +1,92 @@
 /**
- * Permanent admin-only diagnostic (2026-07-15): inspects a single chat
- * session's stored byokModelId/requestedModel alongside the owning user's
- * CURRENT live BYOK providers/models, side by side -- built to root-cause
- * "BYOK model not found, disabled, or not owned by the current user"
- * reports without guessing, especially the class of bug where a provider
- * gets deleted/recreated (new row, new id) out from under a chat session
- * that still references the old, now-gone model id.
+ * Admin-only, read-only diagnostic (2026-07-21): inspect eveChatSession
+ * rows directly, without the normal userId-ownership scoping every real
+ * app route enforces. Needed to root-cause a live report ("new chat
+ * stops instantly with no response" + "why is a new chat auto
+ * deleting") where the error_logs table showed ZERO entries for the
+ * affected time window -- meaning nothing threw server-side, so the only
+ * way to see what's actually happening to the row itself is to look at
+ * it directly instead of guessing from application-level logs. Same
+ * admin-bearer-or-session gate as /api/admin/errors.
  *
- * GET ?chatId=... -- admin/bearer only, same dual-auth pattern as
- * admin/errors.ts and admin/db/migrate/route.ts.
+ * GET ?id=<chatId>            -- single row's raw state (or "not found")
+ * GET ?recent=20              -- most recently created rows, any user
  */
-import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
-import { featureService } from '@entry/features';
+import { withApiErrorHandling } from '@/lib/api-error';
 import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
-async function isAuthorized(req: NextRequest): Promise<boolean> {
+export const GET = withApiErrorHandling(async (req: Request) => {
   const bearerOk = isAdminBearerAuthorized(req);
-  if (bearerOk) return true;
-  const { session } = await getUserSessionFromRequest(req);
-  if (!session) return false;
-  return featureService.isAdmin(session.user.id);
-}
-
-export async function GET(req: NextRequest) {
-  if (!(await isAuthorized(req))) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!bearerOk) {
+    const { session } = await getUserSessionFromRequest(req);
+    if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
 
   const url = new URL(req.url);
-  const chatId = url.searchParams.get('chatId');
-  if (!chatId) return NextResponse.json({ error: 'chatId query param required' }, { status: 400 });
+  const id = url.searchParams.get('id');
+  const recent = url.searchParams.get('recent');
 
-  const chat = await prisma.eveChatSession.findUnique({
-    where: { id: chatId },
-    select: { id: true, userId: true, byokModelId: true, requestedModel: true, createdAt: true, updatedAt: true },
-  });
-  if (!chat) return NextResponse.json({ error: 'chat not found' }, { status: 404 });
-
-  const [byokModelRow, allUserModels] = await Promise.all([
-    chat.byokModelId
-      ? prisma.userModelProviderModel.findUnique({
-          where: { id: chat.byokModelId },
-          select: { id: true, modelId: true, isEnabled: true, providerId: true },
-        })
-      : null,
-    prisma.userModelProviderModel.findMany({
-      where: { provider: { userId: chat.userId } },
+  if (id) {
+    const row = await prisma.eveChatSession.findUnique({
+      where: { id },
       select: {
         id: true,
-        modelId: true,
-        isEnabled: true,
-        providerId: true,
-        provider: { select: { id: true, label: true, baseUrl: true, compatibility: true } },
+        userId: true,
+        title: true,
+        byokModelId: true,
+        requestedModel: true,
+        createdAt: true,
+        updatedAt: true,
+        backgroundRunActive: true,
+        backgroundRunId: true,
+        events: true,
       },
-    }),
-  ]);
+    });
+    if (!row) return Response.json({ found: false, id });
+    const events = Array.isArray(row.events) ? row.events : [];
+    return Response.json({
+      found: true,
+      id: row.id,
+      userId: row.userId,
+      title: row.title,
+      byokModelId: row.byokModelId,
+      requestedModel: row.requestedModel,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      backgroundRunActive: row.backgroundRunActive,
+      backgroundRunId: row.backgroundRunId,
+      eventCount: events.length,
+      lastEventPreview: events.length ? JSON.stringify(events[events.length - 1]).slice(0, 800) : null,
+    });
+  }
 
-  const providerOwner = chat.byokModelId
-    ? await prisma.userModelProviderModel.findUnique({
-        where: { id: chat.byokModelId },
-        select: { provider: { select: { id: true, userId: true, label: true } } },
-      })
-    : null;
-
-  const sandboxTemplates = await prisma.sandboxTemplate.findMany();
-
-  return NextResponse.json({
-    chat,
-    sandboxTemplates,
-    byokModelRowReferencedByChat: byokModelRow,
-    providerOwnerCheck: providerOwner
-      ? { providerId: providerOwner.provider.id, providerOwnerUserId: providerOwner.provider.userId, chatOwnerUserId: chat.userId, matches: providerOwner.provider.userId === chat.userId }
-      : null,
-    allUserModelsNow: allUserModels,
+  const limit = Math.min(Math.max(Number(recent) || 20, 1), 100);
+  const rows = await prisma.eveChatSession.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+    select: {
+      id: true,
+      userId: true,
+      title: true,
+      byokModelId: true,
+      requestedModel: true,
+      createdAt: true,
+      updatedAt: true,
+      events: true,
+    },
   });
-}
+  return Response.json({
+    rows: rows.map(r => ({
+      id: r.id,
+      userId: r.userId,
+      title: r.title,
+      byokModelId: r.byokModelId,
+      requestedModel: r.requestedModel,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      eventCount: Array.isArray(r.events) ? r.events.length : 0,
+    })),
+  });
+});
