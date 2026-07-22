@@ -30,10 +30,15 @@ export function describeRefusal(finishReason: string | undefined, rawFinishReaso
       "or switch to a different model if this keeps happening."
     );
   }
+  // This branch only ever runs when there is truly no text, no tool
+  // call, AND no error part at all (hasRealContent's error check above
+  // now catches every case where a real, specific reason exists) -- so
+  // this genuinely is the rare "provider returned nothing, no exception
+  // thrown" case, not a mask over a real error.
   const reasonLabel = rawFinishReason || finishReason;
   return (
-    `The model finished this turn without returning any text or taking any action${reasonLabel ? ` (reason: ${reasonLabel})` : ''}. ` +
-    'Try rephrasing your message, or try again — this can happen from a provider-side hiccup.'
+    `No response came back this turn${reasonLabel ? ` (provider reported: ${reasonLabel})` : ' and the provider did not report a reason'}. ` +
+    'Try again, or rephrase your message.'
   );
 }
 
@@ -42,6 +47,14 @@ function hasRealContent(message: UIMessage): boolean {
   return message.parts.some((part: any) => {
     if (part?.type === 'text') return typeof part.text === 'string' && part.text.trim().length > 0;
     if (typeof part?.type === 'string' && (part.type.startsWith('tool-') || part.type === 'dynamic-tool')) return true;
+    // FIXED (2026-07-22, real user report: a genuine error -- e.g. "your
+    // saved API key could not be read" -- was getting buried under the
+    // generic "finished without returning any text" fallback below,
+    // because a real `{ type: 'error', errorText }` part was never
+    // recognized as "content" here. That's backwards: an error IS the
+    // real, specific, actionable explanation -- it must never be treated
+    // as silence and papered over with a vague generic message.
+    if (part?.type === 'error' && typeof part.errorText === 'string' && part.errorText.trim().length > 0) return true;
     return false;
   });
 }

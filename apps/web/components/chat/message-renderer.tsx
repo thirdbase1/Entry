@@ -200,6 +200,25 @@ export const MessageRenderer = memo(function MessageRenderer({
           if (part.type === 'authorization') {
             return <AuthorizationCard key={idx} part={part} />;
           }
+          // Real bug fix (2026-07-22, user report: "no error show on UI at
+          // all... except that generic message"): the AI SDK emits a real
+          // `{ type: 'error', errorText }` part whenever a genuine error
+          // happens mid-turn (bad BYOK key, tool crash, provider outage,
+          // etc.) -- this was never rendered at all (fell through to the
+          // `return null` below), so the actual, specific, actionable error
+          // was silently dropped from the chat bubble even though it was
+          // sitting right there in the message data the whole time.
+          if ((part as any).type === 'error') {
+            const errorText = (part as any).errorText || 'Something went wrong generating a response.';
+            return (
+              <div
+                key={idx}
+                className="w-full rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300"
+              >
+                {errorText}
+              </div>
+            );
+          }
           return null;
         })}
       </div>
