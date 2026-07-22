@@ -13,6 +13,33 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-22',
+    title: 'Fixed: messages stopping instantly and nothing saving',
+    items: [
+      "Root cause of the worst recent outage, confirmed live: a leftover environment variable from an abandoned hosting migration was baked into every client build and silently routing every message send to a dead external worker instead of this deployment's own server. Requests never reached the app at all -- which is why sends failed instantly and nothing was ever saved. The variable has been removed AND the code path hardcoded shut so it can never be re-armed by configuration alone.",
+    ],
+  },
+  {
+    date: '2026-07-21',
+    title: 'Long tasks can now run for hours -- and you still watch them live',
+    items: [
+      "Turns are no longer capped by the platform's ~5-minute request limit. A turn that needs more time now hands off seamlessly to a durable background worker that can keep going for up to ~6 hours, saving progress to the database after every step -- so a crash or restart never loses finished work, it just picks up from the last checkpoint.",
+      'Background turns stream live, not just on a refresh poll: the same token-by-token text and tool-call cards a normal turn shows keep rendering in real time after the handoff, including across multi-hour continuation hops.',
+      'Reloading the page during a background turn reconnects to it automatically; if a chat turns out to be permanently gone, the client now stops polling for it instead of retrying forever.',
+    ],
+  },
+  {
+    date: '2026-07-21',
+    title: 'Default chat is now fully self-contained (and faster to fail loudly)',
+    items: [
+      'Chats with no explicitly picked model no longer depend on a separately hosted worker being alive -- everything now runs through the same in-app engine that already powered BYOK and explicit-model chats, with identical tools, memory, and sandbox support. One less external machine whose bad day becomes your bad day.',
+      'Fixed a real data-loss bug: if resolving your model failed at send time, the chat row was never created at all -- your message vanished without a trace. The chat is now always created first, so a failure shows up as a visible error in a real chat instead of nothing.',
+      'Starting a brand-new chat no longer silently dies if the last model you picked was a BYOK model that has since been deleted -- it falls back cleanly instead.',
+      'Network failures on send now show a clear, specific message, and the automatic recovery poll gives up after a sensible limit instead of spinning forever.',
+      'Tool calls that time out now show a distinct amber "Timed out" badge instead of being lumped in with red errors.',
+    ],
+  },
+  {
     date: '2026-07-19',
     title: 'Fast agent output no longer locks up scrolling, and finished tools close themselves',
     items: [
