@@ -96,9 +96,6 @@ import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
-import { agentTurnOrchestratorTask } from '@/src/trigger/agent-turn-orchestrator';
-import { setBackgroundRunActive, setBackgroundRunId } from '@entry/copilot';
-import { watchForStuckBackgroundRun } from '@/lib/direct-chat/background-watchdog';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
 import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
@@ -244,59 +241,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     logError({ source: 'direct-chat-presave', error: err, userId, chatId });
   });
 
-  // IMMEDIATE FULL HANDOFF (2026-07-22, user request: "give the whole job
-  // to trigger from start... make sure Vercel isn't doing any work").
-  // Previously this route always ran the turn itself first (up to its own
-  // 230s soft deadline) and only handed off to the durable Trigger.dev
-  // worker if that ran out -- a hybrid chosen so a normal short turn never
-  // paid any task-startup overhead. Flipping this on skips straight to the
-  // background worker for EVERY turn: this Vercel function now only ever
-  // does preSave + one `.trigger()` call and returns, so it can never be
-  // the thing that times out, and every turn (long or short) is served by
-  // the exact same code path instead of two duplicated streamText configs.
-  // `useBackgroundChunkStreamPreview` (already built 2026-07-21 for the
-  // mid-turn handoff case) is what renders this live in the UI -- Trigger.dev
-  // task pickup is sub-second on their infra so first-token latency is
-  // barely affected. Gated by an env var (default on) purely so this can be
-  // flipped off instantly without a code revert if something regresses.
-  if (process.env.CHAT_IMMEDIATE_BACKGROUND !== '0') {
-    await preSave;
-    await setBackgroundRunActive(chatId, true);
-    try {
-      const handle = await agentTurnOrchestratorTask.trigger({
-        chatId,
-        userId,
-        messages: uiMessages,
-        byokModelId: byokModelId || undefined,
-        requestedModel: byokModelId ? undefined : requestedModel || undefined,
-        disabledTools: Array.isArray(disabledTools) ? disabledTools : undefined,
-      });
-      await setBackgroundRunId(chatId, handle.id);
-      waitUntil(watchForStuckBackgroundRun(chatId, handle.id));
-    } catch (err) {
-      console.error('[direct chat] immediate background handoff trigger failed', chatId, err);
-      logError({ source: 'direct-chat-immediate-handoff', error: err, userId, chatId });
-      await setBackgroundRunActive(chatId, false);
-      await setBackgroundRunId(chatId, null);
-      return Response.json({ error: 'Failed to start chat turn' }, { status: 502 });
-    }
-
-    const emptyStream = new ReadableStream<UIMessageChunk>({
-      start(controller) {
-        controller.close();
-      },
-    });
-    return createUIMessageStreamResponse({
-      stream: emptyStream,
-      headers: {
-        'x-direct-chat-session-id': chatId,
-        'x-direct-chat-background-handoff': 'true',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      },
-    });
-  }
 
   // Resolve BEFORE any streaming starts — a bad/missing key or unknown
   // model slug surfaces as a clean JSON error, not a broken half-open
@@ -565,7 +509,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // comment on its own hard ceiling -- would otherwise leave onFinish
   // never running at all).
   const requestStartedAt = Date.now();
-  const SOFT_DEADLINE_MS = 230_000;
+  // Render (persistent server, no serverless 300s kill) replaced Vercel for
+  // this route 2026-07-22 -- raised from 230_000 (which existed purely to
+  // leave margin under Vercel's hard 300s ceiling) since that constraint is
+  // gone. Still finite so a genuinely runaway turn eventually wraps up in
+  // text instead of never stopping.
+  const SOFT_DEADLINE_MS = 1_200_000;
   let softDeadlineHit = false;
 
   // CRITICAL-SAVE GATE (2026-07-19, real data-loss bug: "agent done and
@@ -993,51 +942,20 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         });
       }
 
-      // BACKGROUND HANDOFF (2026-07-21) -- "natural" completion mirrors
-      // agent-turn.ts's own identical formula exactly: the model stopped
-      // on its own (never forced into tool-less wrap-up by the soft
-      // deadline above) AND never hit the 120-step safety cap AND its
-      // last step didn't end mid tool-calls. Anything else means real
-      // work is still pending that this sync route's 300s ceiling can't
-      // safely finish -- hand the rest to the durable Trigger.dev worker
-      // (agent-chat-turn-orchestrator, which itself auto-continues across
-      // up to 6 chained 1h runs) instead of just letting it die silently
-      // at the hard Vercel kill. `sanitizedFinalMessages` is exactly what
-      // was just persisted above, so the worker picks up from the true
-      // last checkpoint, not a stale/duplicated view.
+      // NOTE (2026-07-22, Render migration -- user explicitly wants Render-only,
+      // no Trigger.dev): this app now runs on Render (a persistent server, not
+      // Vercel serverless), so there's no hard 300s kill forcing a background
+      // handoff anymore -- the turn just keeps running in this same process
+      // until it genuinely finishes (see SOFT_DEADLINE_MS/stepCountIs(120) above,
+      // both raised generously now that there's no platform timeout to race).
+      // `finishedNaturally` is kept only as an observability signal for the rare
+      // case a turn still hits the step cap or gets cut mid-tool-call --
+      // `sanitizedFinalMessages` is already durably persisted above either way,
+      // so the user can just send another message ("continue") to pick up from
+      // the real last checkpoint. No Trigger.dev dependency anywhere in this path.
       const finishedNaturally = !softDeadlineHit && stepCount < 120 && lastFinishReason !== 'tool-calls';
       if (!finishedNaturally) {
-        console.log('[direct chat] handing off to durable background worker', { chatId, softDeadlineHit, stepCount, lastFinishReason });
-        await setBackgroundRunActive(chatId, true);
-        waitUntil(
-          agentTurnOrchestratorTask
-            .trigger({
-              chatId,
-              userId,
-              messages: sanitizedFinalMessages,
-              byokModelId: byokModelId || undefined,
-              requestedModel: byokModelId ? undefined : requestedModel || undefined,
-              disabledTools: Array.isArray(disabledTools) ? disabledTools : undefined,
-            })
-            .then(async handle => {
-              await setBackgroundRunId(chatId, handle.id);
-              // See background-watchdog.ts: `.trigger()` resolving only
-              // means Trigger.dev accepted the run, not that it will
-              // ever actually execute -- this bounds how long we'll
-              // silently wait before surfacing a real error.
-              await watchForStuckBackgroundRun(chatId, handle.id);
-            })
-            .catch(async err => {
-              console.error('[direct chat] background handoff trigger failed', chatId, err);
-              logError({ source: 'direct-chat-background-handoff', error: err, userId, chatId });
-              // Never leave the flag stuck true if the enqueue itself
-              // never even landed -- the client's recovery poll would
-              // otherwise wait forever for a background run that never
-              // started.
-              await setBackgroundRunActive(chatId, false);
-              await setBackgroundRunId(chatId, null);
-            })
-        );
+        console.log('[direct chat] turn ended without a natural finish (rare -- user can send "continue")', { chatId, softDeadlineHit, stepCount, lastFinishReason });
       }
     },
   });
