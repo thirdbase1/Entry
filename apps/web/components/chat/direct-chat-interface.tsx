@@ -39,7 +39,7 @@
  * remount too, not just a stale patched-over instance).
  */
 import { useChat } from '@ai-sdk/react';
-import { DefaultChatTransport } from 'ai';
+import { DefaultChatTransport, type UIMessage } from 'ai';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
@@ -508,7 +508,22 @@ function DirectChatSession({
   // `chat.setMessages(persisted)` remains the one source of truth the
   // instant the worker actually finishes.
   const liveBackgroundMessage = useBackgroundChunkStreamPreview(sessionId ?? chat.id ?? null, backgroundRunActive);
-  const messages = backgroundRunActive && liveBackgroundMessage ? [...chat.messages, liveBackgroundMessage] : chat.messages;
+  // Strip a genuinely-empty trailing assistant placeholder while a turn is
+  // backgrounded (2026-07-22, added alongside route.ts's immediate full
+  // handoff) -- that mode's own useChat stream intentionally closes with
+  // zero parts (all real content comes from `liveBackgroundMessage` below),
+  // which otherwise renders as a blank bubble ahead of the live one. Only
+  // matches a truly content-free message (no text/tool/reasoning parts, or
+  // every text part empty) so a REAL partial reply from the older mid-turn
+  // handoff path (which always has actual content by the time it hands off)
+  // is never touched.
+  const isEmptyAssistantPlaceholder = (m: UIMessage) =>
+    m.role === 'assistant' &&
+    (!m.parts || m.parts.every(p => (p.type === 'text' || p.type === 'reasoning') && !('text' in p ? p.text : false)));
+  const baseMessages = backgroundRunActive
+    ? chat.messages.filter((m, i) => !(i === chat.messages.length - 1 && isEmptyAssistantPlaceholder(m)))
+    : chat.messages;
+  const messages = backgroundRunActive && liveBackgroundMessage ? [...baseMessages, liveBackgroundMessage] : baseMessages;
   const lastMessage = messages[messages.length - 1];
   // True right after a fresh mount (e.g. a reload) that landed mid-turn --
   // the last thing in history is the user's own message with no assistant
