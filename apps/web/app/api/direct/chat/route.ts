@@ -97,7 +97,8 @@ import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { agentTurnOrchestratorTask } from '@/src/trigger/agent-turn-orchestrator';
-import { setBackgroundRunActive } from '@entry/copilot';
+import { setBackgroundRunActive, setBackgroundRunId } from '@entry/copilot';
+import { watchForStuckBackgroundRun } from '@/lib/direct-chat/background-watchdog';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
 import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
@@ -964,6 +965,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
               requestedModel: byokModelId ? undefined : requestedModel || undefined,
               disabledTools: Array.isArray(disabledTools) ? disabledTools : undefined,
             })
+            .then(async handle => {
+              await setBackgroundRunId(chatId, handle.id);
+              // See background-watchdog.ts: `.trigger()` resolving only
+              // means Trigger.dev accepted the run, not that it will
+              // ever actually execute -- this bounds how long we'll
+              // silently wait before surfacing a real error.
+              await watchForStuckBackgroundRun(chatId, handle.id);
+            })
             .catch(async err => {
               console.error('[direct chat] background handoff trigger failed', chatId, err);
               logError({ source: 'direct-chat-background-handoff', error: err, userId, chatId });
@@ -972,6 +981,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
               // otherwise wait forever for a background run that never
               // started.
               await setBackgroundRunActive(chatId, false);
+              await setBackgroundRunId(chatId, null);
             })
         );
       }
