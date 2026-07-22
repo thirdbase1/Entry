@@ -25,4 +25,4 @@ jobs:
         working-directory: apps/web
         env:
           TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
-        run: npx trigger.dev@latest deploy
+        run: npx trigger.dev@latest deploy --project-ref proj_qmdfwwweoydmdsoaplbj
