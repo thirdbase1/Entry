@@ -1,12 +1,11 @@
 /**
- * Single chat session: fetch a resumable snapshot (events + session cursor)
- * to feed useEveAgent's initialEvents/initialSession, save a fresh snapshot
- * (call from the client's onFinish), toggle favorite, toggle public sharing,
- * or delete.
+ * Single chat session: fetch a resumable snapshot (events + session cursor,
+ * or plain messages[] for direct-chat rows -- see EveChatSession's schema
+ * comment) to feed the chat UI's initial state, save a fresh snapshot,
+ * toggle favorite, toggle public sharing, or delete.
  */
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getChatSession, removeChatSession, saveChatSnapshot, toggleChatCollected, setChatPublic } from '@entry/copilot';
-import { looksLikePendingTurn, reconcileEveSession } from '@/lib/eve-reconcile';
 
 export async function GET(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
   const { session } = await getUserSessionFromRequest(req);
@@ -16,23 +15,13 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   const chat = await getChatSession(session.user.id, sessionId);
   if (!chat) return Response.json({ error: 'Not found' }, { status: 404 });
 
-  // Self-heal a turn that was left mid-flight because the tab that
-  // started it never got to persist the finished reply (see
-  // eve-reconcile.ts's file comment for the full root cause). Guarded by
-  // both the cheap "does the last event even look unfinished" check AND
-  // a 15-minute inactivity cutoff -- a genuinely abandoned/expired
-  // session shouldn't pay an 8s live reattachment cost on every single
-  // 3s client poll forever.
-  const staleEnoughToRetry = Date.now() - new Date(chat.updatedAt).getTime() < 15 * 60 * 1000;
-  if (staleEnoughToRetry && looksLikePendingTurn(chat.events)) {
-    const origin = new URL(req.url).origin;
-    const reconciled = await reconcileEveSession(origin, chat.cursor, chat.events).catch(() => null);
-    if (reconciled) {
-      await saveChatSnapshot(session.user.id, sessionId, { events: reconciled.events, cursor: reconciled.cursor }).catch(() => {});
-      return Response.json({ ...chat, events: reconciled.events, cursor: reconciled.cursor });
-    }
-  }
-
+  // RETIRED (2026-07-22): this used to self-heal an eve turn left
+  // mid-flight by reattaching to eve's own live session state (see
+  // former lib/eve-reconcile.ts). eve is fully decommissioned now --
+  // every row is a direct-chat row, whose equivalent "stuck turn"
+  // recovery already happens client-side (direct-chat-interface.tsx's
+  // own recovery poll re-fetches this same route), so no server-side
+  // reconciliation is needed here anymore.
   return Response.json(chat);
 }
 

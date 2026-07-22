@@ -1,21 +1,5 @@
 import type { NextConfig } from 'next';
-import { withEve } from 'eve/next';
 import { resolve } from 'node:path';
-
-// Resolve an ABSOLUTE path to apps/agent, anchored to this config file's own
-// location on disk (not process.cwd()). eve's withEve() resolves a relative
-// eveRoot against process.cwd() at the moment it runs — but that cwd differs
-// between build phases: our own `npm run build` cd's into apps/web (cwd =
-// apps/web, so a relative '../agent' would work), but Vercel's separate
-// "onBuildComplete" / Build Output API post-processing step re-invokes this
-// config from the repo root instead, where '../agent' resolves one level
-// *above* the repo and fails with "entrypoint ... does not exist". An
-// absolute path sidesteps the whole cwd-dependency problem for good.
-// next.config.ts compiles to CommonJS here (no "type": "module" in
-// package.json), so the plain CJS `__dirname` global is available directly —
-// no import.meta/fileURLToPath dance needed (that approach forces esbuild to
-// treat this file as ESM, which breaks Next's own CJS config wrapper).
-const eveRootAbsolute = resolve(__dirname, '../agent');
 
 const nextConfig: NextConfig = {
   // Standalone output: see the long comment block near the bottom of this
@@ -155,16 +139,16 @@ const nextConfig: NextConfig = {
       config.resolve.alias['@'] = resolve(__dirname, './');
     }
 
-
     return config;
   },
 };
 
-// withEve mounts the apps/agent eve project's /eve/v1/* routes directly
-// into this Next.js app's origin (same-origin, no CORS, no URL env vars —
-// see eve's docs/guides/frontend/nextjs.mdx). eveRootAbsolute (computed
-// above) points at apps/agent, which contains the actual `agent/` folder
-// (agent.ts, instructions.md, tools/, sandbox/) that eve looks for.
-export default withEve(nextConfig, {
-  eveRoot: eveRootAbsolute,
-});
+// RETIRED (2026-07-22): this used to be `export default withEve(nextConfig,
+// { eveRoot: ... })`, mounting apps/agent's whole eve project (agent.ts,
+// instructions.md, tools/, sandbox/) as in-process `/eve/v1/*` routes
+// inside this Next.js app. eve is fully decommissioned now -- every chat
+// (new and resumed) is served by /api/direct/chat, a plain Vercel AI SDK
+// implementation with no eve dependency at all. Removing withEve() drops
+// the `eve` package from this app's server bundle entirely (smaller
+// bundle, one less framework mounted into every cold start).
+export default nextConfig;

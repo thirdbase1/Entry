@@ -47,7 +47,6 @@ import { CollapsibleUserText } from './collapsible-user-text';
 import { useStreamingAutoScroll } from './use-streaming-autoscroll';
 import { ChatInput, type ChatImageAttachment } from './chat-input';
 import { AIReasoningCard } from './renderers/ai-reasoning-card';
-import { useBackgroundChunkStreamPreview } from './use-background-chunk-stream';
 import { VersionCard } from './renderers/version-card';
 import { ChatPanelProvider, useChatPanel } from './chat-panel-context';
 import type { AttachedContext } from './chat-context';
@@ -133,14 +132,6 @@ function ThinkingIndicator() {
 export function DirectChatInterface(props: DirectChatInterfaceProps) {
   const { sessionId } = props;
   const [initialMessages, setInitialMessages] = useState<any[] | null>(sessionId ? null : []);
-  // Seeded from the same initial GET this component already made -- lets
-  // DirectChatSession's recovery poll (see its own file comment) know
-  // from the very first render whether a durable Trigger.dev background
-  // worker (agent-chat-turn-orchestrator) is already mid-run on this chat
-  // (e.g. the page was reloaded, or opened fresh, while one was active),
-  // instead of only ever discovering that on the FIRST recovery poll tick.
-  const [initialBackgroundRunActive, setInitialBackgroundRunActive] = useState(false);
-
   useEffect(() => {
     if (!sessionId) return;
     setInitialMessages(null);
@@ -150,7 +141,6 @@ export function DirectChatInterface(props: DirectChatInterfaceProps) {
       .then(snap => {
         if (cancelled) return;
         setInitialMessages(Array.isArray(snap?.events) ? snap.events : []);
-        setInitialBackgroundRunActive(!!snap?.backgroundRunActive);
       })
       .catch(() => {
         if (!cancelled) setInitialMessages([]);
@@ -176,7 +166,6 @@ export function DirectChatInterface(props: DirectChatInterfaceProps) {
       key={sessionId ?? 'new'}
       {...props}
       initialMessages={initialMessages}
-      initialBackgroundRunActive={initialBackgroundRunActive}
     />
   );
 }
@@ -199,8 +188,7 @@ function DirectChatSession({
   initialMessage,
   integrationCallback,
   initialMessages,
-  initialBackgroundRunActive,
-}: DirectChatInterfaceProps & { initialMessages: any[]; initialBackgroundRunActive: boolean }) {
+}: DirectChatInterfaceProps & { initialMessages: any[] }) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const createdRef = useRef(!!sessionId);
@@ -209,14 +197,6 @@ function DirectChatSession({
   const missedPollsRef = useRef(0);
   const pollIdRef = useRef<number | undefined>(undefined);
   const [turnError, setTurnError] = useState<string | null>(null);
-  // True while a durable Trigger.dev worker (agent-chat-turn-orchestrator)
-  // is continuing this chat's turn in the background, past the point
-  // where the sync route's own HTTP response already closed. Read fresh
-  // on every recovery poll tick below; the effect keeps polling while
-  // this is true even once `chat.status` looks perfectly idle/finished
-  // from the client's own (necessarily stale, in this exact case) point
-  // of view.
-  const [backgroundRunActive, setBackgroundRunActive] = useState(initialBackgroundRunActive);
 
   const transport = useMemo(
     () =>
@@ -294,18 +274,10 @@ function DirectChatSession({
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) continue;
           const snap = await res.json();
-          // Adopt the background-handoff flag here too, not just in the
-          // long-running recovery effect below -- this turn may have
-          // JUST been handed off to the durable Trigger.dev worker (see
-          // route.ts's onFinish), which this same fetch's response
-          // already reflects. Setting it here means the persistent 3s
-          // poll picks up continuation immediately instead of waiting
-          // for its own first independent fetch to notice.
-          if (typeof snap?.backgroundRunActive === 'boolean') setBackgroundRunActive(snap.backgroundRunActive);
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
           if (persisted && persisted.length >= chat.messages.length) {
             chat.setMessages(persisted);
-            if (!snap?.backgroundRunActive) return;
+            return;
           }
         } catch {
           // best-effort, try the next delay
@@ -392,20 +364,7 @@ function DirectChatSession({
         // never on 'streaming'/'submitted', which mean the live connection
         // itself already believes it's fine.
         if (chat.status === 'streaming' || chat.status === 'submitted') return;
-        // BACKGROUND HANDOFF (2026-07-21): also proceed into the recovery
-        // fetch whenever a durable Trigger.dev worker might still be
-        // continuing this exact chat in the background -- that's a THIRD
-        // genuinely-stuck-from-this-tab's-POV case alongside the existing
-        // 'error' and `looksIncomplete` ones. Without this, a turn that
-        // got handed off (route.ts's onFinish, past the sync route's own
-        // soft deadline) looks like a perfectly normal completed turn to
-        // THIS tab -- a real last assistant message, `chat.status`
-        // 'ready' -- even though the worker may still be running for up
-        // to several more hours and will keep appending to `events`.
-        // `backgroundRunActive` is refreshed from the server on every
-        // tick below, so this naturally stops polling for it the instant
-        // the worker's own try/finally clears the flag.
-        if (chat.status !== 'error' && !looksIncomplete && !backgroundRunActive) return;
+        if (chat.status !== 'error' && !looksIncomplete) return;
         try {
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) {
@@ -434,7 +393,6 @@ function DirectChatSession({
           }
           missedPollsRef.current = 0;
           const snap = await res.json();
-          if (typeof snap?.backgroundRunActive === 'boolean') setBackgroundRunActive(snap.backgroundRunActive);
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
           if (!persisted || persisted.length === 0) return;
           if (persisted.length >= chat.messages.length) {
@@ -488,42 +446,19 @@ function DirectChatSession({
       window.removeEventListener('focus', onFocus);
       window.clearInterval(pollIdRef.current);
     };
-    // backgroundRunActive included deliberately (not just eslint-suppressed
-    // away): tryRecover's closure captures whatever this was at the time the
-    // interval was (re-)created, so a change from false->true (or the
-    // worker's own eventual ->false) needs a fresh effect run to actually
-    // take effect on the NEXT poll tick, not just on the following render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, chat.id, chat.status, backgroundRunActive]);
+  }, [sessionId, chat.id, chat.status]);
 
   const { requestOpenHistory } = useChatPanel();
 
   const isBusy = chat.status === 'submitted' || chat.status === 'streaming';
-  // Live preview overlay for a turn currently running in the durable
-  // background worker (2026-07-21, see use-background-chunk-stream.ts) --
-  // appended as a synthetic extra message purely for display while
-  // `backgroundRunActive` is true, so a handed-off turn keeps rendering
-  // live text + tool cards instead of freezing until the next 3s DB poll.
-  // Never mixed into `chat.messages` itself -- the poll's eventual
-  // `chat.setMessages(persisted)` remains the one source of truth the
-  // instant the worker actually finishes.
-  const liveBackgroundMessage = useBackgroundChunkStreamPreview(sessionId ?? chat.id ?? null, backgroundRunActive);
-  // Strip a genuinely-empty trailing assistant placeholder while a turn is
-  // backgrounded (2026-07-22, added alongside route.ts's immediate full
-  // handoff) -- that mode's own useChat stream intentionally closes with
-  // zero parts (all real content comes from `liveBackgroundMessage` below),
-  // which otherwise renders as a blank bubble ahead of the live one. Only
-  // matches a truly content-free message (no text/tool/reasoning parts, or
-  // every text part empty) so a REAL partial reply from the older mid-turn
-  // handoff path (which always has actual content by the time it hands off)
-  // is never touched.
-  const isEmptyAssistantPlaceholder = (m: UIMessage) =>
-    m.role === 'assistant' &&
-    (!m.parts || m.parts.every(p => (p.type === 'text' || p.type === 'reasoning') && !('text' in p ? p.text : false)));
-  const baseMessages = backgroundRunActive
-    ? chat.messages.filter((m, i) => !(i === chat.messages.length - 1 && isEmptyAssistantPlaceholder(m)))
-    : chat.messages;
-  const messages = backgroundRunActive && liveBackgroundMessage ? [...baseMessages, liveBackgroundMessage] : baseMessages;
+  // RETIRED (2026-07-22): this used to overlay a synthetic live-preview
+  // message while a turn was handed off to a durable Trigger.dev
+  // background worker past Vercel's 300s limit. Now fully on Render (a
+  // persistent server process, no request timeout), a turn just runs
+  // inline for as long as it needs -- there is no handoff case to render
+  // a preview for anymore.
+  const messages = chat.messages;
   const lastMessage = messages[messages.length - 1];
   // True right after a fresh mount (e.g. a reload) that landed mid-turn --
   // the last thing in history is the user's own message with no assistant

@@ -259,6 +259,28 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     throw err;
   }
   const { model, providerLabel, modelId } = resolved;
+  // FIX (2026-07-22): when neither byokModelId nor requestedModel was sent
+  // by the client (the "Default model" / nothing explicitly picked case),
+  // preSave above persisted requestedModel as null -- meaning a plain
+  // page reload later would see byokModelId=null AND requestedModel=null
+  // and misclassify this row as a legacy/eve-bucket chat (see
+  // chat-interface.tsx's rowIsDirect), even though it was created and is
+  // served entirely by this direct-chat route. Backfill the actually-
+  // resolved model id into requestedModel once preSave's row exists, so
+  // every row this route ever creates has a real requestedModel/
+  // byokModelId and can never fall back into the (now fully retired) eve
+  // path on a later load. Fire-and-forget, same posture as preSave.
+  if (!byokModelId && !requestedModel) {
+    void preSave.then(() =>
+      prisma.eveChatSession
+        .update({ where: { id: chatId, userId }, data: { requestedModel: modelId } })
+        .catch(err => {
+          console.error('[direct chat] default-model backfill failed', chatId, err);
+          logError({ source: 'direct-chat-default-model-backfill', error: err, userId, chatId });
+        }),
+    );
+  }
+
   // See strip-reasoning-parts.ts's file comment for the exact bug this
   // fixes (only set on the BYOK path -- resolveGatewayModel's return type
   // has no such flag, always undefined/false there).
