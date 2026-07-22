@@ -46,6 +46,7 @@ export const GET = withApiErrorHandling(async (req: Request) => {
     });
     if (!row) return Response.json({ found: false, id });
     const events = Array.isArray(row.events) ? row.events : [];
+    const tailN = Math.min(Math.max(Number(url.searchParams.get('tail')) || 0, 0), 48);
     return Response.json({
       found: true,
       id: row.id,
@@ -59,6 +60,10 @@ export const GET = withApiErrorHandling(async (req: Request) => {
       backgroundRunId: row.backgroundRunId,
       eventCount: events.length,
       lastEventPreview: events.length ? JSON.stringify(events[events.length - 1]).slice(0, 800) : null,
+      tail: tailN ? events.slice(-tailN).map((e: any) => ({
+        role: e?.role,
+        parts: Array.isArray(e?.parts) ? e.parts.map((p: any) => ({ type: p?.type, text: typeof p?.text === 'string' ? p.text.slice(0, 300) : undefined, toolName: p?.toolName, state: p?.state })) : undefined,
+      })) : undefined,
     });
   }
 
