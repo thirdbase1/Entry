@@ -88,7 +88,7 @@ export const auth = betterAuth({
       'entry-thirdbase1s-projects.vercel.app',
       'entry-oneshotsx-thirdbase1s-projects.vercel.app',
       '*.vercel.app', // preview deployments (one per PR/branch)
-      'entry-web.onrender.com', // Render web service (2026-07-22 Vercel->Render migration)
+      'entry-agent-worker.onrender.com', // Render web service (2026-07-22 Vercel->Render migration)
       'localhost:*', // local dev
     ],
   },
@@ -101,7 +101,7 @@ export const auth = betterAuth({
     'https://entry-nine-pi.vercel.app',
     'https://entry-thirdbase1s-projects.vercel.app',
     'https://entry-oneshotsx-thirdbase1s-projects.vercel.app',
-    'https://entry-web.onrender.com',
+    'https://entry-agent-worker.onrender.com',
   ],
 
   // Email/password authentication
