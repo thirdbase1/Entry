@@ -2,7 +2,6 @@
 
 import { getKnownService } from '@/lib/integration-services';
 import { useThrottledEveAgent } from './use-throttled-eve-agent';
-import { EVE_AGENT_HOST, fetchAgentBearerToken } from '@/lib/eve-agent-host';
 import type { EveMessage, UseEveAgentSnapshot } from 'eve/react';
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -693,12 +692,10 @@ function ChatInterfaceInner({
   const chatIdRef = useRef<string | undefined>(sessionId);
 
   const agent = useThrottledEveAgent({
-    // Pxxl migration (PXXL_MIGRATION.md): undefined/undefined (today's
-    // default) means same-origin, in-process `withEve()` -- byte-for-byte
-    // today's behavior. Only set once NEXT_PUBLIC_EVE_AGENT_HOST points at
-    // a verified-healthy standalone agent deployment.
-    host: EVE_AGENT_HOST,
-    auth: EVE_AGENT_HOST ? { bearer: fetchAgentBearerToken } : undefined,
+    // RETIRED (2026-07-22): host/auth used to conditionally point this at
+    // a standalone Pxxl/Fly worker via NEXT_PUBLIC_EVE_AGENT_HOST -- that
+    // worker is dead and the whole flag is permanently disabled now (see
+    // eve-agent-host.ts). Always same-origin, in-process `withEve()`.
     initialEvents,
     initialSession,
     // Default is 3 -- fine for a flaky packet or two, not enough for a
