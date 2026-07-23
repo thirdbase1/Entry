@@ -32,6 +32,38 @@
  * before (current DB state IS this request's own baseline, so the
  * "replace" branch fires and produces the exact same result); only the
  * genuinely-overlapping case now merges instead of destroying data.
+ *
+ * FIXED (2026-07-23, real user-reported bug with screenshot: the exact
+ * same assistant reply rendered TWICE in a row, no second timer under
+ * the repeat). Root cause: direct/chat/route.ts calls this function
+ * MULTIPLE times per turn from the SAME request -- once per `onStepEnd`
+ * (a multi-step turn: a tool call step, then a final text step, fires
+ * this at each step boundary) and once more from `onFinish` at the very
+ * end -- and every one of those calls passed the SAME static
+ * request-start `uiMessages` as `baseMessages`, never updated to reflect
+ * this request's OWN prior incremental saves. So by this function's own
+ * "has something newer landed since baseMessages?" logic, its own
+ * step-1 save (which grew `currentEvents` past the static baseline)
+ * looked EXACTLY like a legitimate concurrent write from a different
+ * request -- the step-2 save (and then onFinish's final save) each took
+ * the "append delta on top of current" branch instead of "replace",
+ * stacking a fresh copy of the still-growing assistant message on top of
+ * the previous incremental copy every single time, once per extra
+ * step/finish call past the first. A 2-step turn (one tool call + one
+ * final answer) reliably produced exactly the 2 visible duplicate copies
+ * from the report; a longer tool-chain turn would have produced more.
+ *
+ * Fix: this now returns the array it ACTUALLY persisted (`merged`, not
+ * just the whole-column update fire-and-forget it used to be) so a
+ * caller making several calls in the same request can feed each
+ * function's own real, current baseline into the NEXT call instead of
+ * reusing one static request-start snapshot -- see route.ts's
+ * `persistedBaseline` variable, updated after every call site. The
+ * genuine concurrent-write race this function exists to protect against
+ * is completely unaffected: a real second request's own commit still
+ * shows up as `currentEvents.length > baseMessages.length` from this
+ * (now correctly up-to-date) baseline's point of view, so the merge
+ * branch still fires exactly when it's supposed to.
  */
 import { prisma } from '@entry/db';
 
@@ -40,13 +72,23 @@ import { prisma } from '@entry/db';
  * @param userId       Owning user id (never trust a chatId alone).
  * @param baseMessages The message array THIS request started from (its
  *                      own snapshot of "history so far" before it added
- *                      anything of its own).
+ *                      anything of its own) -- or, for a second/third call
+ *                      within the SAME request (e.g. a later onStepEnd,
+ *                      or the final onFinish), the array this SAME
+ *                      request's own most recent prior call to this
+ *                      function actually persisted (this function's own
+ *                      return value) -- never the original static
+ *                      request-start snapshot again, or every later call
+ *                      will misread its own earlier save as a foreign
+ *                      concurrent write and duplicate on top of it.
  * @param newMessages  The full reconstructed array this request wants to
  *                      persist -- baseMessages plus whatever this request
  *                      itself just added (a new user turn, a new
  *                      assistant reply, or both).
  * @param extraFields  Any other columns to set in the same update
  *                      (byokModelId/requestedModel on preSave's path).
+ * @returns The array actually written to the row's `events` column --
+ *          feed this straight back in as the next call's `baseMessages`.
  */
 export async function mergeAndPersistChatEvents(
   chatId: string,
@@ -54,10 +96,10 @@ export async function mergeAndPersistChatEvents(
   baseMessages: unknown[],
   newMessages: unknown[],
   extraFields: Record<string, unknown> = {},
-): Promise<void> {
+): Promise<unknown[]> {
   const delta = newMessages.slice(baseMessages.length);
 
-  await prisma.$transaction(async tx => {
+  return prisma.$transaction(async tx => {
     const rows = await tx.$queryRaw<{ events: unknown }[]>`
       SELECT events FROM eve_chat_sessions WHERE id = ${chatId} AND user_id = ${userId} FOR UPDATE
     `;
@@ -75,5 +117,7 @@ export async function mergeAndPersistChatEvents(
       where: { id: chatId, userId },
       data: { events: merged as any, ...extraFields },
     });
+
+    return merged;
   });
 }

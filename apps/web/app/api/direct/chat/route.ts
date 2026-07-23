@@ -572,6 +572,48 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     resolveCriticalSave = resolve;
   });
 
+  // SERIALIZED, SELF-AWARE INCREMENTAL SAVES (2026-07-23, fixes the
+  // "same assistant reply rendered TWICE" duplication bug -- see
+  // persist-chat-events.ts's matching 2026-07-23 comment for the full
+  // root-cause writeup). A turn can call mergeAndPersistChatEvents
+  // several times from THIS SAME request (once per onStepEnd step
+  // boundary, plus once more from onFinish) -- every call must use
+  // whatever THIS request's own most recent prior call actually
+  // persisted as its baseline, never the static request-start
+  // `uiMessages` snapshot again, or a later call misreads its own
+  // earlier incremental save as a foreign concurrent write and
+  // duplicates on top of it. Chaining through one shared promise (rather
+  // than a plain reassigned `let`, updated after each fire-and-forget
+  // call settles) also closes the narrow window where two onStepEnd
+  // saves could otherwise still overlap and both read the same stale
+  // baseline before either one's update lands -- every call in this
+  // turn now strictly waits for the previous one's actual DB commit
+  // first, incremental or final, with no exceptions.
+  let persistChain: Promise<unknown[]> = Promise.resolve(uiMessages);
+  function persistIncremental(newMessages: unknown[]): void {
+    persistChain = persistChain
+      .then(baseline => mergeAndPersistChatEvents(chatId, userId, baseline, newMessages))
+      .catch(err => {
+        console.error('[direct chat] incremental step save failed', chatId, err);
+        logError({ source: 'direct-chat-incremental-save', error: err, userId, chatId });
+        // Don't let one transient failure poison every later save's
+        // baseline for the rest of this turn -- best-effort fallback,
+        // matches the old fire-and-forget behavior's own "just move on"
+        // handling of a failed incremental save.
+        return newMessages;
+      });
+  }
+  function persistFinal(newMessages: unknown[]): Promise<unknown[]> {
+    persistChain = persistChain
+      .then(baseline => mergeAndPersistChatEvents(chatId, userId, baseline, newMessages))
+      .catch(err => {
+        console.error('[direct chat] final save failed', chatId, err);
+        logError({ source: 'direct-chat-final-save', error: err, userId, chatId });
+        return newMessages;
+      });
+    return persistChain;
+  }
+
   const result = streamText({
     model,
     stopWhen: stepCountIs(400), // generous ceiling so a long agentic turn is bounded by the SOFT_DEADLINE_MS time budget, not an arbitrary low step count
@@ -1048,17 +1090,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // baseline) vs `sanitizedFinalMessages` (baseline + this turn's own
       // new reply) gives mergeAndPersistChatEvents an exact delta to
       // append onto the row's actual current state instead of overwriting it.
-      await mergeAndPersistChatEvents(chatId, userId, uiMessages, sanitizedFinalMessages)
-        .catch(err => {
-          console.error('[direct chat] final save failed', chatId, err);
-          logError({ source: 'direct-chat-final-save', error: err, userId, chatId });
-        })
-        .finally(() => {
-          // See CRITICAL-SAVE GATE comment above -- releases the relay
-          // loop's held `finish` chunk the instant this write settles,
-          // whether it succeeded or failed.
-          resolveCriticalSave();
-        });
+      await persistFinal(sanitizedFinalMessages).finally(() => {
+        // See CRITICAL-SAVE GATE comment above -- releases the relay
+        // loop's held `finish` chunk the instant this write settles,
+        // whether it succeeded or failed.
+        resolveCriticalSave();
+      });
 
       // Universal, tool-agnostic version capture (2026-07-16, real bug:
       // "no matter the tool it use to change something in file... the
@@ -1172,10 +1209,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       const now = Date.now();
       if (now - lastIncrementalSaveAt < INCREMENTAL_SAVE_MIN_INTERVAL_MS) return;
       lastIncrementalSaveAt = now;
-      mergeAndPersistChatEvents(chatId, userId, uiMessages, messages).catch(err => {
-        console.error('[direct chat] incremental step save failed', chatId, err);
-        logError({ source: 'direct-chat-incremental-save', error: err, userId, chatId });
-      });
+      persistIncremental(messages);
     },
     execute: ({ writer }) => {
       writer.merge(innerUiStream);
