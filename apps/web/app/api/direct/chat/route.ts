@@ -93,6 +93,7 @@ import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
+import { mergeAndPersistChatEvents } from '@/lib/direct-chat/persist-chat-events';
 import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
@@ -210,7 +211,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // a throw there still lets preSave finish before the error response
   // goes out, instead of racing an unhandled rejection.
   const preSave = (async () => {
-    const existing = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId } });
+    const existing = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId }, select: { events: true } });
     if (!existing) {
       const firstUserTextPart = uiMessages.find(m => m.role === 'user')?.parts?.find((p: any) => p.type === 'text') as { text?: string } | undefined;
       const firstUserText = firstUserTextPart?.text ?? '';
@@ -225,9 +226,22 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         },
       });
     } else {
-      await prisma.eveChatSession.update({
-        where: { id: chatId, userId },
-        data: { events: uiMessages as any, byokModelId: byokModelId ?? null, requestedModel: byokModelId ? null : (requestedModel ?? null) },
+      // RACE-SAFE (2026-07-23, see persist-chat-events.ts's file comment
+      // for the full "some model response disappeared forever" bug this
+      // closes): used to be a blind `update({ data: { events: uiMessages } })`
+      // -- a full-column overwrite using ONLY this request's own client-
+      // sent snapshot, with no idea whether a concurrent turn on the same
+      // chatId had already committed something newer. `existing.events`
+      // (this row's actual last-known-good state, fetched a moment ago)
+      // is the baseline; mergeAndPersistChatEvents re-checks that baseline
+      // against the row's truly-current state inside a row lock right
+      // before writing, and appends only what THIS request's client view
+      // has beyond that baseline (normally just the one new user message)
+      // instead of clobbering anything committed in between.
+      const existingEvents = Array.isArray(existing.events) ? (existing.events as unknown[]) : [];
+      await mergeAndPersistChatEvents(chatId, userId, existingEvents, uiMessages, {
+        byokModelId: byokModelId ?? null,
+        requestedModel: byokModelId ? null : (requestedModel ?? null),
       });
     }
   })().catch(err => {
@@ -1007,8 +1021,15 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         lastFinishReason,
         lastRawFinishReason
       );
-      await prisma.eveChatSession
-        .update({ where: { id: chatId, userId }, data: { events: sanitizedFinalMessages as any } })
+      // RACE-SAFE (2026-07-23, see persist-chat-events.ts's file comment):
+      // used to be a blind `update({ data: { events: sanitizedFinalMessages } })`
+      // built from THIS request's own request-start `uiMessages` snapshot --
+      // clobbered anything a concurrent turn on the same chatId had
+      // already committed since then. `uiMessages` (this turn's own
+      // baseline) vs `sanitizedFinalMessages` (baseline + this turn's own
+      // new reply) gives mergeAndPersistChatEvents an exact delta to
+      // append onto the row's actual current state instead of overwriting it.
+      await mergeAndPersistChatEvents(chatId, userId, uiMessages, sanitizedFinalMessages)
         .catch(err => {
           console.error('[direct chat] final save failed', chatId, err);
           logError({ source: 'direct-chat-final-save', error: err, userId, chatId });

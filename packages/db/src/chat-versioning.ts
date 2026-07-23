@@ -699,10 +699,23 @@ async function appendVersionCardMessage(
   info: { versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number; revertedFromVersionNumber?: number },
 ): Promise<void> {
   try {
-    const chat = await prisma.eveChatSession.findUnique({ where: { id: chatId } });
+    // RACE-SAFE (2026-07-23, real user-confirmed bug: "some chat disappear
+    // also some model response disappeared forever" -- see
+    // apps/web/lib/direct-chat/persist-chat-events.ts's file comment for
+    // the full story). Used to `findUnique` (read events) then `update`
+    // with `[...events, card]` as two unlocked steps -- any other write to
+    // this same chatId's events column landing in that gap (a concurrent
+    // turn's own save, or another version-capture call) got silently
+    // clobbered the instant this write landed, using an already-stale
+    // `events` snapshot. `withChatSerialized` above only serializes calls
+    // that go through IT -- never protected this function against a
+    // completely separate writer (route.ts's preSave/onFinish) touching
+    // the same row concurrently. A single transaction with a row lock
+    // (FOR UPDATE) closes the gap for real: events is read fresh from
+    // inside the lock, immediately before the same query writes it back.
+    const chat = await prisma.eveChatSession.findUnique({ where: { id: chatId }, select: { byokModelId: true, requestedModel: true } });
     if (!chat || (!chat.byokModelId && !chat.requestedModel)) return; // eve-default path -- skip, see comment above
 
-    const events = Array.isArray(chat.events) ? (chat.events as unknown[]) : [];
     const cardMessage = {
       id: `version-card-${info.versionNumber}`,
       role: 'assistant',
@@ -721,9 +734,15 @@ async function appendVersionCardMessage(
         },
       ],
     };
-    await prisma.eveChatSession.update({
-      where: { id: chatId },
-      data: { events: [...events, cardMessage] as any },
+    await prisma.$transaction(async tx => {
+      const rows = await tx.$queryRaw<{ events: unknown }[]>`
+        SELECT events FROM eve_chat_sessions WHERE id = ${chatId} FOR UPDATE
+      `;
+      const currentEvents = Array.isArray(rows[0]?.events) ? (rows[0]!.events as unknown[]) : [];
+      await tx.eveChatSession.update({
+        where: { id: chatId },
+        data: { events: [...currentEvents, cardMessage] as any },
+      });
     });
   } catch (err) {
     console.error('[chat-versioning] appendVersionCardMessage failed', chatId, err);
