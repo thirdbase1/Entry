@@ -44,23 +44,43 @@ export const POST = withApiErrorHandling(async (
     { userId: session.user.id }
   );
 
-  // 20s ceiling -- long enough for a real (if slow) first-token response
-  // from most providers, short enough this doesn't hang the settings page
-  // if the endpoint is simply unreachable/hanging.
+  // Fixed (2026-07-23, real false-negative confirmed live): a 20s abort
+  // + 16-token output cap looked generous for a plain one-word reply, but
+  // several real BYOK relays (confirmed: an OPENAI_RESPONSES-compatible
+  // "gpt-5.6-sol" endpoint) are reasoning models that burn hundreds of
+  // output tokens on hidden reasoning before ever emitting the visible
+  // word -- those reasoning tokens count against BOTH the 16-token cap
+  // (truncating before the real answer ever appears) and the wall-clock
+  // 20s abort (a same-model diagnostic call with no cap took 18.36s just
+  // for "pong"). Net effect: a model that answers fine in real chat
+  // (route.ts's actual streamText call allows chunkMs: 90_000 / stepMs:
+  // 240_000 -- see that file) failed here with a bare "This operation was
+  // aborted", which then persisted as a misleading red "test failed"
+  // state on the provider card indefinitely. Raised to line up with what
+  // real chat can actually tolerate: still well short of production's
+  // 90s/240s (this is a manual, synchronous settings-page click, so it
+  // still needs a sane ceiling), but enough headroom for a legitimately
+  // slow reasoning relay to finish a one-word reply.
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
+  const timeout = setTimeout(() => controller.abort(), 60_000);
 
   let result: { success: true; output: string } | { success: false; error: string };
   try {
     const { text } = await generateText({
       model,
       messages: [{ role: 'user', content: 'Reply with exactly one word: OK' }],
-      maxOutputTokens: 16,
+      maxOutputTokens: 300,
       abortSignal: controller.signal,
     });
     result = { success: true, output: text.trim().slice(0, 200) };
   } catch (err: any) {
-    const message = err?.message ?? String(err);
+    // Give the abort case its own clear message -- the raw AbortError
+    // text ("This operation was aborted") gives a user zero signal on
+    // WHY, and used to read exactly like a hard connection failure
+    // instead of "this model is just slow."
+    const message = controller.signal.aborted
+      ? `No response within 60s -- this model may be slow (reasoning models can take a while) or unreachable. It may still work fine in normal chat, which allows much longer.`
+      : (err?.message ?? String(err));
     result = { success: false, error: message.slice(0, 500) };
   } finally {
     clearTimeout(timeout);
