@@ -3,6 +3,7 @@ import { generateText } from 'ai';
 import { prisma, decryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
+import { logError } from '@entry/db/error-log';
 import { buildModelClient } from '@/lib/byok/build-model-client';
 
 /**
@@ -36,7 +37,45 @@ export const POST = withApiErrorHandling(async (
   if (!modelRow) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
   const { provider } = modelRow;
-  const apiKey = provider.encryptedApiKey ? decryptApiKey(provider.encryptedApiKey) : undefined;
+
+  // FIXED (2026-07-23, real bug: a decrypt failure here used to throw
+  // straight past this route's own try/catch entirely -- unlike
+  // resolve-model.ts's identical decryptApiKey() call (the real chat
+  // path), which wraps it specifically to turn a raw GCM
+  // "Unsupported state or unable to authenticate data" crypto crash into
+  // a clear "please re-enter it in Settings" message. This route's own
+  // doc comment above says "Always responds 200 with { success, error }"
+  // -- but that was never actually true for THIS specific failure mode;
+  // an uncaught throw here falls through to withApiErrorHandling's
+  // generic 500 JSON instead, which the settings-page UI wasn't written
+  // to handle as a per-model test result at all. Same friendly message,
+  // same catch shape as resolve-model.ts, and — since this IS a genuine
+  // per-provider misconfiguration worth knowing about later, unlike an
+  // ordinary upstream 401/timeout — this one specific failure mode also
+  // gets logError'd (every other failure below intentionally still does
+  // NOT, per this route's original design: a bad key or unreachable
+  // relay is an expected, non-server-side problem, but "the ciphertext
+  // itself can no longer be decrypted with the currently configured
+  // server key" is an actual infra-level issue worth a durable record).
+  let apiKey: string | undefined;
+  if (provider.encryptedApiKey) {
+    try {
+      apiKey = decryptApiKey(provider.encryptedApiKey);
+    } catch (err) {
+      const message = `Your saved API key for "${provider.label}" could not be read (likely re-encrypted with a different server key) — please re-enter it in Settings > Providers.`;
+      logError({
+        source: 'byok-test-connection-decrypt-failed',
+        error: err,
+        userId: session.user.id,
+        context: { providerId, modelId, providerLabel: provider.label },
+      });
+      await prisma.userModelProviderModel.update({
+        where: { id: modelRow.id },
+        data: { lastTestedAt: new Date(), lastTestStatus: 'error', lastTestError: message },
+      });
+      return NextResponse.json({ success: false, error: message });
+    }
+  }
 
   const model = buildModelClient(
     { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl, apiKey },
@@ -82,6 +121,22 @@ export const POST = withApiErrorHandling(async (
       ? `No response within 60s -- this model may be slow (reasoning models can take a while) or unreachable. It may still work fine in normal chat, which allows much longer.`
       : (err?.message ?? String(err));
     result = { success: false, error: message.slice(0, 500) };
+    // ADDED (2026-07-23, real gap: this route's whole failure branch was
+    // previously invisible outside lastTestError on the DB row -- an
+    // ordinary "expected" upstream failure (wrong key, unreachable relay,
+    // model not found) never hit console/error_logs at all, so diagnosing
+    // "I tested it and got an error" after the fact meant either the user
+    // pastes the exact text back or it's unrecoverable. Low-noise
+    // best-effort record now exists either way -- still 200/non-fatal to
+    // the caller, this is purely an observability addition, changes
+    // nothing about the response shape or the "expected, not a server
+    // error" design this route already had.
+    logError({
+      source: 'byok-test-connection-failed',
+      error: err instanceof Error ? err : new Error(String(err)),
+      userId: session.user.id,
+      context: { providerId, modelId, providerLabel: provider.label, aborted: controller.signal.aborted },
+    });
   } finally {
     clearTimeout(timeout);
   }
