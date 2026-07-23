@@ -37,6 +37,18 @@ export interface LibraryState {
   toggleCollect: (type: 'chat' | 'file', id: string) => Promise<void>;
   deleteChat: (sessionId: string) => Promise<void>;
   deleteFile: (fileId: string) => Promise<void>;
+  /**
+   * Optimistic insert for a chat that was just created client-side, before
+   * `refresh()` has ever fetched it from the server. See direct-chat-
+   * interface.tsx's onSend (2026-07-23, "chat should be created instantly
+   * I send message") -- preSave already persists the row synchronously
+   * server-side by the time this fires, so this is purely a UI-latency
+   * fix, not a race against the write itself. No-op if a chat with this
+   * sessionId is already present (e.g. a later refresh() already landed
+   * first, or this somehow double-fires) so it can never create a
+   * duplicate row in the list.
+   */
+  addLocalChat: (sessionId: string, title: string | null) => void;
 }
 
 export const useLibraryStore = create<LibraryState>()((set, get) => ({
@@ -119,6 +131,18 @@ export const useLibraryStore = create<LibraryState>()((set, get) => ({
     } catch (error) {
       console.error('library:deleteFile error', error);
     }
+  },
+  addLocalChat: (sessionId, title) => {
+    set(state => {
+      if (state.chats.some(c => c.sessionId === sessionId)) return {};
+      const now = new Date().toISOString();
+      return {
+        chats: [
+          { type: 'chat' as const, sessionId, title, createdAt: now, updatedAt: now, collected: false },
+          ...state.chats,
+        ],
+      };
+    });
   },
 }));
 

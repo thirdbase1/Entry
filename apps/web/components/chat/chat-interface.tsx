@@ -13,7 +13,6 @@ interface ChatInterfaceProps {
   placeholder?: string;
   placeholderTitle?: string;
   className?: string;
-  headerContent?: React.ReactNode;
   /** Initial message to send immediately (e.g. from a ?msg= query param). */
   initialMessage?: string;
   /** Preselect a model for a brand-new chat (e.g. ?model=byok:xyz after the
@@ -67,7 +66,6 @@ export function ChatInterface({
   placeholder = 'What are your thoughts?',
   placeholderTitle = 'What can I help you with?',
   className = '',
-  headerContent,
   initialMessage,
   initialModel,
   integrationCallback,
@@ -285,7 +283,6 @@ export function ChatInterface({
       placeholder={placeholder}
       placeholderTitle={placeholderTitle}
       className={className}
-      headerContent={headerContent}
       initialMessage={initialMessage}
       integrationCallback={integrationCallback}
     />

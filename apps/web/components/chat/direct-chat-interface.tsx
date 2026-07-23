@@ -40,7 +40,7 @@
  */
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport, type UIMessage } from 'ai';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
 import { CollapsibleUserText } from './collapsible-user-text';
@@ -60,6 +60,8 @@ import { getKnownService } from '@/lib/integration-services';
 import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
 import { useLiveTurnElapsedMs, TurnDurationLabel, LiveTurnDurationLabel } from './turn-timer';
 import { silentlyUpdateChatUrl } from './silent-url-update';
+import { ChatPageHeader } from './chat-page-header';
+import { useLibraryStore } from '@/store/library';
 
 interface DirectChatInterfaceProps {
   sessionId?: string;
@@ -71,7 +73,6 @@ interface DirectChatInterfaceProps {
   placeholder?: string;
   placeholderTitle?: string;
   className?: string;
-  headerContent?: React.ReactNode;
   initialMessage?: string;
   /** Mirrors ChatInterface's own prop — see chat-interface.tsx and
    *  integration-callback-reader.tsx. Wired through here too (2026-07-18)
@@ -185,7 +186,6 @@ function DirectChatSession({
   placeholder = 'What are your thoughts?',
   placeholderTitle = 'What can I help you with?',
   className = '',
-  headerContent,
   initialMessage,
   integrationCallback,
   initialMessages,
@@ -270,6 +270,11 @@ function DirectChatSession({
     },
     async onFinish() {
       setTurnError(null);
+      // Safety net only now (2026-07-23): onSend already does this
+      // eagerly the moment the message is sent, so createdRef.current is
+      // normally already true by the time onFinish runs. Kept as a
+      // fallback for any send path that doesn't go through onSend (e.g.
+      // the initialMessage/integrationCallback auto-sends below).
       if (!createdRef.current) {
         createdRef.current = true;
         if (!sessionId) silentlyUpdateChatUrl(`/chats/${chat.id}`);
@@ -308,6 +313,13 @@ function DirectChatSession({
       }
     },
   });
+
+  // Available from this component's very first render (chat.id is
+  // client-generated synchronously by useChat, never awaits anything) --
+  // this is what makes it safe to key the header/preview/library-insert
+  // off `activeId` immediately on send, instead of waiting for the turn
+  // to finish and the server to hand back a confirmed id.
+  const activeId = sessionId ?? chat.id;
 
   // Updates the STALL DETECTION signature above every time the messages
   // array actually changes content -- cheap length+last-part signature,
@@ -531,6 +543,14 @@ function DirectChatSession({
   useEffect(() => {
     if (initialMessage && !sentInitialRef.current && initialMessages.length === 0) {
       sentInitialRef.current = true;
+      // Same instant-creation bookkeeping as onSend above -- this is the
+      // seeded-deep-link auto-send path (?msg=... on a brand-new chat),
+      // which bypasses onSend entirely by calling sendMessage directly.
+      if (!sessionId && !createdRef.current) {
+        createdRef.current = true;
+        silentlyUpdateChatUrl(`/chats/${chat.id}`);
+        useLibraryStore.getState().addLocalChat(chat.id, initialMessage.slice(0, 80) || null);
+      }
       void chat.sendMessage({ text: initialMessage });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -606,6 +626,34 @@ function DirectChatSession({
     // (chat-interface.tsx remounts into the right path); here we only ever
     // send under the current byokModelId/requestedModel.
     setTurnError(null);
+
+    // INSTANT chat creation (2026-07-23, explicit user request: "the chat
+    // should be created instantly I send message ... I need to reload the
+    // page for those header of preview and all other to show for new
+    // chat"). Previously this same bookkeeping only ran in onFinish, i.e.
+    // only once the model's ENTIRE reply had finished streaming -- so for
+    // however long the first turn took, the URL still said `/chats` (no
+    // id) and the library/sidebar list had no idea this chat existed at
+    // all. Neither piece here needs to wait:
+    //  - `chat.id` is generated synchronously by useChat, true from this
+    //    component's very first render (see the `activeId` comment above).
+    //  - the server's preSave already persists the EveChatSession row
+    //    before this request's response even starts coming back, so
+    //    there's no real race being papered over -- purely a UI-latency
+    //    fix, moving bookkeeping that was ALREADY guaranteed to be correct
+    //    to the earliest possible moment instead of the last.
+    // silentlyUpdateChatUrl is still the address-bar-only History API
+    // trick (no Next router navigation, no remount) -- see its own file
+    // comment for why a real router.replace here would be wrong (it would
+    // unmount/remount this whole component, losing the live in-progress
+    // stream on every single first message). ChatPageHeader/preview now
+    // read `activeId` directly instead of the URL, so they don't need the
+    // real route to have changed to appear.
+    if (!sessionId && !createdRef.current) {
+      createdRef.current = true;
+      silentlyUpdateChatUrl(`/chats/${chat.id}`);
+      useLibraryStore.getState().addLocalChat(chat.id, input.slice(0, 80) || null);
+    }
     // Confirmed real bug (2026-07-11): the Tools menu's disabledTools was
     // collected here (opts.disabledTools) but never actually sent to the
     // server — every turn got every tool regardless of what was toggled
@@ -657,7 +705,18 @@ function DirectChatSession({
     <ChatPanelProvider>
     <AutoFixSendProvider send={message => onSend(message)} isBusy={isBusy} hasMessages={messages.length > 0}>
     <div className={`flex flex-col h-full ${className}`}>
-      {headerContent}
+      {/* Rendered here (not prop-drilled from the page level) because a
+          brand-new chat's parent page.tsx (app/(app)/chats/page.tsx) can't
+          possibly know the chat's id yet to pass it down -- `activeId` is
+          only ever known once this component (and its `chat` instance)
+          exists. Wrapped in Suspense because ChatPageHeader reads
+          `useSearchParams` internally. Always mounts once activeId is
+          truthy, which per the AI SDK is from this component's very first
+          render (2026-07-23, "chat should be created instantly I send
+          message ... header of preview should show", no reload needed). */}
+      <Suspense fallback={null}>
+        <ChatPageHeader sessionId={activeId} />
+      </Suspense>
       <div className="flex-1 h-0 flex flex-col relative">
         <div ref={scrollRef} className="flex-1 overflow-y-auto py-4">
           <div className="max-w-[832px] mx-auto px-4 w-full flex flex-col [&>*:not(:first-child)]:mt-4">
