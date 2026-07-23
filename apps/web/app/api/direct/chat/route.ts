@@ -527,7 +527,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // leave margin under Vercel's hard 300s ceiling) since that constraint is
   // gone. Still finite so a genuinely runaway turn eventually wraps up in
   // text instead of never stopping.
-  const SOFT_DEADLINE_MS = 1_200_000;
+  const SOFT_DEADLINE_MS = 3_300_000;
   let softDeadlineHit = false;
 
   // CRITICAL-SAVE GATE (2026-07-19, real data-loss bug: "agent done and
@@ -570,7 +570,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   const result = streamText({
     model,
-    stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
+    stopWhen: stepCountIs(400), // generous ceiling so a long agentic turn is bounded by the SOFT_DEADLINE_MS time budget, not an arbitrary low step count
     // FIXED (2026-07-19, confirmed live from production logs): a 'Free'
     // BYOK relay (model id "claude-fable-5") hung completely on a turn --
     // zero chunks, zero onStepFinish, nothing -- for the FULL 300s
@@ -657,13 +657,25 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       if (stepNumber > 0 && FLAKY_PROVIDERS_DROP_TOOLS_AFTER_STEP_1.has(providerLabel)) {
         return { activeTools: [] };
       }
-      // BACKGROUND HANDOFF SOFT DEADLINE (2026-07-21) -- once this turn's
-      // own wall-clock time is past SOFT_DEADLINE_MS, stop handing the
-      // model tools on its NEXT step so it wraps up in plain text this
-      // step instead of starting new tool work doomed to be cut off by
-      // Vercel's hard 300s kill. onFinish below sees softDeadlineHit and
-      // hands whatever's left off to the durable Trigger.dev worker
-      // (agent-chat-turn-orchestrator) instead of just losing it.
+      // SOFT DEADLINE (bumped 20min -> 55min, 2026-07-23, real ask: "fix
+      // entry so model can do a very long task" -- e.g. a full admin-page
+      // build in one continuous turn). STALE COMMENT REMOVED: the previous
+      // version of this comment (2026-07-21) said onFinish "hands whatever's
+      // left off to the durable Trigger.dev worker" -- that entire
+      // Trigger.dev handoff path was retired 2026-07-22 when this route
+      // moved to Render (see onFinish's own 2026-07-22 comment below, which
+      // already correctly says "No Trigger.dev dependency anywhere in this
+      // path" -- this comment just hadn't caught up to that yet). There is
+      // no background handoff of any kind here: once past SOFT_DEADLINE_MS,
+      // tools are dropped on the NEXT step so the model wraps up in plain
+      // text instead of starting new tool work with no deadline at all --
+      // durability of everything done so far is handled entirely by the
+      // incremental per-step saves (see onStepEnd below), and the user can
+      // send another message to continue past this point if the task
+      // genuinely wasn't done yet. Render itself has no hard request-kill
+      // like Vercel's old 300s ceiling, so this number is now a deliberate
+      // choice (not a platform constraint) -- kept finite so a genuinely
+      // runaway turn still wraps up eventually instead of running forever.
       if (Date.now() - requestStartedAt > SOFT_DEADLINE_MS) {
         softDeadlineHit = true;
         return { activeTools: [] };
