@@ -832,15 +832,41 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // is already a cheap, safe no-op with no real diff, so this adds
       // no real cost beyond that.
       if (sandboxPromise && toolCalls.length > 0) {
-        const sandbox = await sandboxPromise;
-        // skipCard=true: the card must only be appended AFTER onFinish
-        // persists the final sanitized messages -- appending it here races
-        // with that write and causes the card to be overwritten (the card
-        // lands in events, then onFinish overwrites events with
-        // sanitizedFinalMessages which has no card). The version rows
-        // (ChatVersion/ChatVersionFile) are still written here for
-        // incremental durability; only the UI card is deferred.
-        await captureVersionFromSandboxDiff(chatId, sandbox, { skipCard: true }).catch(err => {
+        // FIXED (2026-07-23, real bug -- "slow after every tool call"
+        // confirmed live): this used to be `await`ed right here, meaning
+        // streamText would not even request the model's NEXT step until
+        // a full git round-trip against the sandbox finished: an
+        // is-inside-work-tree check, rewriting .gitignore, an
+        // untrack pass over 15+ ignored dirs, then `git add -A`/diff/
+        // commit across the ENTIRE sandbox working tree (this repo alone
+        // is 130k+ files) -- all real network round-trips to a remote
+        // sandbox, not local/free. That's dead, fully serial time added
+        // after EVERY tool call, on EVERY turn, before the model could
+        // even start thinking about its next step -- easily the single
+        // biggest contributor to "slow after a tool call" reports.
+        // Fire-and-forget instead: `captureVersionFromSandboxDiff` is
+        // already serialized per-chatId internally (`chainByChat` in
+        // chat-versioning.ts), so NOT awaiting it here doesn't risk two
+        // concurrent git operations racing each other -- each call still
+        // strictly runs after the previous one for this same chat.
+        // Correctness is preserved because onFinish below still AWAITS
+        // its own final captureVersionFromSandboxDiff call, which -- by
+        // virtue of that same per-chat queue -- can't run until every
+        // incremental capture kicked off here has already settled. Net
+        // effect: the model's next step starts immediately after a tool
+        // call instead of waiting on a git round-trip, and the turn's
+        // hard-kill durability guarantee (the whole reason this runs
+        // per-step, not just once at the end) is unchanged.
+        void sandboxPromise.then(sandbox =>
+          // skipCard=true: the card must only be appended AFTER onFinish
+          // persists the final sanitized messages -- appending it here races
+          // with that write and causes the card to be overwritten (the card
+          // lands in events, then onFinish overwrites events with
+          // sanitizedFinalMessages which has no card). The version rows
+          // (ChatVersion/ChatVersionFile) are still written here for
+          // incremental durability; only the UI card is deferred.
+          captureVersionFromSandboxDiff(chatId, sandbox, { skipCard: true })
+        ).catch(err => {
           console.error('[direct chat] incremental step version capture failed', chatId, err);
         });
       }
