@@ -539,6 +539,45 @@ function DirectChatSession({
   // streaming), independent of chunk arrival so it can never stall.
   const liveTurnElapsedMs = useLiveTurnElapsedMs(isBusy);
 
+  // FROZEN-ON-STOP FALLBACK (2026-07-23, real user-reported bug: "if a
+  // turn stops without completing, the timer never shows at the bottom
+  // at all"). route.ts's messageMetadata now also fires on a genuine
+  // 'error' part (see that file's comment), which covers a clean, caught
+  // error -- but the one case NO server-side hook can ever cover is a
+  // truly dead turn that never gets far enough to emit even an error
+  // chunk at all (a hard network cut on the provider side with nothing
+  // ever coming back). That case flips `isBusy` false (chat.status goes
+  // to 'error'/'ready') with `message.metadata.durationMs` never set --
+  // previously a permanent blank gap, since the live ticking clock is
+  // gated on `isBusy` and stops rendering the instant it goes false.
+  // Fix: the moment `isBusy` transitions true -> false, if the last
+  // assistant message still has no durationMs yet, snapshot the live
+  // clock's last real value and keep showing THAT as a normal (no longer
+  // ticking) duration label -- a genuine wall-clock number, not a guess,
+  // just sourced client-side instead of server-side for this one
+  // worst-case gap. Cleared the instant a NEW turn starts (isBusy flips
+  // back to true) so it never bleeds into the next message's own timer,
+  // and it's naturally superseded the moment a real reload/refetch
+  // brings back a proper server-computed durationMs for that message
+  // (the metadata check always wins first in the render below).
+  const frozenDurationRef = useRef<{ messageId: string; ms: number } | null>(null);
+  const wasBusyRef = useRef(isBusy);
+  useEffect(() => {
+    if (wasBusyRef.current && !isBusy) {
+      const last = chat.messages[chat.messages.length - 1];
+      const alreadyHasDuration =
+        last?.role === 'assistant' &&
+        typeof (last.metadata as { durationMs?: number } | undefined)?.durationMs === 'number';
+      if (last?.role === 'assistant' && !alreadyHasDuration && liveTurnElapsedMs != null) {
+        frozenDurationRef.current = { messageId: last.id, ms: liveTurnElapsedMs };
+      }
+    }
+    if (isBusy) {
+      frozenDurationRef.current = null;
+    }
+    wasBusyRef.current = isBusy;
+  }, [isBusy, chat.messages, liveTurnElapsedMs]);
+
   const sentInitialRef = useRef(false);
   useEffect(() => {
     if (initialMessage && !sentInitialRef.current && initialMessages.length === 0) {
@@ -870,6 +909,13 @@ function DirectChatSession({
                       }
                       if (isLastAssistant && isBusy && liveTurnElapsedMs != null) {
                         return <LiveTurnDurationLabel elapsedMs={liveTurnElapsedMs} />;
+                      }
+                      // Worst-case fallback (see frozenDurationRef's own
+                      // comment above): the turn ended without the server
+                      // ever attaching a durationMs at all -- show the
+                      // frozen client-side snapshot instead of nothing.
+                      if (isLastAssistant && frozenDurationRef.current?.messageId === m.id) {
+                        return <TurnDurationLabel durationMs={frozenDurationRef.current.ms} />;
                       }
                       return null;
                     })()}

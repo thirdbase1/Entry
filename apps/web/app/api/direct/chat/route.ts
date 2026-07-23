@@ -346,7 +346,34 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // Cache breakpoint on the last user+assistant turn -- so the growing
     // conversation history itself gets cached incrementally as the chat
     // gets longer -- see prompt-cache.ts's file comment for the full "why".
-    const converted = await convertToModelMessages(messagesForModel);
+    //
+    // FIXED (2026-07-23, real bug confirmed live in prod logs: "turn
+    // error ... Invalid prompt: The messages do not match the
+    // ModelMessage[] schema", killing a turn near-instantly with zero
+    // network call ever made -- this is the actual cause of "message
+    // stopped in under a minute" on a long Gemini 3 session). Root
+    // cause: ANY turn that ends early for ANY reason (an error, a
+    // dropped connection, the per-tool-call hard kill, or simply the
+    // user sending a new message before a tool call finished) leaves a
+    // dangling tool-call part in that assistant message's history --
+    // started (`input-streaming`/`input-available`) but with no matching
+    // result ever recorded. `convertToModelMessages` with no options
+    // faithfully tries to replay that half-finished tool call as a real
+    // ModelMessage on the NEXT turn -- but a lone tool-call with no
+    // paired tool-result is not a valid ModelMessage shape, so the SDK's
+    // own Zod schema validation (standardizePrompt, called inside
+    // streamText before any provider request is even made) rejects the
+    // WHOLE array outright. Every later message in that same chat then
+    // fails the exact same way forever, since the dangling call stays in
+    // history permanently once persisted. `ignoreIncompleteToolCalls` is
+    // the SDK's own documented option for exactly this situation --
+    // strips any tool part still in `input-streaming`/`input-available`
+    // state before conversion, so a turn that got cut off just quietly
+    // loses that one incomplete call on replay instead of permanently
+    // wedging the entire chat. Confirmed via node_modules/ai/dist's own
+    // convert-to-model-messages.ts source (the option's exact filter
+    // logic matches this failure mode precisely).
+    const converted = await convertToModelMessages(messagesForModel, { ignoreIncompleteToolCalls: true });
     return applyConversationCacheControl(converted);
   })();
   // REMOVED (2026-07-15, explicit user request): this used to pass
@@ -1053,8 +1080,36 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // page reload -- no separate/duplicate timing logic to drift out of
     // sync, nothing to get stuck at a stale value since it's set exactly
     // once, atomically, at the one guaranteed-to-fire completion point.
+    // WIDENED (2026-07-23, real user-reported bug: "timer never shows on
+    // a turn that doesn't complete, and sometimes it's wrong"). This used
+    // to only fire on `part.type === 'finish'` -- but 'finish' is the ONE
+    // part that does NOT fire when a turn ends via a genuine error (a
+    // dead BYOK relay, a provider-side abort, a thrown tool error that
+    // propagates up): that path emits a 'error' part instead, and
+    // `onFinish` below is *also* skipped for the exact same reason (see
+    // its own comment thread above, "a turn that ends early for any
+    // reason never reaches onFinish"). Net effect: an errored turn's
+    // message.metadata.durationMs was never set at all, so the client had
+    // nothing final to show once its own live ticking clock stopped
+    // (that clock is gated on `chat.status === 'streaming' | 'submitted'`,
+    // which flips away the instant the error lands) -- a permanent blank
+    // gap between "still ticking" and "shows the final number", for every
+    // single non-clean turn ending. Also handling 'error' here uses the
+    // exact same proven mechanism 'finish' already relies on (AI SDK's
+    // own message-metadata chunk + shallow merge into message.metadata,
+    // see this function's own comment above) -- not a second, separate
+    // timing path that could drift out of sync, just the same one firing
+    // on one more terminal part type. Deliberately still NOT firing on
+    // every part (e.g. every text-delta/tool chunk): doing that would
+    // make the displayed number freeze between chunks during a long
+    // silent tool call instead of ticking smoothly, which is exactly the
+    // "glitchy" symptom the live client clock (turn-timer.tsx) was built
+    // to avoid in the first place -- 'finish' and 'error' are the only
+    // two terminal, guaranteed-at-most-once-per-turn part types, so this
+    // stays a clean, atomic, single write on whichever one actually ends
+    // the turn.
     messageMetadata({ part }) {
-      if (part.type === 'finish') {
+      if (part.type === 'finish' || part.type === 'error') {
         return { durationMs: Date.now() - requestStartedAt };
       }
     },
