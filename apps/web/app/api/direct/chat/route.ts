@@ -58,7 +58,6 @@
  * from doing the same thing again).
  */
 import { NextRequest } from 'next/server';
-import { waitUntil } from '@vercel/functions';
 
 // Long autonomous agentic turns (many chained tool calls) need real
 // runway, but the actual ceiling depends on the Vercel plan the project
@@ -731,36 +730,51 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // USAGE METERING (Phase 1 of admin.md §2, 2026-07-19): one
       // UsageEvent row per completed step, captured verbatim from the
       // provider's own usage object -- never estimated. Metered per-STEP
-      // (not once in onFinish) deliberately: a turn hard-killed at the
-      // 300s maxDuration ceiling never reaches onFinish, but its already-
-      // completed steps DID consume tokens -- admin.md flags exactly this
-      // as "the most common way a metering system quietly under-bills".
-      // waitUntil (not await): recordUsageEvent never throws, but its DB
-      // write must not add latency to the hot streaming path either.
+      // (not once in onFinish) deliberately: a turn that ends early for
+      // any reason never reaches onFinish, but its already-completed
+      // steps DID consume tokens -- admin.md flags exactly this as "the
+      // most common way a metering system quietly under-bills".
+      // CLEANED UP (2026-07-23, "we ain't using vercel anymore everything
+      // is in render"): this used to be wrapped in @vercel/functions'
+      // waitUntil(), a Vercel-serverless-only primitive whose entire job
+      // is telling THAT platform not to freeze/kill a function instance
+      // before a background promise settles. On Render -- a persistent
+      // Node process that's never frozen between requests -- it was
+      // already a silent no-op (confirmed straight from the installed
+      // package: waitUntil() looks up a `Symbol.for('@vercel/request-
+      // context')` global that only Vercel's own runtime ever injects;
+      // on any other platform that lookup returns nothing and the whole
+      // call is skipped). It was harmless dead weight either way, since
+      // the promise below is constructed eagerly -- calling
+      // recordUsageEvent(...) starts the DB write immediately regardless
+      // of what wraps it -- but leaving Vercel-specific framing in a
+      // Render-only codebase is exactly the kind of stale assumption
+      // worth deleting outright rather than stepping around. Plain
+      // fire-and-forget with its own `.catch` is all that's needed here.
       // Usage shape verified against THIS repo's installed ai package
       // (LanguageModelUsage): cache reads/writes live in
       // usage.inputTokenDetails, not in providerMetadata.
       if (usage && (usage.inputTokens != null || usage.outputTokens != null)) {
-        waitUntil(
-          recordUsageEvent({
-            userId,
-            chatId,
-            source: 'direct-chat',
-            model: modelId,
-            provider: byokModelId ? `byok:${providerLabel}` : 'gateway',
-            usage: {
-              // inputTokens on LanguageModelUsage is the TOTAL (cached
-              // included) -- price only the non-cached portion at the
-              // input rate, or cache reads double-bill at full price.
-              inputTokens: usage.inputTokenDetails?.noCacheTokens ?? usage.inputTokens ?? 0,
-              outputTokens: usage.outputTokens ?? 0,
-              cacheCreationTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
-              cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
-            },
-            finishReason,
-            success: toolErrors.length === 0,
-          })
-        );
+        void recordUsageEvent({
+          userId,
+          chatId,
+          source: 'direct-chat',
+          model: modelId,
+          provider: byokModelId ? `byok:${providerLabel}` : 'gateway',
+          usage: {
+            // inputTokens on LanguageModelUsage is the TOTAL (cached
+            // included) -- price only the non-cached portion at the
+            // input rate, or cache reads double-bill at full price.
+            inputTokens: usage.inputTokenDetails?.noCacheTokens ?? usage.inputTokens ?? 0,
+            outputTokens: usage.outputTokens ?? 0,
+            cacheCreationTokens: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+            cacheReadTokens: usage.inputTokenDetails?.cacheReadTokens ?? 0,
+          },
+          finishReason,
+          success: toolErrors.length === 0,
+        }).catch((err: unknown) => {
+          console.error('[direct chat] recordUsageEvent failed', chatId, err);
+        });
       }
       // A step that finished for any reason OTHER than actually making
       // more tool calls or a normal stop, OR a tool call that came back
@@ -851,37 +865,42 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // bash/browser_use side effects) from whether the client's HTTP
   // connection stays open. Without this, a backgrounded mobile tab (OS
   // suspends its network activity) or a dropped Wi-Fi/cellular
-  // connection tore down the underlying response stream, which by
-  // default aborts the in-flight streamText call too -- onFinish below
-  // never fires, nothing gets persisted, and the whole turn (including
-  // any bash/browser_use work already done) is silently lost even though
-  // none of it was actually the user's fault. `consumeStream()` reads
-  // the result to completion on its own regardless of who else is
-  // reading it, and `after()` guarantees that keeps running for the full
-  // 300s maxDuration budget (Hobby plan's ceiling) even after this handler returns the
-  // Response below -- so the turn always finishes and gets saved via
-  // onFinish, and a client that reconnects (see direct-chat-interface.tsx's
-  // online/visibilitychange recovery fetch) picks up the completed
-  // result instead of a stalled/lost one.
-  // Switched next/server's after() -> @vercel/functions' raw waitUntil()
-  // (2026-07-17). Live-fire tested against production: a real client
-  // disconnect a few seconds into a tool call, with after()+consumeStream(),
-  // reproducibly killed the turn outright -- onFinish never ran, nothing
-  // persisted, no error even logged. Re-tested the identical scenario with
-  // waitUntil() instead and the turn kept running server-side well past
-  // the disconnect (confirmed via a durable DB checkpoint written mid-tool-
-  // call, and separately by the run persisting for its full natural
-  // duration up to the 300s ceiling instead of dying in the first few
-  // seconds). Matches Vercel's own guidance for this exact case:
-  // https://github.com/vercel/ai/issues/10844 -- "waitUntil() guarantees
-  // the promise completes even after function termination," which is not
-  // guaranteed for after() in the same way on this runtime.
-  waitUntil(
-    Promise.resolve(result.consumeStream()).catch((err: unknown) => {
-      console.error('[direct chat] background consumeStream failed', chatId, err);
-      logError({ source: 'direct-chat-consumestream', error: err, userId, chatId, context: { providerLabel, modelId } });
-    })
-  );
+  // connection tearing down the underlying response stream could abort
+  // the in-flight streamText call too -- onFinish below never fires,
+  // nothing gets persisted, and the whole turn (including any
+  // bash/browser_use work already done) is silently lost even though
+  // none of it was actually the user's fault. `result.consumeStream()`
+  // reads the result to completion on its own regardless of who else is
+  // (or isn't) still reading the outer Response's stream -- so the turn
+  // always finishes and gets saved via onFinish, and a client that
+  // reconnects (see direct-chat-interface.tsx's stall-detection recovery
+  // fetch) picks up the completed result instead of a stalled/lost one.
+  //
+  // CLEANED UP (2026-07-23, "we ain't using vercel anymore everything is
+  // in render"): this used to be wrapped in @vercel/functions' raw
+  // waitUntil(), carried over from back when this ran on Vercel
+  // serverless (2026-07-17 history: after() there demonstrably killed
+  // the turn on a real client disconnect, waitUntil() didn't -- because
+  // Vercel can freeze/tear down a function instance the moment its
+  // Response finishes unless something explicitly holds it open, which
+  // is the ONE thing waitUntil() exists to do on that platform).
+  // On Render that entire problem class doesn't exist: this is a plain
+  // persistent Node process, never frozen between requests, so ANY
+  // already-in-flight promise -- like the one `result.consumeStream()`
+  // returns below -- just keeps running for as long as the event loop
+  // keeps ticking, which on a live server is always. waitUntil() itself
+  // had already become a complete no-op here days before this cleanup
+  // (confirmed straight from the installed package: it looks up a
+  // `Symbol.for('@vercel/request-context')` global that only Vercel's
+  // own runtime ever injects -- on Render that lookup returns nothing
+  // and the call is silently skipped), so removing the wrapper changes
+  // no actual runtime behavior; it only removes a misleading, now-false
+  // "this needs Vercel to work" implication from code that's been
+  // running on Render since 2026-07-22.
+  Promise.resolve(result.consumeStream()).catch((err: unknown) => {
+    console.error('[direct chat] background consumeStream failed', chatId, err);
+    logError({ source: 'direct-chat-consumestream', error: err, userId, chatId, context: { providerLabel, modelId } });
+  });
 
   const uiStream = result.toUIMessageStream({
     originalMessages: uiMessages,

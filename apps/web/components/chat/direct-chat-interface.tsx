@@ -198,6 +198,28 @@ function DirectChatSession({
   const missedPollsRef = useRef(0);
   const pollIdRef = useRef<number | undefined>(undefined);
   const [turnError, setTurnError] = useState<string | null>(null);
+  // STALL DETECTION (2026-07-23, explicit user report: "anytime my screen
+  // turn off the agent stop instantly... never stop even if it lose
+  // internet connection"). Root cause: the recovery poll right below this
+  // deliberately never touches a turn while `chat.status` is
+  // 'streaming'/'submitted' (2026-07-15 fix, see its own comment -- that
+  // guard is correct and must stay, it stops a HEALTHY stream from being
+  // clobbered mid-tool-call). The gap: a screen lock/backgrounded tab
+  // doesn't always make the fetch reader actually throw -- mobile OSes
+  // frequently just suspend the radio/socket into a silent limbo (no
+  // bytes, no close, no error) rather than resetting it cleanly, so
+  // `chat.status` can stay stuck on 'streaming' forever with the UI
+  // frozen, even though route.ts's `consumeStream()`+background-drain
+  // already guarantees the real work keeps running server-side and gets
+  // persisted regardless. This ref tracks the last time `chat.messages`
+  // ACTUALLY changed (a cheap length+content signature, not full JSON
+  // diffing) -- if a turn has been 'streaming'/'submitted' with zero real
+  // progress for longer than STALL_MS, that's the signal something died
+  // client-side (not "a long tool call is still legitimately running",
+  // which keeps updating parts/tool state well before STALL_MS), and it's
+  // safe to fall through to the same proven reconciliation fetch used for
+  // the 'error'/looksIncomplete cases below.
+  const lastProgressRef = useRef<{ signature: string; at: number }>({ signature: '', at: Date.now() });
 
   const transport = useMemo(
     () =>
@@ -287,6 +309,22 @@ function DirectChatSession({
     },
   });
 
+  // Updates the STALL DETECTION signature above every time the messages
+  // array actually changes content -- cheap length+last-part signature,
+  // deliberately not a full JSON stringify (this runs on every streamed
+  // token). Any real progress at all (a new text-delta, a tool call
+  // advancing state, a whole new message) resets the stall clock; a
+  // client-side-dead stream is exactly the case where NONE of that ever
+  // fires again.
+  useEffect(() => {
+    const last = chat.messages[chat.messages.length - 1];
+    const lastPart = last?.parts?.[last.parts.length - 1] as { text?: string } | undefined;
+    const signature = `${chat.messages.length}:${last?.parts?.length ?? 0}:${lastPart?.text?.length ?? 0}`;
+    if (signature !== lastProgressRef.current.signature) {
+      lastProgressRef.current = { signature, at: Date.now() };
+    }
+  }, [chat.messages]);
+
   // Recover from a dropped connection instead of just sitting on a
   // stalled/errored turn forever. Two real, confirmed cases this covers:
   // (1) the user switches to another app/tab mid-turn -- mobile browsers
@@ -360,12 +398,20 @@ function DirectChatSession({
         // component silently replacing the live turn with a frozen
         // snapshot the instant a tool call handed off to the next step.
         // Recovery should only ever act on a turn that's ACTUALLY stuck --
-        // a real terminal 'error', or the reload-mid-turn case
-        // (`looksIncomplete`) the 2026-07-11 fix above already covers --
-        // never on 'streaming'/'submitted', which mean the live connection
-        // itself already believes it's fine.
-        if (chat.status === 'streaming' || chat.status === 'submitted') return;
-        if (chat.status !== 'error' && !looksIncomplete) return;
+        // a real terminal 'error', the reload-mid-turn case
+        // (`looksIncomplete`) the 2026-07-11 fix above already covers, OR
+        // (2026-07-23) a 'streaming'/'submitted' turn that has produced
+        // ZERO real progress for STALL_MS -- see lastProgressRef's comment
+        // above for exactly why status alone can't be trusted for that
+        // case. A genuinely healthy long tool call keeps advancing parts
+        // well inside this window, so this never re-triggers the
+        // 2026-07-15 clobber bug that guard was written to prevent --
+        // it only fires once the client-visible state has been frozen
+        // solid for a very deliberately generous stretch.
+        const STALL_MS = 20_000;
+        const isStale = Date.now() - lastProgressRef.current.at > STALL_MS;
+        if ((chat.status === 'streaming' || chat.status === 'submitted') && !isStale) return;
+        if (chat.status !== 'error' && !looksIncomplete && !isStale) return;
         try {
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) {

@@ -19,9 +19,18 @@ import { PythonCodeResult } from './renderers/python-code-result';
 import { AgentDelegateResult } from './renderers/agent-delegate-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
 import { getKnownService } from '@/lib/integration-services';
+import { TurnDurationLabel } from './turn-timer';
 
 interface MessageRendererProps {
-  message: { id: string; role: 'user' | 'assistant'; parts: readonly EveMessagePart[] };
+  // `metadata` is optional and untyped here on purpose: this component
+  // renders BOTH legacy eve-shaped messages (no metadata at all) and the
+  // newer direct-chat/BYOK path's AI SDK UIMessages replayed straight out
+  // of the same `EveChatSession.events` column (see playback/page.tsx's
+  // file comment -- one shared events store, two historically different
+  // producers). `durationMs` (2026-07-23 turn-timer feature) only ever
+  // exists on the latter; the `role === 'assistant'` branch below reads
+  // it defensively for exactly that reason.
+  message: { id: string; role: 'user' | 'assistant'; parts: readonly EveMessagePart[]; metadata?: unknown };
   isStreaming?: boolean;
   /** Full session history + a sender — needed by `choose` to detect its own answer and submit new ones. */
   allMessages?: readonly EveMessage[];
@@ -172,6 +181,7 @@ export const MessageRenderer = memo(function MessageRenderer({
   onSend,
 }: MessageRendererProps) {
   if (message.role === 'assistant') {
+    const durationMs = (message.metadata as { durationMs?: number } | undefined)?.durationMs;
     return (
       <div className="flex flex-col items-start gap-2 w-full">
         {message.parts.map((part, idx) => {
@@ -221,6 +231,9 @@ export const MessageRenderer = memo(function MessageRenderer({
           }
           return null;
         })}
+        {!isStreaming && typeof durationMs === 'number' && Number.isFinite(durationMs) && (
+          <TurnDurationLabel durationMs={durationMs} />
+        )}
       </div>
     );
   }
