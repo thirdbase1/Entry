@@ -66,6 +66,34 @@ export function hasConnectConnector(service: string): boolean {
 }
 
 /**
+ * ADDED 2026-07-23 (real user-reported bug): Vercel Connect
+ * (@vercel/connect) only works when this app is actually running ON
+ * Vercel with a linked project -- every call authenticates itself to
+ * Connect's API via a `x-vercel-oidc-token` header that Vercel's own
+ * runtime injects automatically and NO OTHER HOST CAN PROVIDE. Since the
+ * 2026-07-22/23 migration to Render (see DEPLOY.md), every one of these
+ * calls was failing with a raw, confusing
+ * `VercelOidcTokenError: ... Have you linked your project with vc link?`
+ * bubbling straight to the user for "vercel"/"supabase" connect attempts
+ * (github already has its own direct-OAuth bypass -- see
+ * github-oauth/start+callback routes -- so it's unaffected by this).
+ *
+ * Fix: detect up front (Vercel sets `VERCEL=1` in every one of its own
+ * runtimes; Render never does) and fail fast with one clear, honest
+ * message instead of letting the SDK's own confusing OIDC error surface.
+ * There is no code-level fix that makes Connect itself work off-Vercel --
+ * this is a genuine platform capability Entry lost by moving to Render,
+ * not a bug in how we call it.
+ */
+function isVercelRuntime(): boolean {
+  return process.env.VERCEL === '1';
+}
+
+const CONNECT_UNAVAILABLE_OFF_VERCEL =
+  'One-click connect for this service needs Entry to be running on Vercel, which it no longer is. Use the manual token field instead.';
+
+
+/**
  * GitHub-specific (2026-07-18 fix): GitHub is a multi-tenant Vercel Connect
  * connector type -- "installation" (which GitHub org/account) is a
  * completely separate axis from "subject" (which of our users is asking).
@@ -98,6 +126,7 @@ export async function resolveGithubInstallationId(userId: string): Promise<strin
 export async function isConnectAuthorized(userId: string, service: string): Promise<boolean> {
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) return false;
+  if (!isVercelRuntime()) return false;
   try {
     if (service === 'github') {
       const installationId = await resolveGithubInstallationId(userId);
@@ -116,6 +145,7 @@ export async function isConnectAuthorized(userId: string, service: string): Prom
 export async function startConnectAuthorization(userId: string, service: string, callbackUrl: string) {
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) throw new Error(`No Vercel Connect connector configured for "${service}".`);
+  if (!isVercelRuntime()) throw new Error(CONNECT_UNAVAILABLE_OFF_VERCEL);
   const scopes = CONNECT_DEFAULT_SCOPES[service];
   // GitHub specifically needs to go through the App INSTALLATION step (repo picker + permission
   // grant), not just OAuth sign-in -- see file header comment. Requesting it here means the consent
@@ -149,6 +179,7 @@ export async function startConnectAuthorization(userId: string, service: string,
 export async function disconnectConnectAuthorization(userId: string, service: string) {
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) return;
+  if (!isVercelRuntime()) return;
   if (service === 'github') {
     // GitHub's connector reports supportsRevocation: false (installations
     // are only removed from the provider side or the Vercel dashboard, not
