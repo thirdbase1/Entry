@@ -8,6 +8,47 @@ import { DEFAULT_TOOL_TIMEOUT_MS } from './with-agent-timeout.js';
 import { withPeriodicVersionCapture } from '@entry/db/chat-versioning';
 
 /**
+ * CONTEXT-BLOAT FIX (2026-07-23, real evidence: a production chat found
+ * sitting at 370,000+ input tokens per turn, crashing the server via DB
+ * connection contention on every incremental save -- see the direct/chat
+ * route's own onStepEnd comment for the full incident). Root cause traced
+ * to THIS tool specifically: read_file/list_files/browser_use all already
+ * cap their own output before it's ever handed back to the model (see
+ * read_file.ts's MAX_CONTENT_CHARS, list_files.ts's `.slice(0, 200)`,
+ * browser_use.ts's `.slice(0, 4000)`), but bash -- the single most-used
+ * tool for real coding work (builds, npm installs, greps across
+ * node_modules, tsc output) -- never got the same treatment. Every
+ * command's FULL stdout/stderr was returned verbatim and then baked
+ * permanently into conversation history, because the entire history gets
+ * resent to the model on every subsequent turn. A single `npm install` or
+ * a `grep` across a big tree can easily be tens of thousands of characters
+ * -- multiply that by dozens of bash calls across a long session and
+ * 370K tokens stops being surprising, it's the expected outcome.
+ *
+ * Head+tail truncation (not a plain head cut) deliberately: for a failing
+ * build or a crashed process, the actually-useful part is very often the
+ * LAST few hundred lines (the real error/stack trace), not the first --
+ * a plain `.slice(0, N)` would keep verbose boilerplate at the top and
+ * silently drop the one line that explains the failure. Keeping both ends
+ * with a clear marker in between gives the model enough of "what started"
+ * and "how it ended" to reason about without ever re-inflating context
+ * back toward the same failure mode.
+ */
+const MAX_OUTPUT_CHARS = 20_000;
+function truncateOutput(text: string): { text: string; truncated: boolean } {
+  if (text.length <= MAX_OUTPUT_CHARS) return { text, truncated: false };
+  const headChars = Math.floor(MAX_OUTPUT_CHARS * 0.6);
+  const tailChars = MAX_OUTPUT_CHARS - headChars;
+  const omitted = text.length - headChars - tailChars;
+  const marker = `\n\n[... ${omitted.toLocaleString()} characters omitted -- output was ${text.length.toLocaleString()} chars total, truncated to keep context size sane. ` +
+    `If you need a specific part that got cut, re-run a narrower command (e.g. grep for the exact string, or pipe through | head / | tail) instead of re-running the whole thing. ...]\n\n`;
+  return {
+    text: text.slice(0, headChars) + marker + text.slice(text.length - tailChars),
+    truncated: true,
+  };
+}
+
+/**
  * Best-effort capture of "the command that's actually serving something
  * long-running" (2026-07-16, real bug: clicking Restart in the preview
  * panel used to destroy the whole sandbox filesystem just to have SOME
@@ -126,7 +167,14 @@ export const bash = {
       // finishes in under 10s still costs nothing extra (the interval
       // never fires once, cleared immediately on completion either way).
       const result = await withPeriodicVersionCapture(ctx.session.id, sandbox, () => sandbox.run({ command, signal: t.signal }), 10_000);
-      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+      const stdout = truncateOutput(result.stdout);
+      const stderr = truncateOutput(result.stderr);
+      return {
+        stdout: stdout.text,
+        stderr: stderr.text,
+        exitCode: result.exitCode,
+        ...(stdout.truncated || stderr.truncated ? { truncated: true } : {}),
+      };
     } catch (err) {
       // FIXED (2026-07-18, real bug: "signal: terminated" surfacing as a
       // bare, unexplained error with stdout/stderr silently dropped).
@@ -153,7 +201,14 @@ export const bash = {
             `If this was a chained command (a && b && c), split it into separate bash calls run one at a time instead of one long chain -- ` +
             `that way a failure doesn't wipe out the output of the steps that already ran, and each step gets its own resource headroom.]`
           : '';
-        return { stdout: err.stdout, stderr: (err.stderr ?? '') + note, exitCode: err.exitCode };
+        const stdout = truncateOutput(err.stdout);
+        const stderr = truncateOutput((err.stderr ?? '') + note);
+        return {
+          stdout: stdout.text,
+          stderr: stderr.text,
+          exitCode: err.exitCode,
+          ...(stdout.truncated || stderr.truncated ? { truncated: true } : {}),
+        };
       }
       throw t.rethrow(err);
     } finally {
