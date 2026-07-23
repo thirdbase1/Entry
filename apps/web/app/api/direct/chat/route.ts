@@ -59,21 +59,17 @@
  */
 import { NextRequest } from 'next/server';
 
-// Long autonomous agentic turns (many chained tool calls) need real
-// runway, but the actual ceiling depends on the Vercel plan the project
-// is deployed on, not just the platform's theoretical max: Hobby caps
-// every Serverless Function at 300s (confirmed the hard way -- a live
-// prod deploy was rejected outright with "Builder returned invalid
-// maxDuration value ... must have a maxDuration between 1 and 300 for
-// plan hobby" when this was set to 1800). 1800s is only reachable on
-// Pro/Enterprise's "extended max duration" beta. 300 is the real,
-// current ceiling for this project; genuinely unbounded (e.g. 50+
-// minute) autonomous runs need Vercel Workflows' pause/resume
-// durable-execution model instead of a plain function regardless of
-// plan -- a real architecture change, not a config tweak (see chat
-// about this if/when needed). Bump this back up if/when the project
-// moves to Pro or above.
-export const maxDuration = 300;
+// REMOVED (2026-07-23) the stale `export const maxDuration = 300` that
+// used to live here. That's a Vercel-only build-time directive -- Next.js
+// itself never reads or enforces it at runtime (confirmed by grepping
+// the actual request-serving code in node_modules/next/dist; every hit
+// for "maxDuration" lives only in build/typegen files, never in
+// next-server.js/base-server.js/route-modules). Since this route moved
+// to Render 2026-07-22 (persistent server, no serverless duration cap at
+// all), the constant was already 100% inert dead code -- kept only as a
+// misleading relic of the old Vercel deploy that made this route look
+// artificially capped at 300s when nothing was actually enforcing that
+// anymore. The route's real ceiling is SOFT_DEADLINE_MS below (20 min).
 import {
   streamText,
   tool,
@@ -576,15 +572,40 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // node_modules/ai/src/util/set-abort-timeout.ts) -- aborts a step if
     // NO chunk (not even the first) arrives within the window, which
     // turns into a normal catchable error (onError fires, a clean message
-    // reaches the client) instead of a bare platform kill. Deliberately
-    // scoped to "no data at all for 90s", not a cap on total step
-    // duration -- a model that's genuinely still producing output stays
-    // completely unaffected no matter how long that takes; only a truly
-    // dead connection gets cut. stepMs is a secondary safety net for
-    // the "trickles a few bytes forever but never finishes" variant,
-    // capped well under the 300s hard ceiling so there's still real
-    // margin for onFinish/version-capture/save work to run afterward.
-    timeout: { chunkMs: 90_000, stepMs: 240_000 },
+    // reaches the client) instead of a bare platform kill.
+    //
+    // RAISED (2026-07-23, real user-reported bug: "agent stops mid work,
+    // every time, under 100s" -- reproducing exactly this cutoff). The
+    // 90_000/240_000 values above were calibrated ONLY for the old
+    // Vercel-hosted version of this route, specifically to fail fast and
+    // clean well BEFORE Vercel's hard 300s kill so onFinish/version-
+    // capture/save still had time to run. This route moved to Render
+    // 2026-07-22 (persistent server, confirmed no request-duration
+    // ceiling at all -- Render's own docs: "100-minute HTTP request
+    // timeout by default"), so that original constraint is gone, but this
+    // stall guard was never widened to match -- it stayed the tightest
+    // limit in the whole system BY FAR, well under even the old 300s
+    // figure it was designed to stay under. Any BYOK model/relay with
+    // slower-than-90s first-token latency (large context, a heavily
+    // reasoning-heavy model genuinely still "thinking" with no streamed
+    // token yet, a loaded free/proxy relay queueing the request) got
+    // silently killed here every single time, indistinguishable to the
+    // user from "the model just stopped" -- because from the outside a
+    // clean caught-and-reported abort and a real hang look identical:
+    // the assistant's turn just ends. Widened to give real slow-starting
+    // models genuine room to actually produce their first token, while
+    // still eventually catching a truly dead connection well within
+    // SOFT_DEADLINE_MS's 20-minute budget above (so onFinish/version-
+    // capture/save still always gets to run afterward either way).
+    // Deliberately scoped to "no data at all for 4 minutes", not a cap on
+    // total step duration -- a model that's genuinely still producing
+    // output stays completely unaffected no matter how long that takes;
+    // only a truly dead connection gets cut. stepMs is a secondary safety
+    // net for the "trickles a few bytes forever but never finishes"
+    // variant, raised proportionally, still comfortably under
+    // SOFT_DEADLINE_MS so there's real margin for onFinish/version-
+    // capture/save work to run afterward.
+    timeout: { chunkMs: 240_000, stepMs: 600_000 },
     // See modelMessages' own comment above for why this (persona prompt +
     // optional compaction summary) moved here instead of being spliced
     // into `messages` as fake `role: 'system'` entries -- this is the
