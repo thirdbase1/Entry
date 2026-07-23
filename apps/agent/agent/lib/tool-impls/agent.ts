@@ -224,14 +224,32 @@ function isTruncatedFinish(steps: { finishReason?: string }[], maxSteps: number)
  *      this timeout wiring -- or any future fix to this call -- can't
  *      silently apply to only one of the two paths again.
  */
-const BASE_TIMEOUT_MS = 90_000;
+// FIXED (2026-07-23, real user-confirmed bug: "model stop under 2 minutes
+// ... related to tool call" -- traced to exactly this constant). This was
+// the ONE tool-impl in this file still defaulting to a short timeout --
+// every sibling (bash.ts, code_artifact.ts, python_coding.ts,
+// task_analysis.ts) already defaults straight to the full
+// DEFAULT_TOOL_TIMEOUT_MS (10 min) per the 2026-07-20 "bump the limit of
+// everything up to 10 minutes by default" pass, but this file's own
+// budget-scaling formula was never updated to match -- at the DEFAULT_STEP_BUDGET
+// (15, i.e. whenever a caller delegates without explicitly passing a
+// larger `maxSteps`, the overwhelmingly common case), `extraSteps` is 0
+// and the old 90_000 BASE_TIMEOUT_MS applied UNSCALED -- a hard 90-second
+// ceiling on every default-budget delegation, well under the 10-minute
+// ceiling every other tool already gets. A delegated subtask doing
+// real work (a web_search + web_crawl + reasoning + write-up alone
+// routinely exceeds 90s) would silently get cut off mid-work with
+// nothing surfaced beyond a generic timeout error -- reads exactly like
+// "the model just stopped."
+// BASE_TIMEOUT_MS now equals the same 10-minute default every sibling
+// tool already uses -- the budget-scaling formula below is kept for
+// callers who explicitly request a much larger `maxSteps` (or an even
+// higher explicit `timeout_seconds`, which bypasses this formula
+// entirely -- see runDelegatedTask's `explicitTimeoutMs` param), but the
+// DEFAULT case (no maxSteps given) no longer gets an artificially short
+// ceiling no other tool in this codebase has.
+const BASE_TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
 const PER_EXTRA_STEP_MS = 8_000;
-// BUMPED 280s -> 600s/10min cap (2026-07-20, "bump the limit of everything
-// up to 10 minutes by default" -- the 280s cap existed to leave headroom
-// under Vercel Hobby's 300s serverless maxDuration, which doesn't apply to
-// the standalone worker). `timeout_seconds` on the tool's input now also
-// lets the model set an explicit ceiling directly, bypassing this
-// budget-derived formula entirely when given.
 const MAX_TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
 const DEFAULT_STEP_BUDGET = 15;
 
