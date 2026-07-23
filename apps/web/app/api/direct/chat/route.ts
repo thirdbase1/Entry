@@ -1127,9 +1127,35 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // not in JS -- overlapping incremental saves (or one racing the final
   // onFinish save above) still resolve correctly and in commit order no
   // matter what order these fire in from Node's side.
+  // THROTTLED (2026-07-23, real evidence found in Render's own logs after
+  // shipping the fix above: chat `TeafTQB7JaeLjQrw` -- one of the chats
+  // that was actually crashing -- runs at 370,000+ input tokens PER STEP
+  // and fires several tool calls back-to-back in rapid succession (bash,
+  // bash, bash, edit_file, all within single-digit seconds of each
+  // other). Every incremental save writes the chat's ENTIRE growing
+  // `events` JSONB column back to Postgres -- for a chat this size that's
+  // a multi-megabyte write, and saving after LITERALLY every step on a
+  // fast tool-call sequence stacks several of those writes back-to-back
+  // on the same connection pool. A genuine `Connection terminated due to
+  // connection timeout` error is sitting in the logs in the exact same
+  // window as the health-check kills -- unthrottled per-step saves on a
+  // chat this large would make that contention WORSE, not better, which
+  // defeats the whole point of this fix. Time-throttling to at most once
+  // every 3s (per request) keeps the "nothing shown ever disappears"
+  // guarantee -- 3s of a tool-heavy turn is a far smaller loss window
+  // than "the entire rest of the turn", which is what was happening
+  // before any of this -- while cutting DB write volume on big chats by
+  // roughly an order of magnitude. onFinish above still runs its own
+  // unconditional final save regardless of this throttle, so the very
+  // last step of a turn is never skipped.
+  let lastIncrementalSaveAt = 0;
+  const INCREMENTAL_SAVE_MIN_INTERVAL_MS = 3_000;
   const uiStream = createUIMessageStream<UIMessage>({
     originalMessages: uiMessages,
     onStepEnd: ({ messages }) => {
+      const now = Date.now();
+      if (now - lastIncrementalSaveAt < INCREMENTAL_SAVE_MIN_INTERVAL_MS) return;
+      lastIncrementalSaveAt = now;
       mergeAndPersistChatEvents(chatId, userId, uiMessages, messages).catch(err => {
         console.error('[direct chat] incremental step save failed', chatId, err);
         logError({ source: 'direct-chat-incremental-save', error: err, userId, chatId });
