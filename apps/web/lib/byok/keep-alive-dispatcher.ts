@@ -29,6 +29,24 @@ let sharedAgent: Agent | undefined;
 export function getByokDispatcher(): Agent {
   if (!sharedAgent) {
     sharedAgent = new Agent({
+      // FIXED (2026-07-23, live prod regression within minutes of first
+      // deploy: every BYOK call started failing with
+      // "AI_APICallError: Cannot connect to API: invalid onError method",
+      // traced to node_modules/undici/lib/core/util.js's validateHandler).
+      // Root cause: Node's BUILT-IN global `fetch()` runs on its OWN
+      // internal bundled copy of undici -- passing a `dispatcher` created
+      // from this SEPARATELY npm-installed `undici` package through
+      // RequestInit on every call mixes two different undici instances,
+      // and the built-in fetch's internal request handler doesn't
+      // recognize the foreign Agent correctly, corrupting the handler
+      // object dispatch validates internally. `setGlobalDispatcher()` is
+      // undici's own documented, correct way to install a custom
+      // dispatcher for the process's global fetch across this exact
+      // boundary (see undici docs, "Set Global Dispatcher") -- registering
+      // it once here instead of passing `dispatcher` per-request avoids
+      // the cross-instance mismatch entirely. Called immediately below,
+      // at module load, so it's installed before ANY BYOK fetch ever runs.
+
       // Keep pooled sockets alive across normal tool-call gaps (previously
       // 4s default -- bumped to 2 minutes, comfortably longer than any
       // single tool execution most turns hit).
@@ -49,11 +67,18 @@ export function getByokDispatcher(): Agent {
   return sharedAgent;
 }
 
-/** Installed once at process boot (see agent.ts) so ANY fetch call in the
- *  process -- not just ones that remember to pass `dispatcher` explicitly
- *  -- gets the tuned pool by default. Individual BYOK fetch wrappers still
- *  pass it explicitly too, belt-and-suspenders, in case some other part of
- *  the process ever installs a different global dispatcher later. */
+/** Installs the shared pool as the process's global fetch dispatcher.
+ *  This is now the ONLY correct way to apply it (see the fix note above)
+ *  -- never pass the Agent as a per-request `dispatcher` RequestInit
+ *  option against Node's built-in global fetch, that's the exact
+ *  cross-undici-instance bug this replaced. Safe to call more than once
+ *  (idempotent -- getByokDispatcher() always returns the same instance). */
 export function installByokGlobalDispatcher(): void {
   setGlobalDispatcher(getByokDispatcher());
 }
+
+// Install immediately on module load -- this module is imported by
+// gateway-retry-fetch.ts, which every BYOK request path already goes
+// through, so requiring an extra explicit boot-time call elsewhere isn't
+// necessary: importing this file at all is enough to activate it.
+installByokGlobalDispatcher();

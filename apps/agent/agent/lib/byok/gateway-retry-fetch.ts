@@ -45,7 +45,9 @@
  * through untouched.
  */
 
-import { getByokDispatcher } from './keep-alive-dispatcher';
+// Side-effect import only -- installs the shared keep-alive pool as the
+// process's GLOBAL fetch dispatcher (see keep-alive-dispatcher.ts).
+import './keep-alive-dispatcher';
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 350;
@@ -95,16 +97,9 @@ export function createGatewayRetryFetch(): typeof fetch {
   return async function gatewayRetryFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     let lastResponse: Response | undefined;
 
-    // Merge in the shared keep-alive pool -- see keep-alive-dispatcher.ts
-    // for why this matters (avoids a fresh TCP+TLS handshake per request
-    // to the same BYOK origin whenever a tool call created a >4s gap).
-    const initWithDispatcher: RequestInit & { dispatcher?: unknown } = {
-      ...init,
-      dispatcher: (init as { dispatcher?: unknown } | undefined)?.dispatcher ?? getByokDispatcher(),
-    };
-
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const response = await fetch(input, initWithDispatcher as RequestInit);
+      // Global dispatcher applied via module import above -- see keep-alive-dispatcher.ts.
+      const response = await fetch(input, init);
 
       if (response.status < 400) return response;
 

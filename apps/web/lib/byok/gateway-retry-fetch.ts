@@ -46,7 +46,11 @@
  */
 
 import { logError } from '@entry/db/error-log';
-import { getByokDispatcher } from './keep-alive-dispatcher';
+// Side-effect import only -- this installs the shared keep-alive pool as
+// the process's GLOBAL fetch dispatcher (see keep-alive-dispatcher.ts's
+// 2026-07-23 fix note for why it must be global, never passed per-request
+// via RequestInit against Node's built-in fetch).
+import './keep-alive-dispatcher';
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 350;
@@ -104,17 +108,10 @@ export function createGatewayRetryFetch(ctx?: GatewayRetryContext): typeof fetch
     let lastResponse: Response | undefined;
     let retriedAtLeastOnce = false;
 
-    // Merge in the shared keep-alive pool -- see keep-alive-dispatcher.ts
-    // (2026-07-23: default undici keep-alive is 4s, which routinely expires
-    // during a tool call, forcing a brand new TCP+TLS handshake to the same
-    // BYOK origin on the very next request of the same turn).
-    const initWithDispatcher: RequestInit & { dispatcher?: unknown } = {
-      ...init,
-      dispatcher: (init as { dispatcher?: unknown } | undefined)?.dispatcher ?? getByokDispatcher(),
-    };
-
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const response = await fetch(input, initWithDispatcher as RequestInit);
+      // The shared keep-alive pool is applied globally (module import
+      // above), NOT passed here -- see keep-alive-dispatcher.ts.
+      const response = await fetch(input, init);
 
       if (response.status < 400) {
         // RECOVERED-AFTER-RETRY (2026-07-21): previously this success was

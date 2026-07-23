@@ -57,3 +57,15 @@ export function getByokDispatcher(): Agent {
 export function installByokGlobalDispatcher(): void {
   setGlobalDispatcher(getByokDispatcher());
 }
+
+// FIXED (2026-07-23): install eagerly at module load. Passing the Agent as
+// a per-request `dispatcher` RequestInit option (the previous pattern in
+// gateway-retry-fetch.ts) mixes this separately-installed undici package's
+// Agent with Node's own internal bundled undici instance behind the
+// built-in global fetch, and broke production within minutes of first
+// deploy (AI_APICallError: "Cannot connect to API: invalid onError
+// method", traced to undici/lib/core/util.js's validateHandler -- see
+// apps/web's identical file for the full root-cause writeup). Global
+// installation is undici's own documented-correct pattern for this exact
+// boundary and avoids the cross-instance mismatch entirely.
+installByokGlobalDispatcher();
