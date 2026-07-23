@@ -23,14 +23,16 @@ export const KNOWN_SERVICES: KnownService[] = [
   {
     service: 'vercel',
     name: 'Vercel',
-    // 2026-07-23: token-paste only now (was one-click OAuth via Vercel
-    // Connect) -- Connect only works when THIS app itself runs on
-    // Vercel, which it no longer does post-Render migration. See
-    // connect-service-tokens.ts's CONNECT_CONNECTORS comment.
-    hint: 'Personal access token — used to deploy to your own Vercel account.',
+    // 2026-07-23: back to one-click OAuth -- but now via a real,
+    // standalone "Sign in with Vercel" OAuth+PKCE app (vercel-oauth
+    // routes), NOT the old @vercel/connect SDK (which only ever worked
+    // when this app itself ran on Vercel). See connect-service-tokens.ts's
+    // DIRECT_OAUTH_SERVICES comment.
+    hint: 'Connect your own Vercel account — the agent deploys as you.',
     placeholder: 'Paste your Vercel token',
     tokenUrl: 'https://vercel.com/account/tokens',
     icon: '/integration-logos/vercel.svg',
+    oauth: true,
   },
   {
     service: 'github',

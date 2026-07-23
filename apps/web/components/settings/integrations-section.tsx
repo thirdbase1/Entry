@@ -160,6 +160,10 @@ function OAuthIntegrationCard({
       window.location.href = '/api/integrations/github-oauth/start';
       return;
     }
+    if (def.service === 'vercel') {
+      window.location.href = '/api/integrations/vercel-oauth/start';
+      return;
+    }
 
     setBusy(true);
     setError(null);

@@ -62,6 +62,20 @@ export function hasConnectConnector(service: string): boolean {
 }
 
 /**
+ * ADDED 2026-07-23: services with a real, working direct-OAuth flow that
+ * does NOT go through Vercel Connect at all (github: github-oauth
+ * routes; vercel: vercel-oauth routes, both storing straight into the
+ * credential vault). Not in CONNECT_CONNECTORS (github is there too, but
+ * only for the now-effectively-dead legacy installation-lookup path --
+ * see resolveServiceCredential below) -- this set exists purely so the
+ * "not connected yet" branch below knows to offer these an OAuth
+ * connect button instead of a bare paste-token box, same as it always
+ * has for github.
+ */
+export const DIRECT_OAUTH_SERVICES = new Set(['github', 'vercel']);
+
+
+/**
  * ADDED 2026-07-23 (real user-reported bug): Vercel Connect
  * (@vercel/connect) only works when this app is actually running ON
  * Vercel with a linked project -- every call authenticates itself to
@@ -232,6 +246,14 @@ export async function resolveServiceCredential(
 
   const connector = CONNECT_CONNECTORS[service];
   if (!connector) {
+    if (DIRECT_OAUTH_SERVICES.has(service)) {
+      return {
+        error: `The user hasn't connected their ${service} account yet. A connect card will be shown in the chat.`,
+        needsConnect: true,
+        service,
+        connectMode: 'oauth',
+      };
+    }
     return {
       error: `The user hasn't connected "${service}" yet. A connect card will be shown in the chat for them to paste a token — do not ask them to type the secret directly into chat.`,
       needsConnect: true,

@@ -70,6 +70,10 @@ export function IntegrationConnectCard({ service, connectMode, toolCallId, onSen
       window.location.href = `/api/integrations/github-oauth/start?returnTo=${returnTo}`;
       return;
     }
+    if (service === 'vercel') {
+      window.location.href = `/api/integrations/vercel-oauth/start?returnTo=${returnTo}`;
+      return;
+    }
     setBusy(true);
     fetch('/api/integrations/connect/start', {
       method: 'POST',

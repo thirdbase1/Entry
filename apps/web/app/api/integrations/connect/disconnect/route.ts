@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { z } from 'zod';
-import { hasConnectConnector, disconnectConnectAuthorization } from '@entry/agent/lib/connect-service-tokens';
+import { hasConnectConnector, disconnectConnectAuthorization, DIRECT_OAUTH_SERVICES } from '@entry/agent/lib/connect-service-tokens';
 import { deleteCredential } from '@entry/agent/lib/credential-vault';
 
 const Schema = z.object({ service: z.string().min(1).max(64) });
@@ -22,12 +22,15 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { service } = Schema.parse(await req.json());
-  if (!hasConnectConnector(service)) {
+  if (!hasConnectConnector(service) && !DIRECT_OAUTH_SERVICES.has(service)) {
     return NextResponse.json({ error: `"${service}" has no Connect grant to disconnect.` }, { status: 400 });
   }
 
-  if (service === 'github') {
-    await deleteCredential(session.user.id, 'github');
+  if (service === 'github' || service === 'vercel') {
+    // Both have real, working direct-OAuth flows storing straight into
+    // the vault now (github-oauth / vercel-oauth routes) -- neither ever
+    // touches Vercel Connect, so disconnect just clears the vault entry.
+    await deleteCredential(session.user.id, service);
     return NextResponse.json({ ok: true });
   }
 

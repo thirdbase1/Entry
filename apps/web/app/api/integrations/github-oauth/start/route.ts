@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'node:crypto';
 import { getUserSessionFromRequest } from '@entry/auth';
+import { getPublicOrigin } from '@/lib/public-origin';
 
 /** Only allow redirecting back to a chat session page — never an
  *  arbitrary path, so this can't be abused as an open redirect. */
@@ -55,8 +56,9 @@ function sanitizeReturnTo(value: string | null): string | null {
  * whatever it was doing without the user retyping anything.
  */
 export async function GET(req: NextRequest) {
+  const origin = getPublicOrigin(req);
   const { session } = await getUserSessionFromRequest(req);
-  if (!session) return NextResponse.redirect(new URL('/sign-in', req.url));
+  if (!session) return NextResponse.redirect(new URL('/sign-in', origin));
 
   const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
   if (!clientId) {
@@ -64,7 +66,6 @@ export async function GET(req: NextRequest) {
   }
 
   const state = randomBytes(24).toString('base64url');
-  const origin = req.nextUrl.origin;
   const returnTo = sanitizeReturnTo(req.nextUrl.searchParams.get('returnTo'));
 
   // GitHub App install-and-authorize screen (see file comment above for

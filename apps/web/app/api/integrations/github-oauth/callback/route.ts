@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserSessionFromRequest } from '@entry/auth';
+import { getPublicOrigin } from '@/lib/public-origin';
 import { saveCredential } from '@entry/agent/lib/credential-vault';
 import { prisma } from '@entry/db';
 
@@ -36,7 +37,7 @@ import { prisma } from '@entry/db';
  * through.
  */
 export async function GET(req: NextRequest) {
-  const origin = req.nextUrl.origin;
+  const origin = getPublicOrigin(req);
   const returnTo = req.cookies.get('github_oauth_return')?.value;
 
   const resultUrl = (status: 'connected' | 'error', message?: string) => {
