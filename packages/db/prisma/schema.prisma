@@ -53,7 +53,6 @@ model User {
   modelProviders UserModelProvider[]
   credentials     UserCredential[]
   agentSkills     AgentSkill[]
-  workingMemory   UserWorkingMemory?
 
   @@index([email])
   @@map("users")
@@ -526,15 +525,23 @@ model UserModelProviderModel {
 /// semantic-search relevance or a single session's context window to
 /// resurface -- the same reason Mastra keeps working memory as its own
 /// layer instead of folding it into raw history or embeddings.
-model UserWorkingMemory {
-  userId    String   @id @map("user_id") @db.VarChar
+/// CHANGED 2026-07-23 (real user complaint: "agent share the same memory
+/// across allll chat ... every chat with it own context memory") from a
+/// per-USER note (shared verbatim across every chat that user ever opens)
+/// to a per-CHAT note (isolated to the one chat that wrote it). The old
+/// UserWorkingMemory model/table is gone, not just relabeled -- this is a
+/// deliberate reversal of the 2026-07-18 design (see remember_about_user
+/// tool's own updated comment), so old notes do not carry over; each chat
+/// starts with nothing saved and builds its own note independently.
+model ChatWorkingMemory {
+  chatId    String   @id @map("chat_id") @db.VarChar
   content   String   @db.Text
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chat EveChatSession @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
-  @@map("user_working_memory")
+  @@map("chat_working_memory")
 }
 
 model UserSettings {
@@ -574,6 +581,7 @@ model EveChatSession {
   // Vercel AI Gateway instead of a user's own BYOK provider row. A row
   // has at most one of byokModelId / requestedModel set, never both.
   requestedModel String? @map("requested_model") @db.VarChar
+  chatWorkingMemory ChatWorkingMemory?
   events     Json?    @db.JsonB // persisted HandleMessageStreamEvent[] snapshot (or plain messages[] for direct-chat rows)
   cursor     Json?    @db.JsonB // persisted { sessionId, continuationToken, streamIndex } (eve rows only)
   // Public-sharing schema decision (flagged in an earlier session as a real

@@ -174,15 +174,21 @@ export async function runDirectChatTurn(
   // same chat until repaired.
   const uiMessages = sanitizeDanglingToolCalls(messages as UIMessage[]);
 
+  // chatId computed here (pure/sync, no await needed) so the working-memory
+  // fetch right below can be keyed by IT instead of userId -- see
+  // working-memory.ts's 2026-07-23 comment: this note is per-CHAT now, not
+  // per-user, so it must never be fetched before we know which chat this is.
+  const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
+
   // BYOK TTFT FIX (2026-07-19): resolving a BYOK model reads/decrypts its
-  // provider row, while Working Memory is a completely independent user
-  // read. Starting the latter only AFTER `await resolveByokModel()` made
-  // every direct/BYOK send pay those two DB operations serially before
-  // `streamText()` could open the provider connection. Start it as soon as
-  // userId exists; it is still awaited before the system prompt is built,
+  // provider row, while Working Memory is a completely independent read.
+  // Starting the latter only AFTER `await resolveByokModel()` made every
+  // direct/BYOK send pay those two DB operations serially before
+  // `streamText()` could open the provider connection. Started as soon as
+  // chatId exists; it is still awaited before the system prompt is built,
   // so neither prompt contents nor error behavior changes -- only the
   // otherwise-wasted wall-clock overlap does.
-  const userWorkingMemoryPromise = getWorkingMemory(userId);
+  const chatWorkingMemoryPromise = getWorkingMemory(chatId);
 
   // Resolve BEFORE any streaming starts — a bad/missing key or unknown
   // model slug surfaces as a clean JSON error, not a broken half-open
@@ -200,8 +206,6 @@ export async function runDirectChatTurn(
   // resolve-model.ts's isThirdPartyAnthropicRelay comment for the exact
   // "unsupported reasoning metadata" warning-storm bug this closes.
   const isThirdPartyAnthropicRelay = 'isThirdPartyAnthropicRelay' in resolved && resolved.isThirdPartyAnthropicRelay;
-
-  const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
 
   // Persist the user's turn to the row BEFORE the turn finishes, not only
   // in onFinish — so if the model call itself fails outright (network,
@@ -339,7 +343,7 @@ export async function runDirectChatTurn(
   // model naturally gives, with no steering either way. `providerLabel`/
   // `modelId` are still resolved above and still used for logging/
   // response headers, just no longer threaded into the prompt.
-  const userWorkingMemory = await userWorkingMemoryPromise;
+  const chatWorkingMemory = await chatWorkingMemoryPromise;
   // NOTE (2026-07-19): `instructions` is now built AFTER `activeTools`
   // below so the persona prompt can embed the real post-filter tool-name
   // list (see persona.ts's availableTools) — it's only consumed by
@@ -459,7 +463,7 @@ export async function runDirectChatTurn(
       execute: (input: { message: string; provider?: string; model?: string }) => agentDelegate.execute(input, execCtx),
     }),
     // Durable per-user working memory (2026-07-18) -- see
-    // UserWorkingMemory's schema comment and persona.ts's comment. Wired
+    // ChatWorkingMemory's schema comment and persona.ts's comment. Wired
     // identically to eve-root's copy (apps/agent/agent/tools/remember_about_user.ts)
     // so BYOK/Gateway-direct chats get the same "remember things about me
     // across sessions" capability as the default eve path.
@@ -485,7 +489,7 @@ export async function runDirectChatTurn(
   // from its old spot above `allTools`.
   const SYSTEM_PROMPT = buildPersonaInstructions({
     includeAgentDelegation: true,
-    workingMemory: userWorkingMemory,
+    workingMemory: chatWorkingMemory,
     availableTools: Object.keys(activeTools),
   });
   const instructions = compactionResult.then(({ summaryText }) => {

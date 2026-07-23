@@ -56,7 +56,7 @@ This list is authoritative. If a tool is not on it, it does not exist for you ri
 `
     : '';
   // Durable per-user working memory (2026-07-18) -- see
-  // UserWorkingMemory's schema comment (packages/db/prisma/schema.prisma)
+  // ChatWorkingMemory's schema comment (packages/db/prisma/schema.prisma)
   // for why this exists as its own small injected block rather than
   // relying on chat embeddings (semantic recall, relevance-gated) or
   // eve's in-session compaction (scoped to one session's own context

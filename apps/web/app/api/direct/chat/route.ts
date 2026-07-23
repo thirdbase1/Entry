@@ -177,17 +177,21 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // same chat until repaired.
   const uiMessages = sanitizeDanglingToolCalls(messages as UIMessage[]);
 
+  // chatId computed here (pure/sync, no await needed) so the working-memory
+  // fetch right below can be keyed by IT instead of userId -- see
+  // working-memory.ts's 2026-07-23 comment: this note is per-CHAT now, not
+  // per-user, so it must never be fetched before we know which chat this is.
+  const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
+
   // BYOK TTFT FIX (2026-07-19): resolving a BYOK model reads/decrypts its
-  // provider row, while Working Memory is a completely independent user
-  // read. Starting the latter only AFTER `await resolveByokModel()` made
-  // every direct/BYOK send pay those two DB operations serially before
-  // `streamText()` could open the provider connection. Start it as soon as
-  // userId exists; it is still awaited before the system prompt is built,
+  // provider row, while Working Memory is a completely independent read.
+  // Starting the latter only AFTER `await resolveByokModel()` made every
+  // direct/BYOK send pay those two DB operations serially before
+  // `streamText()` could open the provider connection. Started as soon as
+  // chatId exists; it is still awaited before the system prompt is built,
   // so neither prompt contents nor error behavior changes -- only the
   // otherwise-wasted wall-clock overlap does.
-  const userWorkingMemoryPromise = getWorkingMemory(userId);
-
-  const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
+  const chatWorkingMemoryPromise = getWorkingMemory(chatId);
 
   // FIXED (2026-07-21, real confirmed bug -- reported as "chat doesn't
   // create/save in the DB" and independently traced through actual
@@ -353,7 +357,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // model naturally gives, with no steering either way. `providerLabel`/
   // `modelId` are still resolved above and still used for logging/
   // response headers, just no longer threaded into the prompt.
-  const userWorkingMemory = await userWorkingMemoryPromise;
+  const chatWorkingMemory = await chatWorkingMemoryPromise;
   // NOTE (2026-07-19): `instructions` is now built AFTER `activeTools`
   // below so the persona prompt can embed the real post-filter tool-name
   // list (see persona.ts's availableTools) — it's only consumed by
@@ -473,7 +477,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       execute: (input: { message: string; provider?: string; model?: string }) => agentDelegate.execute(input, execCtx),
     }),
     // Durable per-user working memory (2026-07-18) -- see
-    // UserWorkingMemory's schema comment and persona.ts's comment. Wired
+    // ChatWorkingMemory's schema comment and persona.ts's comment. Wired
     // identically to eve-root's copy (apps/agent/agent/tools/remember_about_user.ts)
     // so BYOK/Gateway-direct chats get the same "remember things about me
     // across sessions" capability as the default eve path.
@@ -499,7 +503,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // from its old spot above `allTools`.
   const SYSTEM_PROMPT = buildPersonaInstructions({
     includeAgentDelegation: true,
-    workingMemory: userWorkingMemory,
+    workingMemory: chatWorkingMemory,
     availableTools: Object.keys(activeTools),
   });
   // Compaction removed (see above) -- instructions is now just the

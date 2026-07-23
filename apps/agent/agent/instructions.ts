@@ -83,13 +83,17 @@ export default defineDynamic({
   events: {
     'session.started': async (_event, ctx) => {
       const isChild = !!(ctx.session as unknown as SessionWithParent).parent;
-      // Working memory (2026-07-18) -- fetched for root AND child sessions
-      // alike (a subagent still benefits from knowing stable facts about
-      // the same user; it just doesn't get agent-delegation instructions).
-      // See persona.ts's own comment for why this is a separate small
-      // fetch rather than folded into chat embeddings.
-      const userId = ctx.session.auth.current?.principalId;
-      const workingMemory = userId ? await getWorkingMemory(userId) : null;
+      // Working memory (2026-07-18, REVERSED 2026-07-23 to be per-CHAT
+      // instead of per-user -- see working-memory.ts's own comment for the
+      // full story: it used to leak one chat's saved notes into every
+      // other chat the same user opened, which is exactly what got
+      // reported as a bug). Fetched for root AND child sessions alike (a
+      // subagent still benefits from this same chat's own notes; it just
+      // doesn't get agent-delegation instructions). See persona.ts's own
+      // comment for why this is a separate small fetch rather than folded
+      // into chat embeddings.
+      const chatId = ctx.session.id;
+      const workingMemory = chatId ? await getWorkingMemory(chatId) : null;
       return defineInstructions({
         markdown: buildPersonaInstructions({ includeAgentDelegation: !isChild, workingMemory }),
       });
