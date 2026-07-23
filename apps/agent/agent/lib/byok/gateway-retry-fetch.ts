@@ -84,6 +84,33 @@ function matchesKnownTransientBody(status: number, bodyText: string): boolean {
   if (status >= 500 && status < 600) {
     // A real, permanent error always names what's actually wrong.
     if (PERMANENT_SIGNAL_PATTERN.test(messageText) || PERMANENT_SIGNAL_PATTERN.test(trimmed)) return false;
+
+    // FIXED (2026-07-23, confirmed live: freemodel.dev's own Cloudflare
+    // front-door returned a full HTML "502: Bad gateway" error page --
+    // Cloudflare's status widget showing the ORIGIN host itself down,
+    // everything else (browser, CDN) green -- and it sailed straight
+    // through as "not transient" because the GENERIC_BODY_MAX_LENGTH
+    // check below only ever considered small JSON/text bodies. A full
+    // HTML error page is always LONGER than that cap by construction (it
+    // has a <head>, inline styles, etc.), so every single gateway-level
+    // HTML error page was being misclassified as permanent and hitting
+    // the user as a dead turn after only the AI SDK's own weak 2-attempt
+    // default retry -- never even reaching THIS wrapper's real 6-attempt/
+    // backoff retry loop at all.
+    //
+    // 502/503/504 are categorically gateway/infra-level codes -- a
+    // load balancer or CDN edge reporting its origin is unreachable or
+    // overloaded. No legitimate PERMANENT per-request error (bad key,
+    // out of quota, model not found) is ever reported this way -- those
+    // always come back as a real JSON body from the actual API itself,
+    // which is a completely different response shape than an infra
+    // front-door's own canned HTML page. So: always retry these three
+    // codes, regardless of body length -- the length cap below still
+    // applies to every OTHER 5xx (500, 507, 599, etc.) where a large
+    // body really could mean something else and being conservative still
+    // makes sense.
+    if (status === 502 || status === 503 || status === 504) return true;
+
     // Otherwise: treat any short, generic 5xx body as the same family of
     // transient relay hiccup (covers "Internal server error", bare
     // {"error":{"type":"..."}} objects with no real detail, etc.)
