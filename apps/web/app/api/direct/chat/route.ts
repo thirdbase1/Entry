@@ -76,10 +76,12 @@ import {
   stepCountIs,
   convertToModelMessages,
   smoothStream,
+  createUIMessageStream,
   createUIMessageStreamResponse,
   InvalidToolInputError,
   type UIMessage,
   type UIMessageChunk,
+  type AsyncIterableStream,
 } from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
@@ -963,10 +965,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     logError({ source: 'direct-chat-consumestream', error: err, userId, chatId, context: { providerLabel, modelId } });
   });
 
-  const uiStream = result.toUIMessageStream({
+  const innerUiStream = result.toUIMessageStream({
     originalMessages: uiMessages,
     generateMessageId: () => crypto.randomUUID(),
     sendReasoning: true,
+
     // TURN TIMER (2026-07-23, explicit user request: "show time each AI
     // response turn took when it stop"). Deliberately computed HERE --
     // server-side, from `requestStartedAt` captured before streamText was
@@ -1078,6 +1081,71 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       }
     },
   });
+
+  // INCREMENTAL DURABILITY (2026-07-23, real user-confirmed bug, with
+  // screenshots: a tool call visibly shown mid-turn, the server process
+  // dies (Render's health-check kill -- confirmed straight from Render's
+  // own service events API: repeated `server_failed` / `unhealthy: "HTTP
+  // health check failed (timed out after 5 seconds)"` events on this
+  // exact service), a reload lands on a dead instance for a few seconds
+  // (the "this site can't be reached" page from the screenshots), and
+  // once Render brings a fresh instance up the chat loads again but that
+  // tool call is just GONE -- not overwritten (that race is fixed
+  // separately, see persist-chat-events.ts), genuinely never saved in the
+  // first place. Root cause: before this, `events` only ever got written
+  // twice per turn -- preSave (before the model even runs) and onFinish
+  // (only reached if the ENTIRE turn completes normally, i.e. never
+  // reached at all on a hard kill). Everything in between -- every
+  // intermediate tool call, every step's text -- lived ONLY in this
+  // in-flight stream and the client's in-memory React state. A hard kill
+  // anywhere in that window (a Render health-check kill, a crash, an OOM,
+  // a deploy restart mid-turn) took all of it down too, even though it
+  // had already rendered live in the UI.
+  //
+  // `result.toUIMessageStream()`'s own options do NOT expose a per-step
+  // hook (only `onEnd`/`onFinish`, confirmed directly against
+  // UIMessageStreamOptions in ai/dist/index.d.ts) -- but the standalone
+  // `createUIMessageStream()` builder does, via `onStepEnd`
+  // ("useful for persisting intermediate UI messages during multi-step
+  // agent runs", straight from its own doc comment -- built for exactly
+  // this). Wrapping `innerUiStream` here via `writer.merge()` costs
+  // nothing extra: `createUIMessageStream`'s `merge()` just pipes the
+  // exact same chunks straight through unmodified (confirmed reading
+  // node_modules/ai/dist/index.js directly -- merge() is a bare
+  // read-loop that re-enqueues each chunk as-is), while its OWN
+  // `handleUIMessageStreamFinish` -- the same internal function backing
+  // `onFinish` everywhere else in this SDK -- independently watches those
+  // same chunks for step boundaries and reconstructs a full
+  // originalMessages+response-so-far UIMessage[] at each one. Fire-and-
+  // forget deliberately, same reasoning as the incremental version-
+  // capture call in onStepFinish below: this must never gate the model's
+  // next step on a DB round-trip (that exact mistake was already found
+  // and fixed once for version-capture in 2026-07-23 -- "slow after
+  // every tool call"). Safe to fire without awaiting because
+  // mergeAndPersistChatEvents' row lock (`FOR UPDATE`) serializes
+  // concurrent writes to the same chatId at the actual Postgres level,
+  // not in JS -- overlapping incremental saves (or one racing the final
+  // onFinish save above) still resolve correctly and in commit order no
+  // matter what order these fire in from Node's side.
+  const uiStream = createUIMessageStream<UIMessage>({
+    originalMessages: uiMessages,
+    onStepEnd: ({ messages }) => {
+      mergeAndPersistChatEvents(chatId, userId, uiMessages, messages).catch(err => {
+        console.error('[direct chat] incremental step save failed', chatId, err);
+        logError({ source: 'direct-chat-incremental-save', error: err, userId, chatId });
+      });
+    },
+    execute: ({ writer }) => {
+      writer.merge(innerUiStream);
+    },
+  }) as AsyncIterableStream<UIMessageChunk>;
+  // ^ Type-only cast: `createUIMessageStream`'s return type is a plain
+  // `ReadableStream` in the SDK's own .d.ts (unlike `result.toUIMessageStream()`,
+  // typed as `AsyncIterableStream`), but Node's native ReadableStream
+  // (Web Streams API, global since Node 18) always implements
+  // `Symbol.asyncIterator` at runtime regardless of which SDK helper
+  // constructed it -- confirmed directly: `innerUiStream` below already
+  // relied on the exact same runtime behavior before this change existed.
 
   // Confirmed real bug (2026-07-17): a turn can finish with zero text and
   // zero tool calls at all -- e.g. Anthropic returning
