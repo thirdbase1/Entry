@@ -887,6 +887,36 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     originalMessages: uiMessages,
     generateMessageId: () => crypto.randomUUID(),
     sendReasoning: true,
+    // TURN TIMER (2026-07-23, explicit user request: "show time each AI
+    // response turn took when it stop"). Deliberately computed HERE --
+    // server-side, from `requestStartedAt` captured before streamText was
+    // even called -- rather than the client timing its own fetch: a
+    // client-side timer would be wrong (or stuck) on a background-tab
+    // throttle, a mid-turn reconnect (direct-chat-interface.tsx's own
+    // online/visibilitychange recovery fetch, see its file comment),
+    // or any hiccup between "user hit send" and "browser actually saw the
+    // first byte" -- none of which are part of the model's real think+
+    // generate time. `part.type === 'finish'` (not 'finish-step') is the
+    // ONE part that fires exactly once, when the WHOLE turn (every step,
+    // every tool call) is truly done -- see toUIMessageChunk's handling a
+    // few hundred lines into node_modules/ai/dist/index.js, confirmed
+    // this is the single point where `messageMetadata`'s return value
+    // gets embedded directly on the same 'finish' stream chunk the client
+    // already listens for. AI SDK's own updateMessageMetadata does a
+    // shallow merge (mergeObjects) into message.metadata, so this can
+    // never collide with or overwrite any other metadata key -- and
+    // because it rides the SAME reconstruction path onFinish below
+    // already uses for `finalMessages`, the exact figure shown live in
+    // the UI the instant the turn finishes is IDENTICAL to what gets
+    // durably persisted to `sanitizedFinalMessages` and survives a full
+    // page reload -- no separate/duplicate timing logic to drift out of
+    // sync, nothing to get stuck at a stale value since it's set exactly
+    // once, atomically, at the one guaranteed-to-fire completion point.
+    messageMetadata({ part }) {
+      if (part.type === 'finish') {
+        return { durationMs: Date.now() - requestStartedAt };
+      }
+    },
     onError(error) {
       // Default behavior swallows the real error into a generic "An error
       // occurred." with nothing else — confirmed cause of "tool calls fail

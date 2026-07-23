@@ -58,6 +58,7 @@ import { ChooseResult } from './renderers/choose-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
 import { getKnownService } from '@/lib/integration-services';
 import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
+import { useLiveTurnElapsedMs, TurnDurationLabel, LiveTurnDurationLabel } from './turn-timer';
 import { silentlyUpdateChatUrl } from './silent-url-update';
 
 interface DirectChatInterfaceProps {
@@ -475,6 +476,11 @@ function DirectChatSession({
   const showThinkingIndicator =
     isBusy && (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.parts.length === 0);
 
+  // Turn timer (see turn-timer.tsx's file comment) -- live wall-clock
+  // count from the moment this turn became busy (submitted or
+  // streaming), independent of chunk arrival so it can never stall.
+  const liveTurnElapsedMs = useLiveTurnElapsedMs(isBusy);
+
   const sentInitialRef = useRef(false);
   useEffect(() => {
     if (initialMessage && !sentInitialRef.current && initialMessages.length === 0) {
@@ -752,13 +758,24 @@ function DirectChatSession({
                       return null;
                     })}
                     {isLastAssistant && showThinkingIndicator && <ThinkingIndicator />}
+                    {m.role === 'assistant' && (() => {
+                      const durationMs = (m.metadata as { durationMs?: number } | undefined)?.durationMs;
+                      if (typeof durationMs === 'number' && Number.isFinite(durationMs)) {
+                        return <TurnDurationLabel durationMs={durationMs} />;
+                      }
+                      if (isLastAssistant && isBusy && liveTurnElapsedMs != null) {
+                        return <LiveTurnDurationLabel elapsedMs={liveTurnElapsedMs} />;
+                      }
+                      return null;
+                    })()}
                   </div>
                 </div>
               );
             })}
             {showThinkingIndicator && (!lastMessage || lastMessage.role !== 'assistant') && (
-              <div className="flex justify-start">
+              <div className="flex justify-start flex-col items-start">
                 <ThinkingIndicator />
+                {liveTurnElapsedMs != null && <LiveTurnDurationLabel elapsedMs={liveTurnElapsedMs} />}
               </div>
             )}
           </div>
