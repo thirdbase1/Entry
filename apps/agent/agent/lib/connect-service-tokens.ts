@@ -33,10 +33,21 @@ import { getToken, getTokenResponse, startAuthorization, revokeToken, UserAuthor
 import { getCredential } from './credential-vault.js';
 import { prisma } from '@entry/db';
 
+// UPDATED 2026-07-23 (real user decision, follows the Vercel->Render
+// migration): 'vercel' and 'supabase' removed from here entirely --
+// there is no code-level way to make Vercel Connect work off-Vercel (see
+// isVercelRuntime's comment above), and this app doesn't even deploy
+// through Vercel or provision Supabase anymore (Render + Neon now).
+// Rather than leave a permanently-broken OAuth path guarded by a
+// runtime check, both now go through the exact same token-paste flow as
+// Pxxl/Sendbyte/npm -- see integration-services.ts's `oauth` flag (now
+// false for these two) and resolveServiceCredential below, which already
+// falls through to a clean token-only `needsConnect` response the moment
+// a service isn't in this map. github stays -- it has its own real,
+// working direct-OAuth flow (github-oauth/start+callback) that never
+// depended on Vercel Connect in the first place.
 export const CONNECT_CONNECTORS: Record<string, string> = {
   github: 'github/entry-github',
-  vercel: 'vercel/entry-vercel-internal',
-  supabase: 'supabase/entry-supabase',
 };
 
 /** Minimal, read/write-capable default scopes per service — narrow
@@ -44,21 +55,6 @@ export const CONNECT_CONNECTORS: Record<string, string> = {
  *  deploy/provision actions don't hit a scope wall mid-task. */
 export const CONNECT_DEFAULT_SCOPES: Record<string, string[] | undefined> = {
   github: undefined, // Vercel-managed GitHub App install; scopes are fixed by the app's own permissions, not requestable here.
-  vercel: undefined, // Custom OAuth against Vercel's own MCP endpoint; no separate scope list exposed.
-  supabase: [
-    'organizations:read',
-    'projects:read',
-    'projects:write',
-    'database:read',
-    'database:write',
-    'secrets:read',
-    'edge_functions:read',
-    'edge_functions:write',
-    'environment:read',
-    'environment:write',
-    'storage:read',
-    'analytics:read',
-  ],
 };
 
 export function hasConnectConnector(service: string): boolean {

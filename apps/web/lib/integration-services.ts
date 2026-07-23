@@ -23,11 +23,14 @@ export const KNOWN_SERVICES: KnownService[] = [
   {
     service: 'vercel',
     name: 'Vercel',
-    hint: 'Connect your own Vercel account — the agent deploys as you, with a short-lived token it never stores.',
+    // 2026-07-23: token-paste only now (was one-click OAuth via Vercel
+    // Connect) -- Connect only works when THIS app itself runs on
+    // Vercel, which it no longer does post-Render migration. See
+    // connect-service-tokens.ts's CONNECT_CONNECTORS comment.
+    hint: 'Personal access token — used to deploy to your own Vercel account.',
     placeholder: 'Paste your Vercel token',
     tokenUrl: 'https://vercel.com/account/tokens',
     icon: '/integration-logos/vercel.svg',
-    oauth: true,
   },
   {
     service: 'github',
@@ -41,11 +44,11 @@ export const KNOWN_SERVICES: KnownService[] = [
   {
     service: 'supabase',
     name: 'Supabase',
-    hint: 'Connect your own Supabase account — the agent provisions/manages your own projects, with a short-lived token it never stores.',
+    // 2026-07-23: token-paste only now -- see the vercel entry above for why.
+    hint: 'Personal access token — used to provision/manage your own Supabase projects.',
     placeholder: 'Paste your Supabase token',
     tokenUrl: 'https://supabase.com/dashboard/account/tokens',
     icon: '/integration-logos/supabase.svg',
-    oauth: true,
   },
   {
     service: 'pxxl',
