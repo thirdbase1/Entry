@@ -29,6 +29,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createGatewayRetryFetch } from './byok/gateway-retry-fetch';
 
 export interface ResolvedCustomProviderModel {
   model: LanguageModel;
@@ -44,25 +45,33 @@ interface ProviderConnection {
 }
 
 async function buildCustomModelClient(provider: ProviderConnection, modelId: string): Promise<LanguageModel> {
+  // FIXED (2026-07-23): this hand-kept-in-sync copy was missing the
+  // retry-resilience + keep-alive connection pooling that
+  // apps/web/lib/byok/build-model-client.ts has (see that file's
+  // 2026-07-23 comment) -- both live in the SAME app (apps/agent), so
+  // unlike the apps/web file this one CAN safely import the real
+  // gateway-retry-fetch.ts directly instead of re-deriving its own copy.
+  const byokFetch = createGatewayRetryFetch();
+
   switch (provider.compatibility) {
     case 'ANTHROPIC': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      return createAnthropic({ baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
+      return createAnthropic({ baseURL: provider.baseUrl, apiKey: provider.apiKey, fetch: byokFetch })(modelId);
     }
     case 'GOOGLE': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
-      return createGoogleGenerativeAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
+      return createGoogleGenerativeAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey, fetch: byokFetch })(modelId);
     }
     case 'OPENAI_RESPONSES': {
       // `apiKey ?? ''` (never undefined) -- same @ai-sdk/openai env-fallback
       // footgun apps/web/lib/byok/resolve-model.ts's identical case avoids.
       const { createOpenAI } = await import('@ai-sdk/openai');
-      return createOpenAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey ?? '' }).responses(modelId);
+      return createOpenAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey ?? '', fetch: byokFetch }).responses(modelId);
     }
     case 'OPENAI':
     default: {
       const { createOpenAICompatible } = await import('@ai-sdk/openai-compatible');
-      return createOpenAICompatible({ name: provider.label, baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
+      return createOpenAICompatible({ name: provider.label, baseURL: provider.baseUrl, apiKey: provider.apiKey, fetch: byokFetch })(modelId);
     }
   }
 }

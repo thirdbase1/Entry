@@ -29,21 +29,34 @@ export interface ByokProviderConnection {
 }
 
 export async function buildModelClient(provider: ByokProviderConnection, modelId: string): Promise<LanguageModel> {
+  // FIXED (2026-07-23, user-reported slow/flaky BYOK connections): every
+  // branch below now gets the SAME fetch -- previously only the
+  // OPENAI/default branch had `createGatewayRetryFetch()`, meaning
+  // ANTHROPIC / GOOGLE / OPENAI_RESPONSES BYOK providers got zero retry
+  // resilience against the relay's known transient-error family (see
+  // gateway-retry-fetch.ts) AND paid for a fresh TCP+TLS handshake on
+  // basically every request (Node's default 4s undici keep-alive timeout
+  // routinely expires between a tool call and the model's next request --
+  // see keep-alive-dispatcher.ts). One shared fetch wrapper now gives
+  // every compatibility mode both the long-lived connection pool and the
+  // transient-retry logic identically.
+  const byokFetch = createGatewayRetryFetch();
+
   switch (provider.compatibility) {
     case 'ANTHROPIC': {
       const { createAnthropic } = await import('@ai-sdk/anthropic');
-      return createAnthropic({ baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
+      return createAnthropic({ baseURL: provider.baseUrl, apiKey: provider.apiKey, fetch: byokFetch })(modelId);
     }
     case 'GOOGLE': {
       const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
-      return createGoogleGenerativeAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey })(modelId);
+      return createGoogleGenerativeAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey, fetch: byokFetch })(modelId);
     }
     case 'OPENAI_RESPONSES': {
       // See resolve-model.ts's identical case for why `apiKey ?? ''` (never
       // `undefined`) matters — same @ai-sdk/openai env-fallback footgun
       // applies here too.
       const { createOpenAI } = await import('@ai-sdk/openai');
-      return createOpenAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey ?? '' }).responses(modelId);
+      return createOpenAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey ?? '', fetch: byokFetch }).responses(modelId);
     }
     case 'OPENAI':
     default: {
@@ -52,7 +65,7 @@ export async function buildModelClient(provider: ByokProviderConnection, modelId
         name: provider.label,
         baseURL: provider.baseUrl,
         apiKey: provider.apiKey,
-        fetch: createGatewayRetryFetch(),
+        fetch: byokFetch,
       })(modelId);
     }
   }
