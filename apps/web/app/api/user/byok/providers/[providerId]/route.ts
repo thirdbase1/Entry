@@ -31,7 +31,7 @@ const UpdateProviderSchema = z.object({
   // once at creation (AddProviderForm) and had no PATCH path at all, so
   // pointing an existing connection at a different-shaped endpoint meant
   // deleting it and starting over.
-  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENAI_RESPONSES']).optional(),
+  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENAI_RESPONSES', 'AI_GATEWAY']).optional(),
   baseUrl: z.string().url().optional(),
   apiKey: z.string().optional(), // pass a new key to rotate it; omit to leave unchanged
 });
@@ -61,6 +61,24 @@ export const PATCH = withApiErrorHandling(async (req: NextRequest, { params }: {
   const effectiveCompatibility = compatibility ?? owned.compatibility;
   const shouldRenormalizeBaseUrl = baseUrl !== undefined || compatibility !== undefined;
   const effectiveRawBaseUrl = baseUrl ?? owned.baseUrl;
+
+  // GUARD (2026-07-23, AI Gateway BYOK mode): mirrors the create route's
+  // matching refine -- a keyless AI_GATEWAY row isn't just "broken" like
+  // every other mode, @ai-sdk/gateway silently falls back to OUR OWN
+  // shared AI_GATEWAY_API_KEY env var when no key is passed (real
+  // build-model-client.ts guard is the actual hard stop; this is just
+  // the earliest place to reject it). Has to account for BOTH ways this
+  // PATCH could end up keyless: switching an existing (keyed) OPENAI/etc
+  // row's compatibility straight to AI_GATEWAY without also sending a
+  // key, or explicitly clearing the key (apiKey: '') on an
+  // already-AI_GATEWAY row.
+  const effectiveHasApiKey = apiKey !== undefined ? !!apiKey : !!owned.encryptedApiKey;
+  if (effectiveCompatibility === 'AI_GATEWAY' && !effectiveHasApiKey) {
+    return NextResponse.json(
+      { error: 'An API key is required for AI Gateway -- unlike other modes, this one is never key-less.' },
+      { status: 400 }
+    );
+  }
 
   const updated = await prisma.userModelProvider.update({
     where: { id: providerId },

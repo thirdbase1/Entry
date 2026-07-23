@@ -43,12 +43,35 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
   });
 });
 
-const CreateProviderSchema = z.object({
-  label: z.string().min(1).max(100),
-  compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENAI_RESPONSES']),
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(),
-});
+const CreateProviderSchema = z
+  .object({
+    label: z.string().min(1).max(100),
+    compatibility: z.enum(['OPENAI', 'ANTHROPIC', 'GOOGLE', 'OPENAI_RESPONSES', 'AI_GATEWAY']),
+    // ADDED (2026-07-23, AI Gateway BYOK mode): every other compatibility
+    // mode requires a real, user-supplied baseUrl -- AI_GATEWAY does not,
+    // since createGateway() (build-model-client.ts) talks to Vercel's own
+    // Gateway endpoint on its own and never reads this column for real
+    // requests. Optional at the zod layer; the refine below still
+    // enforces it for every OTHER mode exactly as before.
+    baseUrl: z.string().url().optional(),
+    apiKey: z.string().optional(),
+  })
+  .refine(data => data.compatibility === 'AI_GATEWAY' || !!data.baseUrl, {
+    message: 'Base URL is required for this compatibility mode.',
+    path: ['baseUrl'],
+  })
+  .refine(data => data.compatibility !== 'AI_GATEWAY' || !!data.apiKey, {
+    // ADDED (2026-07-23, real footgun): unlike every other mode, a
+    // keyless AI_GATEWAY row isn't just "broken" -- @ai-sdk/gateway
+    // silently falls back to OUR OWN shared AI_GATEWAY_API_KEY env var
+    // when no key is passed (see build-model-client.ts's matching
+    // guard, which is the actual hard stop; this is just the earliest,
+    // clearest place to reject it). An API key is mandatory for this
+    // mode specifically -- every other mode's "leave blank for key-less
+    // endpoints" note does not apply here.
+    message: 'An API key is required for AI Gateway -- unlike other modes, this one is never key-less.',
+    path: ['apiKey'],
+  });
 
 /**
  * POST /api/user/byok/providers
@@ -71,7 +94,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       userId: session.user.id,
       label,
       compatibility,
-      baseUrl: normalizeBaseUrl(compatibility, baseUrl),
+      // AI_GATEWAY: normalizeBaseUrl ignores whatever's passed (or
+      // undefined) and always returns the fixed display value -- the
+      // `?? ''` is only ever hit in that branch.
+      baseUrl: normalizeBaseUrl(compatibility, baseUrl ?? ''),
       encryptedApiKey: apiKey ? encryptApiKey(apiKey) : null,
     },
   });

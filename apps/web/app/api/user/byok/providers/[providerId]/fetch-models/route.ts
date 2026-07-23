@@ -3,6 +3,7 @@ import { prisma, decryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
+import { createGateway } from '@ai-sdk/gateway';
 
 /**
  * POST /api/user/byok/providers/:providerId/fetch-models
@@ -13,10 +14,27 @@ import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
  * deletes existing rows on a partial/failed fetch — only adds.
  */
 async function discoverModels(
-  compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES',
+  compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES' | 'AI_GATEWAY',
   baseUrl: string,
   apiKey: string | undefined
 ): Promise<{ modelId: string; label?: string }[]> {
+  // ADDED (2026-07-23, AI Gateway BYOK mode): unlike every other branch
+  // below (a plain REST call to the connection's own baseUrl), this asks
+  // the AI SDK's own Gateway client for the user's live, personal catalog
+  // -- built from THEIR apiKey, not our shared AI_GATEWAY_API_KEY, so a
+  // user only ever sees + can use models their own Gateway account
+  // actually has access to. This is also why AI_GATEWAY BYOK support
+  // never needs a code change for a new model release (e.g. Ling 3.0
+  // Flash the day Vercel ships it) -- "fetch models" always reflects
+  // whatever the live catalog currently has, same mechanism
+  // /api/server/models already uses for the app's own shared catalog.
+  if (compatibility === 'AI_GATEWAY') {
+    const { models } = await createGateway({ apiKey }).getAvailableModels();
+    return models
+      .filter(m => m.modelType === 'language' || !m.modelType)
+      .map(m => ({ modelId: m.id, label: m.name || undefined }));
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15_000);
 

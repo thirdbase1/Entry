@@ -453,6 +453,7 @@ enum ByokCompatibility {
   ANTHROPIC // Anthropic Messages API shape
   GOOGLE // Google Generative Language API shape
   OPENAI_RESPONSES // OpenAI *Responses* API shape (input/output items, not messages/choices) -- distinct from OPENAI's Chat Completions shape above. Covers aggregators that proxy models behind this newer OpenAI API style with a per-model-family base path, e.g. Kie.ai's `https://api.kie.ai/<family>/v1` (grok, gpt, gemini, claude, ...) each serving `POST {base}/responses`.
+  AI_GATEWAY // Vercel AI Gateway, using the user's OWN Gateway API key (2026-07-23) -- built via @ai-sdk/gateway's createGateway({ apiKey }), never a plain baseUrl+key REST call like the other modes. Gives one-key access to the full live Gateway catalog (every model Vercel exposes, day one of release -- e.g. Ling 3.0 Flash) without hardcoding any model id ourselves. baseUrl is still stored (NOT NULL column) but is a fixed display value the client construction path never actually reads.
 }
 
 model UserModelProvider {

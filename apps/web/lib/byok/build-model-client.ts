@@ -13,6 +13,7 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createGateway } from '@ai-sdk/gateway';
 import type { ByokCompatibility } from '@entry/db';
 import { createGatewayRetryFetch } from './gateway-retry-fetch';
 
@@ -56,6 +57,39 @@ export function buildModelClient(provider: ByokProviderConnection, modelId: stri
       // `undefined`) matters — same @ai-sdk/openai env-fallback footgun
       // applies here too.
       return createOpenAI({ baseURL: provider.baseUrl, apiKey: provider.apiKey ?? '', fetch: byokFetch }).responses(modelId);
+    // ADDED (2026-07-23, "add AI gateway in the byok place ... make it
+    // more advanced so user just needs to add API key only"): a BYOK
+    // connection in this mode is NOT a plain baseUrl+key REST call like
+    // every other case here -- it's the user's own Vercel AI Gateway
+    // account, built with the AI SDK's own dedicated Gateway client
+    // (createGateway), which handles Gateway's actual protocol (its own
+    // auth headers/protocol version, model-id routing like
+    // "inclusionai/ling-3.0-flash-free") correctly instead of us trying
+    // to hand-roll it as a fake OpenAI-compatible endpoint. `baseUrl` is
+    // deliberately NOT passed here -- createGateway() already defaults to
+    // Vercel's real Gateway endpoint on its own, and this provider row's
+    // stored baseUrl is only ever a fixed display value (see
+    // normalizeBaseUrl / the settings-page UI, which hides that field
+    // entirely for this mode). Passing our shared byokFetch still gives
+    // this the same keep-alive pooling + transient-retry resilience every
+    // other BYOK mode gets.
+    case 'AI_GATEWAY':
+      // GUARD (2026-07-23, real footgun caught during implementation):
+      // @ai-sdk/gateway's own auth resolution
+      // (getGatewayAuthToken/loadOptionalSetting) silently falls back to
+      // process.env.AI_GATEWAY_API_KEY -- THIS APP'S OWN SHARED GATEWAY
+      // CREDENTIAL, already used elsewhere for the non-BYOK model catalog
+      // -- whenever no apiKey is passed. A BYOK row that somehow ends up
+      // keyless in this mode (should be prevented at create/update time,
+      // see providers/route.ts's refine, but this is the one place that
+      // actually MATTERS -- every other safeguard is just UX) would
+      // otherwise silently bill and rate-limit against our own shared
+      // key instead of erroring, completely defeating the point of BYOK.
+      // Hard-fail instead of ever letting that fallback engage.
+      if (!provider.apiKey) {
+        throw new Error(`AI Gateway connection "${provider.label}" has no API key saved -- add your own Vercel AI Gateway key in Settings before using it.`);
+      }
+      return createGateway({ apiKey: provider.apiKey, fetch: byokFetch })(modelId);
     case 'OPENAI':
     default:
       return createOpenAICompatible({

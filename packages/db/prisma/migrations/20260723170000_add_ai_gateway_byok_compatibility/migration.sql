@@ -1,0 +1,18 @@
+-- AlterEnum
+-- Adds an AI_GATEWAY compatibility mode for BYOK connections (2026-07-23,
+-- user request: "add AI gateway in the byok place ... make it more
+-- advanced so user just needs to add API key only"). Unlike every other
+-- compatibility mode, this one talks to Vercel's own AI Gateway using
+-- @ai-sdk/gateway's createGateway({ apiKey }) instead of a user-supplied
+-- baseUrl -- a BYOK row in this mode still stores a baseUrl (the column
+-- is NOT NULL) but it's a fixed, server-set display value
+-- (https://ai-gateway.vercel.sh), never actually read by the client
+-- construction path. This gives users one-key access to the FULL live
+-- Gateway model catalog -- including new additions like Ling 3.0 Flash
+-- the instant Vercel ships them -- without us ever having to hardcode a
+-- specific model id anywhere.
+-- Postgres requires ALTER TYPE ... ADD VALUE to run outside any
+-- transaction block that also uses the new value, which is exactly what
+-- a plain additive migration file already is -- no data migration needed
+-- since this only adds a new option to the enum.
+ALTER TYPE "ByokCompatibility" ADD VALUE 'AI_GATEWAY';

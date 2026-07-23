@@ -18,7 +18,7 @@ import { AutoSaveField, Toggle, safeJson } from '@/components/settings/shared';
 import { IntegrationsSection } from '@/components/settings/integrations-section';
 import { parseByokConfigSnippet } from '@/lib/byok/parse-config-snippet';
 
-type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES';
+type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES' | 'AI_GATEWAY';
 
 interface ProviderModel {
   id: string;
@@ -51,6 +51,11 @@ interface Provider {
 }
 
 const COMPAT_OPTIONS: { value: Compatibility; label: string; hint: string }[] = [
+  {
+    value: 'AI_GATEWAY',
+    label: 'Vercel AI Gateway',
+    hint: 'Bring your own AI Gateway API key — no base URL needed. Gets you the full live Gateway catalog (OpenAI, Anthropic, Google, xAI, and anything new the day it ships, e.g. Ling 3.0 Flash) through one key, billed to your own Gateway account.',
+  },
   { value: 'OPENAI', label: 'OpenAI-compatible', hint: 'Groq, Together, Fireworks, OpenRouter, DeepInfra, Mistral, xAI, local vLLM/LM Studio/Ollama, most others' },
   { value: 'ANTHROPIC', label: 'Anthropic-compatible', hint: 'Endpoints that mirror the Anthropic Messages API' },
   { value: 'GOOGLE', label: 'Google-compatible', hint: 'Endpoints that mirror the Google Generative Language API' },
@@ -108,9 +113,21 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
     );
   }, [pastedConfig]);
 
+  const isGateway = compatibility === 'AI_GATEWAY';
+
   const submit = useCallback(async () => {
-    if (!label.trim() || !baseUrl.trim()) {
+    // AI Gateway mode needs no base URL at all (server always fills a
+    // fixed value) but, unlike every other mode, DOES require an API key
+    // -- there's no such thing as a key-less Gateway connection (see
+    // build-model-client.ts's guard for why: a missing key there would
+    // silently fall back to our own shared Gateway credential instead of
+    // erroring).
+    if (!label.trim() || (!isGateway && !baseUrl.trim())) {
       setError('Label and base URL are required.');
+      return;
+    }
+    if (isGateway && !apiKey.trim()) {
+      setError('An API key is required for AI Gateway.');
       return;
     }
     setSaving(true);
@@ -119,7 +136,7 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
       const res = await fetch('/api/user/byok/providers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label, compatibility, baseUrl, apiKey: apiKey || undefined }),
+        body: JSON.stringify({ label, compatibility, baseUrl: isGateway ? undefined : baseUrl, apiKey: apiKey || undefined }),
       });
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error?.message ?? json.error ?? 'Failed to add provider');
@@ -180,7 +197,7 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
     } finally {
       setSaving(false);
     }
-  }, [label, compatibility, baseUrl, apiKey, importedModelId, onCreated]);
+  }, [label, compatibility, baseUrl, apiKey, importedModelId, onCreated, isGateway]);
 
   if (!open) {
     return (
@@ -267,18 +284,22 @@ function AddProviderForm({ onCreated }: { onCreated: (p: Provider) => void }) {
         </span>
       </label>
 
-      <label className="flex flex-col gap-1 text-sm">
-        <span className="text-muted-foreground text-xs">Base URL</span>
-        <input
-          value={baseUrl}
-          onChange={e => setBaseUrl(e.target.value)}
-          placeholder="https://api.groq.com/openai/v1"
-          className="h-9 px-3 rounded-md border bg-background text-foreground text-sm outline-none focus:border-primary font-mono"
-        />
-      </label>
+      {!isGateway && (
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-muted-foreground text-xs">Base URL</span>
+          <input
+            value={baseUrl}
+            onChange={e => setBaseUrl(e.target.value)}
+            placeholder="https://api.groq.com/openai/v1"
+            className="h-9 px-3 rounded-md border bg-background text-foreground text-sm outline-none focus:border-primary font-mono"
+          />
+        </label>
+      )}
 
       <label className="flex flex-col gap-1 text-sm">
-        <span className="text-muted-foreground text-xs">API key (optional — leave blank for key-less endpoints)</span>
+        <span className="text-muted-foreground text-xs">
+          {isGateway ? 'API key (required — from vercel.com/dashboard, AI Gateway → API Keys)' : 'API key (optional — leave blank for key-less endpoints)'}
+        </span>
         <input
           type="password"
           value={apiKey}
@@ -392,6 +413,7 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
    * used by the AutoSaveField instances below. Throws on a non-OK response
    * so AutoSaveField reverts the input instead of showing a false "Saved". */
   const [compatSaving, setCompatSaving] = useState(false);
+  const [compatError, setCompatError] = useState<string | null>(null);
 
   const patchProvider = useCallback(
     async (patch: { label?: string; compatibility?: Compatibility; baseUrl?: string; apiKey?: string }) => {
@@ -414,12 +436,22 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
     async (next: Compatibility) => {
       if (next === provider.compatibility) return;
       setCompatSaving(true);
+      setCompatError(null);
       try {
         await patchProvider({ compatibility: next });
-      } catch {
+      } catch (e: any) {
+        // ADDED (2026-07-23): this used to swallow the error entirely --
+        // fine when the only realistic failure was a transient network
+        // blip, but AI_GATEWAY mode has a real, common, expected failure
+        // here (switching an existing key-less connection straight to
+        // AI Gateway, which -- unlike every other mode -- always requires
+        // a key). Silently snapping the dropdown back with zero
+        // explanation left a user with no idea why nothing happened.
         // patchProvider already leaves `provider` untouched on failure
         // (onUpdate is only called after a successful response), so the
-        // select just needs to re-render back to the real current value.
+        // select still just re-renders back to the real current value --
+        // this only adds a visible reason why.
+        setCompatError(e?.message ?? 'Failed to switch API shape.');
       } finally {
         setCompatSaving(false);
       }
@@ -544,11 +576,15 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
             mono={false}
             placeholder="Label"
           />
-          <AutoSaveField
-            value={provider.baseUrl}
-            onSave={next => patchProvider({ baseUrl: next })}
-            placeholder="https://api.example.com/v1"
-          />
+          {provider.compatibility === 'AI_GATEWAY' ? (
+            <span className="text-xs text-muted-foreground italic">Vercel AI Gateway — no base URL needed, uses your API key below</span>
+          ) : (
+            <AutoSaveField
+              value={provider.baseUrl}
+              onSave={next => patchProvider({ baseUrl: next })}
+              placeholder="https://api.example.com/v1"
+            />
+          )}
           <label className="flex flex-col gap-1">
             <select
               value={provider.compatibility}
@@ -561,6 +597,7 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
                 <option key={c.value} value={c.value}>{c.label}</option>
               ))}
             </select>
+            {compatError && <span className="text-xs text-destructive">{compatError}</span>}
           </label>
 
           {!editingKey ? (

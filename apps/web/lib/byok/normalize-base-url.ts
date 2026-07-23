@@ -29,7 +29,20 @@
  * themselves -- the AI SDK then appends `/responses` on top of exactly
  * that.
  */
-export function normalizeBaseUrl(compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES', rawBaseUrl: string): string {
+// Fixed display value only (2026-07-23) -- AI_GATEWAY mode's actual
+// client construction (build-model-client.ts) never reads a provider
+// row's baseUrl at all; createGateway() talks to Vercel's real Gateway
+// endpoint on its own. The column is still NOT NULL, so every AI_GATEWAY
+// row gets this exact string regardless of what (if anything) was typed.
+export const AI_GATEWAY_DISPLAY_BASE_URL = 'https://ai-gateway.vercel.sh';
+
+export function normalizeBaseUrl(
+  compatibility: 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES' | 'AI_GATEWAY',
+  rawBaseUrl: string
+): string {
+  if (compatibility === 'AI_GATEWAY') {
+    return AI_GATEWAY_DISPLAY_BASE_URL;
+  }
   const trimmed = rawBaseUrl.replace(/\/+$/, '');
   if (compatibility === 'ANTHROPIC' && !/\/v1$/.test(trimmed)) {
     return `${trimmed}/v1`;
