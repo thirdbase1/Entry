@@ -99,7 +99,6 @@ import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
 import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
-import { compactMessagesIfNeeded } from '@/lib/direct-chat/compact-messages';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
 
@@ -311,43 +310,30 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // Runs concurrently with `preSave` above (both kicked off, neither
   // awaited yet) rather than after it — see preSave's comment.
   //
-  // Compaction (2026-07-14): only shortens what's sent to the model for
-  // THIS call -- `uiMessages` itself (persisted + shown in the UI) is
-  // never touched. See compact-messages.ts's file comment for the real
-  // gap this closes (this path had zero context-window protection
-  // before, unlike eve's root agent's built-in `compaction` config).
-  // Fixed (2026-07-14, real production crash): the persona system prompt
-  // AND the compaction summary below used to each be prepended INTO this
-  // array as their own `role: 'system'` message. That's what this SDK's
-  // `messages`/`prompt` validation flatly rejects by default -- confirmed
-  // directly from node_modules/ai/dist/index.js: `if
-  // (!allowSystemInMessages && messages.some(m => m.role === 'system'))
-  // throw "System messages are not allowed in the prompt or messages
-  // fields. Use the instructions option instead."` -- and confirmed as a
-  // real live crash (AI_InvalidPromptError on every single turn for at
-  // least one BYOK model, and would have resurfaced separately the first
-  // time any chat got long enough to trigger compact-messages.ts's own
-  // summary injection). The SDK's actual documented mechanism for a
-  // system prompt that still needs providerOptions (cache_control
-  // included) is the separate `instructions` param on streamText, which
-  // explicitly accepts a SystemModelMessage or array of them for exactly
-  // this case -- see node_modules/ai/dist/index.d.ts's own comment: "It
-  // can be a string, or, if you need to pass additional provider options
-  // (e.g. for caching), a SystemModelMessage." Both the persona prompt and
-  // the (optional) compaction summary are combined into `instructions`
-  // below instead of ever being spliced into `messages`.
+  // REMOVED (2026-07-23, explicit user request): context compaction
+  // (compact-messages.ts) used to summarize older turns via an extra
+  // `generateText` call once history got large, to protect against
+  // exceeding a model's context window on very long sessions. Removed
+  // because it added a second, independent point of failure to every
+  // long-running chat turn (a real, confirmed-live case: the summary
+  // call itself 403'd with "account tier is insufficient" against a
+  // BYOK provider account) -- and per-turn simplicity/predictability was
+  // judged more valuable than the (already-rare, always-fail-safe)
+  // context-window protection it gave. `uiMessages` is now sent to the
+  // model as-is, full raw history every turn, same as before this
+  // feature existed on 2026-07-14. If a genuinely long session ever hits
+  // a real "context length exceeded" error from a provider, that's a
+  // normal, visible, catchable onError case (unlike the silent risk this
+  // feature carried) -- reintroduce compaction deliberately later if that
+  // becomes a real recurring complaint, not as a blanket default.
   const messagesForModel = (isThirdPartyResponsesRelay || isThirdPartyAnthropicRelay) ? stripReasoningParts(uiMessages) : uiMessages;
-  const compactionResult = compactMessagesIfNeeded(messagesForModel, model, modelId);
-  const modelMessages = compactionResult.then(async ({ messages, wasCompacted }) => {
-    if (wasCompacted) {
-      console.log('[direct chat] compacted history before model call', { chatId, modelId, originalCount: uiMessages.length, sentCount: messages.length });
-    }
+  const modelMessages = (async () => {
     // Cache breakpoint on the last user+assistant turn -- so the growing
     // conversation history itself gets cached incrementally as the chat
     // gets longer -- see prompt-cache.ts's file comment for the full "why".
-    const converted = await convertToModelMessages(messages);
+    const converted = await convertToModelMessages(messagesForModel);
     return applyConversationCacheControl(converted);
-  });
+  })();
   // REMOVED (2026-07-15, explicit user request): this used to pass
   // `runningAs: \`${providerLabel} · ${modelId}\`` here so the persona
   // prompt would tell the model exactly what it's running as. The user
@@ -505,15 +491,9 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     workingMemory: userWorkingMemory,
     availableTools: Object.keys(activeTools),
   });
-  const instructions = compactionResult.then(({ summaryText }) => {
-    const systemMessage = buildCachedSystemMessage(SYSTEM_PROMPT);
-    if (!summaryText) return systemMessage;
-    // Plain string is fine for the summary -- it's regenerated (and its
-    // text changes) each time compaction re-triggers, so there's no
-    // stable prefix worth a cache_control breakpoint here the way there
-    // is for the persona prompt above.
-    return [systemMessage, { role: 'system' as const, content: summaryText }];
-  });
+  // Compaction removed (see above) -- instructions is now just the
+  // persona system prompt, no async summary branch to fold in anymore.
+  const instructions = Promise.resolve(buildCachedSystemMessage(SYSTEM_PROMPT));
 
   // Tracked across steps so a fully-empty final turn (see
   // fill-empty-refusal.ts) can report WHY it was empty instead of just
