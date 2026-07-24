@@ -58,6 +58,36 @@ import { AutoCollapseTool, ToolHeader, ToolContent, ToolOutput, type ToolState }
 import { ChooseResult } from './renderers/choose-result';
 import { IntegrationConnectCard } from './renderers/integration-connect-card';
 import { getKnownService } from '@/lib/integration-services';
+
+/**
+ * FIXED (2026-07-24, real user-reported bug: "I send a message and it
+ * disappears instantly, only shows back once the agent is done with the
+ * turn -- happens many times"). Both places in this file that adopt a
+ * DB-fetched snapshot over the live `chat.messages` (this recovery poll,
+ * and onFinish's version-card catch-up loop) already guarded against
+ * REGRESSING to a strictly shorter array -- but a same-length or
+ * differently-shaped `persisted` snapshot (e.g. the DB row observed in a
+ * split second between the user's own optimistic send landing locally and
+ * the server's own persistence of that same turn actually committing --
+ * a real, confirmed-possible race, not hypothetical: `preSave` and this
+ * poll are two entirely independent round-trips with no ordering
+ * guarantee between them) could still get adopted even if it silently
+ * drops the very message currently on screen, if its id/shape doesn't
+ * line up 1:1 with the live array for any reason. That's exactly what
+ * "disappears, only comes back once the turn ends" looks like: the poll
+ * clobbers the live optimistic array with a leaner/older persisted one,
+ * and it only self-corrects once the FINAL onFinish save re-adopts the
+ * complete result. This is a hard invariant, not a heuristic: never
+ * adopt a fetched snapshot unless every message id currently visible is
+ * still present in it. A snapshot can add messages/parts freely; it can
+ * never make something already on screen vanish.
+ */
+function isSafeToAdopt(persisted: UIMessage[], current: UIMessage[]): boolean {
+  if (persisted.length < current.length) return false;
+  const persistedIds = new Set(persisted.map(m => m.id));
+  return current.every(m => persistedIds.has(m.id));
+}
+
 import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
 import { useLiveTurnElapsedMs, TurnDurationLabel, LiveTurnDurationLabel } from './turn-timer';
 import { silentlyUpdateChatUrl } from './silent-url-update';
@@ -197,6 +227,7 @@ function DirectChatSession({
   // Give-up counters for the 3s recovery poll below (2026-07-21 fix --
   // see the poll's own comment for why this exists).
   const missedPollsRef = useRef(0);
+  const gaveUpRef = useRef(false);
   const pollIdRef = useRef<number | undefined>(undefined);
   const [turnError, setTurnError] = useState<string | null>(null);
   // STALL DETECTION (2026-07-23, explicit user report: "anytime my screen
@@ -311,7 +342,7 @@ function DirectChatSession({
           if (!res.ok) continue;
           const snap = await res.json();
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
-          if (persisted && persisted.length >= chat.messages.length) {
+          if (persisted && persisted.length >= chat.messages.length && isSafeToAdopt(persisted, chat.messages)) {
             chat.setMessages(persisted);
             return;
           }
@@ -466,7 +497,8 @@ function DirectChatSession({
             // and stop, instead of polling a dead endpoint indefinitely.
             missedPollsRef.current += 1;
             if (missedPollsRef.current >= 8) {
-              window.clearInterval(pollIdRef.current);
+              gaveUpRef.current = true;
+              window.clearTimeout(pollIdRef.current);
               if (looksIncomplete) {
                 setTurnError("Couldn't send that message -- check your connection and try again.");
               }
@@ -489,8 +521,9 @@ function DirectChatSession({
           // shows here" rather than "whatever's in the DB shows here
           // unless it happened to grow inside the last message only".
           const persistedIsNewer =
-            persisted.length > chat.messages.length ||
-            (persisted.length === chat.messages.length && JSON.stringify(persisted) !== JSON.stringify(chat.messages));
+            (persisted.length > chat.messages.length ||
+              (persisted.length === chat.messages.length && JSON.stringify(persisted) !== JSON.stringify(chat.messages))) &&
+            isSafeToAdopt(persisted, chat.messages);
           if (persistedIsNewer) {
             chat.setMessages(persisted);
             setTurnError(null);
@@ -525,22 +558,49 @@ function DirectChatSession({
     // drop/restore Wi-Fi or cellular without ever firing a real 'offline'
     // -> 'online' transition (silent DNS/route flap), and a laptop
     // sleep/wake cycle can resume with the tab still reporting 'visible'
-    // the whole time. Poll every 3s while a turn looks active (or looks
+    // the whole time. Poll while a turn looks active (or looks
     // interrupted-mid-turn on a fresh mount, see looksIncomplete above) so
     // a dead connection still self-heals even when neither event ever
     // fires -- cheap (one lightweight GET), and tryRecover() itself is a
     // no-op once nothing new is available. Also fire once immediately
     // (not just after the first interval tick) so a reload lands on an
-    // up-to-date answer as fast as possible instead of waiting up to 3s
-    // doing nothing first.
+    // up-to-date answer as fast as possible instead of waiting doing
+    // nothing first.
+    //
+    // FIXED (2026-07-24, real user request: "if I reload the page, the
+    // response should still stream well -- I'm connected back and have
+    // connections"). A fixed 3s cadence made a reload-mid-turn feel like
+    // one long stall followed by a single big jump once the interval
+    // finally ticked -- technically self-healing, but nothing about it
+    // felt like a live stream resuming. Switched from a fixed
+    // setInterval to a self-rescheduling setTimeout so the cadence can
+    // adapt: a fresh mount that lands mid-turn (or any turn that's
+    // still actively incomplete) re-polls every 800ms -- fast enough that
+    // successive catch-up snapshots (each capturing a bit more of the
+    // growing text/tool state) read as a near-continuous stream instead
+    // of occasional jumps, without hammering the DB once things settle
+    // (falls back to the original 3s cadence the moment nothing looks
+    // incomplete anymore).
+    let cancelled = false;
+    gaveUpRef.current = false;
+    const scheduleNext = () => {
+      if (cancelled || gaveUpRef.current) return;
+      const last = chat.messages[chat.messages.length - 1];
+      const stillCatchingUp = !last || last.role === 'user';
+      pollIdRef.current = window.setTimeout(() => {
+        tryRecover();
+        scheduleNext();
+      }, stillCatchingUp ? 800 : 3000);
+    };
     tryRecover();
     missedPollsRef.current = 0;
-    pollIdRef.current = window.setInterval(tryRecover, 3000);
+    scheduleNext();
     return () => {
+      cancelled = true;
       window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('focus', onFocus);
-      window.clearInterval(pollIdRef.current);
+      window.clearTimeout(pollIdRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, chat.id, chat.status]);
