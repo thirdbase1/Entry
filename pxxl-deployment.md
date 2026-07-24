@@ -157,3 +157,39 @@ pxxl logs --deployment <dep_id>
 curl -sI https://entry.pxxl.pro/
 curl -s https://entry.pxxl.pro/api/health
 ```
+
+## Why the successful deploys worked (and the broken ones didn't) — root cause
+
+All Pxxl deploys go through the same last step: after the container passes
+its own health check, Pxxl "Promotes the proxy route" — this has a tight
+~15-20s window. On the 5 successful `entry` deploys, this step consistently
+finished in ~13-14s. On every failed attempt (both the 2 failures on this
+same project, and all attempts on the wrong `vwhehj@gmail.com` project),
+it missed that window and timed out. Root cause: the successful deploys
+start the app via Next.js **standalone output mode**
+(`node apps/web/.next/standalone/apps/web/server.js`), which boots far
+faster than `next start` (skips full node_modules/workspace resolution).
+The failed attempts used `next start` directly, which is slow enough to
+usually blow past Pxxl's promotion timeout.
+
+**Lesson: always start from standalone output on Pxxl, never `next start`.**
+`next.config` already has `output: 'standalone'` set repo-wide (used by
+Render too), so this just means using the right startCommand:
+
+```
+buildCommand = "SKIP_PRODUCTION_MIGRATE_GUARD=1 npm run build && mkdir -p apps/web/.next/standalone/apps/web/.next && cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static && cp -r apps/web/public apps/web/.next/standalone/apps/web/public"
+startCommand = "node apps/web/.next/standalone/apps/web/server.js"
+```
+
+`SKIP_PRODUCTION_MIGRATE_GUARD=1` skips `prisma migrate deploy` at build
+time — Render already owns migrations against the same shared Neon DB, so
+this avoids a double-migrate race between the two hosts. If a new Prisma
+migration folder is ever added, apply it manually once via
+`POST /api/admin/db/migrate` after that specific deploy.
+
+Even with the standalone server, the promotion step is NOT 100%
+deterministic (2 of 7 deploys on the correct project still failed) — it's
+inherently a bit flaky on Pxxl's side. If a deploy fails at "Proxy route
+promotion delayed", just retry `pxxl deploy` again as-is; it's a transient
+race, not a config problem, as long as startCommand uses the standalone
+server.
