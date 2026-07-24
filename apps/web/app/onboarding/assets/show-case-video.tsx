@@ -12,7 +12,7 @@ export function ShowCaseVideo() {
       autoPlay
       loop
       controls
-      src="/videos/openagent_intro.mp4"
+      src="https://base44.app/api/apps/6a4c10ff68de563a8ec13795/files/mp/public/6a4c10ff68de563a8ec13795/5047a9a3b_openagent_intro.mp4"
     />
   );
 }

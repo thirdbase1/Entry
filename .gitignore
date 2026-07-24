@@ -29,3 +29,4 @@ apps/web/.next/
 admin_sketch.png
 pxxl.env
 .env.production.pull
+apps/web/public/videos/
