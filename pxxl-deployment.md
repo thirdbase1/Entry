@@ -294,3 +294,45 @@ requests the way it never could on Vercel. Do not "fix" this by
 provisioning a Redis/Upstash instance unless the app moves to a
 multi-instance or serverless deployment model again, where in-memory
 state would stop being shared correctly.
+
+## Correction (2026-07-24, same day): the "full 35-var push" wasn't actually full
+
+The section above describing the Render env pull was written right after
+running `pxxl env push --force .env.render <project-id>` — but that
+command is wrong. **`pxxl env push` does not accept a custom filename
+argument.** Per `pxxl env --help`, the real syntax is:
+
+```
+pxxl env push [project-id]
+pxxl env push --force [project-id]
+```
+
+It always reads from a file literally named `.env` in the current
+directory — passing `.env.render` as an extra arg gets silently ignored
+(no error), so the push actually re-pushed the OLD 17-var `.env` instead
+of the intended 35-var file. `pxxl env list` after that push still showed
+only the same 17 keys as before — the push "succeeded" but pushed the
+wrong file. Caught this only because the user explicitly asked "are you
+sure the env are completed" and it was worth re-checking rather than
+trusting the earlier success message.
+
+**Correct procedure:** always copy/overwrite the target file to the
+literal `.env` path before pushing:
+
+```bash
+cp .env.render .env
+pxxl env push --force <project-id>
+pxxl env list <project-id>   # verify count/names before trusting it
+pxxl redeploy <project-id>   # env only takes effect after a redeploy
+```
+
+Confirmed after redoing it this way: `pxxl env list` on `entry-test`
+now shows all 35 keys. Redeployed, and `/api/health` went through the
+same one-shot cold-start "unreachable" on the very first check post-deploy,
+then "connected" on every check after — consistent with the earlier
+cold-start finding, not a new problem.
+
+**Takeaway:** never trust a CLI's generic success message
+(`✓ Environment variables replaced`) as proof the *intended* file was
+pushed — always follow up with `pxxl env list` and diff the key names
+against what was meant to be sent.
