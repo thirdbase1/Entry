@@ -1,13 +1,11 @@
 # Pxxl Deployment Notes — Entry (thirdbase1/Entry)
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 ## Current status: LIVE and working
 
-As of 2026-07-24, production deployment for this app runs on **Pxxl**
-(Render is the former platform — still technically running but no longer
-the deploy target; see `.agents/rules/entry-git-commit-before-deploy.md`
-in the agent's own sandbox for the full standing rule).
+Production for this app runs on **Pxxl**. Pxxl is the only deploy target —
+there is no other platform in the loop.
 
 - **Account:** miraclethirdbase1@gmail.com
 - **Project:** `entry` (`proj_ibab5ldta4l63qoentq7`)
@@ -15,23 +13,24 @@ in the agent's own sandbox for the full standing rule).
 - Verified healthy: `curl https://entry.pxxl.pro/api/health` returns
   `{"ok":true,"db":"connected"}`.
 
-Earlier attempts on two OTHER accounts (`vwhehj@gmail.com` project `entry`
-/ `proj_jja54nhxtknvzc31alcx`, and `alfredjames0852@gmail.com` project
-`oneshotsx-entry` / `proj_pebeqy7m1noy6zo5jwq5`) hit a real Pxxl platform
-bug — the deploy would build, start, and pass its own health check, then
-fail at the very last step with:
+Any other account/project you might see referenced anywhere else
+(`vwhehj@gmail.com`, `alfredjames0852@gmail.com`, `entry-test`,
+`oneshotsx-entry`) is dead — ignore it. The account and project above are
+the only ones that matter.
+
+### The one real platform bug, and its fix
+
+Pxxl has a proxy-promotion step with a strict readiness timeout. A plain
+`next start` boots too slowly and misses it — the deploy builds, starts,
+passes its own health check, then fails at the very last step with:
 ```
 Proxy route promotion delayed: application route did not become ready before timeout
 Deployment was not activated because proxy route promotion failed
 ```
-**The fix that resolved this**: build with Next.js **standalone** output
-and start THAT server directly instead of `next start` — it boots fast
-enough to consistently beat Pxxl's proxy-promotion readiness timeout. This
-is why `pxxl.toml`'s `buildCommand`/`startCommand` look the way they do
-below. Those two older accounts/projects are now dead — ignore any
-reference to them elsewhere. The `entry-test` project
-(`proj_9lbp7pee8ws99546u4ov`) was a one-off validation deploy only, also
-safe to ignore.
+**The fix**: build with Next.js **standalone** output and start THAT
+server directly instead of `next start` — it boots fast enough to
+consistently beat the timeout. This is why `pxxl.toml`'s
+`buildCommand`/`startCommand` look the way they do below.
 
 ## `pxxl.toml` (current, working)
 
@@ -57,7 +56,11 @@ projectId = "proj_ibab5ldta4l63qoentq7"
    you see a mystery 502 on deploy.
 3. **`.pxxlignore` gets silently reset to Pxxl's hardcoded default on
    EVERY deploy** — rewrite it fresh immediately before every single
-   `pxxl deploy` call, it will not persist between deploys.
+   `pxxl deploy` call, it will not persist between deploys. (This has
+   caused a real failed deploy before — a deploy that got interrupted
+   mid-run left `.pxxlignore` reset to the default, and the *next* deploy
+   call reused that stale reset file instead of a fresh one, blowing past
+   the 500-file cap below.)
 4. **500-file cap** on the upload archive, separate from the byte-size
    cap. This repo is a monorepo (`apps/web` + `apps/agent` + `packages`),
    and `apps/agent` alone is ~700 files if included wholesale.
@@ -80,8 +83,8 @@ projectId = "proj_ibab5ldta4l63qoentq7"
    real output** into `pxxl logs` — this is normal, not a sign of failure.
 10. Use a `pxxl.toml` with explicit `projectId`, `buildCommand`, and
     `startCommand` to avoid buildpack auto-detection guessing wrong.
-11. `pxxl deploy` can take well over a minute to move from `building` to
-    `deployed` — poll patiently.
+11. `pxxl deploy` can take well over a minute (sometimes 2+) to move from
+    `building` to `deployed` — poll patiently, don't give up early.
 
 ## The correct procedure (current, working)
 
@@ -90,6 +93,8 @@ pxxl whoami   # confirm miraclethirdbase1@gmail.com
 
 git pull origin main
 
+# Rewrite .pxxlignore fresh -- it does NOT persist between deploys (see
+# gotcha #3 above). Do this immediately before every single deploy call.
 cat > .pxxlignore << 'EOF'
 .git
 .git/**
@@ -144,3 +149,6 @@ All required production env vars are already correctly set on
 `proj_ibab5ldta4l63qoentq7` — confirmed via
 `pxxl env list proj_ibab5ldta4l63qoentq7`. Don't re-push blind; only touch
 a specific key if something is actually confirmed missing/wrong.
+
+`ANCHORBROWSER_API_KEY` was added 2026-07-24 for the Anchor Browser
+lane — 57 vars total as of this writing.

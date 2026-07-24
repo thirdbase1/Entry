@@ -113,6 +113,34 @@ const LANES: Lane[] = [
   // session (see anchorbrowser-client.ts) and with a genuine live view
   // URL available immediately from session creation.
   { provider: 'anchorbrowser', slot: 1 },
+  // PLANNED, not yet implemented (2026-07-25): a 6th lane using Vercel
+  // Labs' `agent-browser` (github.com/vercel-labs/agent-browser), open
+  // source and free -- no per-session API cost like the 5 lanes above.
+  // Note this project already tried this exact CLI once before (see the
+  // 2026-07-16 REWRITTEN note at the top of this file) and moved away
+  // from it specifically because self-driving it gave no real embeddable
+  // live view, only after-the-fact screenshots -- that objection still
+  // applies to a naive re-add.
+  //   - Tested hands-on (2026-07-24): its own local-Chrome launch needs
+  //     system shared libs (libnspr4.so etc.) not present by default --
+  //     would need a custom Pxxl/Docker build step to bundle them, this
+  //     is NOT a drop-in addition.
+  //   - Also tried pointing its `agent-browser connect <cdp-url>` at our
+  //     real Steel and Anchor Browser remote sessions (to reuse their
+  //     live-view URLs and dodge the local-Chrome problem entirely) --
+  //     both rejected the handshake with a plain 400. Its CDP client
+  //     doesn't speak whatever these providers' gateways expect (they're
+  //     built/verified against Playwright's connectOverCDP, which is what
+  //     steel-client.ts and anchorbrowser-client.ts actually use).
+  //   - Its real selling point is token efficiency: an accessibility-tree
+  //     snapshot with element refs (`click @e2`, `fill @e3 "..."`)
+  //     instead of a screenshot judged by a vision model every step --
+  //     genuinely cheaper than the Steel/Bright Data decide/act loop
+  //     above, IF the live-view and launch problems get solved.
+  //   - Next step if this gets picked up for real: a Dockerfile-level Pxxl
+  //     build change to install Chrome's system deps, self-host the
+  //     daemon, and separately solve/accept the no-live-view gap (e.g. by
+  //     screenshotting on demand rather than promising a live iframe).
 ];
 
 type SessionRow = {
