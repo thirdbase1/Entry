@@ -228,6 +228,39 @@ function DirectChatSession({
   // see the poll's own comment for why this exists).
   const missedPollsRef = useRef(0);
   const gaveUpRef = useRef(false);
+  // FIXED (2026-07-24, real user report: "if I reload the page while the
+  // model is working, does the send button still turn black?" -- it
+  // didn't. `chat.status` is a brand-new AI SDK hook's own in-memory
+  // state -- it always (re-)initializes to 'ready' on every fresh mount,
+  // with zero awareness of whether the server is still actually running
+  // this turn (which, per the durability model above, it very well can
+  // be -- reload/close-tab/lose-network mid-turn never stops the server
+  // side work). So a reload landing mid-turn showed the button/input as
+  // fully idle -- exactly backwards, since that's precisely the moment
+  // real background work is still happening. `pendingTurn` is a second,
+  // independent busy signal fed by the SAME recovery poll below (not
+  // `chat.status`, which this poll deliberately doesn't drive): every
+  // tick that finds genuinely NEW content in the DB (`persistedIsNewer`)
+  // means the server just produced more since last check -- still
+  // working, so this flips true. Initial value covers the most common
+  // case instantly (no waiting on the first poll tick at all): a reload
+  // landing with the last message still from 'user' -- i.e. sent, no
+  // reply persisted yet -- is unambiguous proof a turn was in flight the
+  // moment the page was left.
+  // Wall-clock, not a fixed poll-tick count: the server's own
+  // incremental save is throttled to at most once per 3s (see route.ts's
+  // INCREMENTAL_SAVE_MIN_INTERVAL_MS) -- a perfectly healthy, still-
+  // running turn can legitimately show zero DB growth for a few seconds
+  // at a time between saves. A tick-count threshold would have to know
+  // the current poll cadence (800ms fast vs 3s normal) to stay correct;
+  // wall-clock time doesn't care, so it can't declare "settled" while
+  // still inside a normal save gap no matter which cadence is active.
+  const SETTLE_QUIET_MS = 4_500;
+  const lastGrowthAtRef = useRef(Date.now());
+  const [pendingTurn, setPendingTurn] = useState(() => {
+    const last = initialMessages[initialMessages.length - 1];
+    return initialMessages.length > 0 && (!last || last.role === 'user');
+  });
   const pollIdRef = useRef<number | undefined>(undefined);
   const [turnError, setTurnError] = useState<string | null>(null);
   // STALL DETECTION (2026-07-23, explicit user report: "anytime my screen
@@ -499,6 +532,7 @@ function DirectChatSession({
             if (missedPollsRef.current >= 8) {
               gaveUpRef.current = true;
               window.clearTimeout(pollIdRef.current);
+              setPendingTurn(false);
               if (looksIncomplete) {
                 setTurnError("Couldn't send that message -- check your connection and try again.");
               }
@@ -525,6 +559,11 @@ function DirectChatSession({
               (persisted.length === chat.messages.length && JSON.stringify(persisted) !== JSON.stringify(chat.messages))) &&
             isSafeToAdopt(persisted, chat.messages);
           if (persistedIsNewer) {
+            // Genuinely new content just showed up server-side since the
+            // last check -- proof the turn is still actively being worked
+            // on right now, regardless of what chat.status says.
+            lastGrowthAtRef.current = Date.now();
+            setPendingTurn(true);
             chat.setMessages(persisted);
             setTurnError(null);
             chat.clearError();
@@ -537,6 +576,14 @@ function DirectChatSession({
               createdRef.current = true;
               if (!sessionId) silentlyUpdateChatUrl(`/chats/${activeId}`);
             }
+          } else if (Date.now() - lastGrowthAtRef.current > SETTLE_QUIET_MS) {
+            // Only declare the turn actually settled once it's been quiet
+            // for comfortably longer than the server's own incremental-
+            // save throttle window -- otherwise a perfectly healthy,
+            // still-running turn sitting inside a normal save gap would
+            // flip the button back to idle for a moment, then black again
+            // right after, which reads as broken/flickery.
+            setPendingTurn(false);
           }
         } catch {
           // best-effort -- retried on the next online/visibility event
@@ -607,7 +654,7 @@ function DirectChatSession({
 
   const { requestOpenHistory } = useChatPanel();
 
-  const isBusy = chat.status === 'submitted' || chat.status === 'streaming';
+  const isBusy = chat.status === 'submitted' || chat.status === 'streaming' || pendingTurn;
   // RETIRED (2026-07-22): this used to overlay a synthetic live-preview
   // message while a turn was handed off to a durable Trigger.dev
   // background worker past Vercel's 300s limit. Now fully on Render (a
@@ -616,14 +663,17 @@ function DirectChatSession({
   // a preview for anymore.
   const messages = chat.messages;
   const lastMessage = messages[messages.length - 1];
-  // True right after a fresh mount (e.g. a reload) that landed mid-turn --
-  // the last thing in history is the user's own message with no assistant
-  // reply after it yet, and this component instance's own `isBusy` says
-  // nothing is happening (status resets to 'ready' on every fresh mount,
-  // see the recovery effect's `looksIncomplete` comment above for why that
-  // alone can't be trusted). Distinct from `showThinkingIndicator` below,
-  // which only ever covers a turn that started IN this same instance.
-  const pendingTurn = !isBusy && messages.length > 0 && lastMessage?.role === 'user';
+  // NOTE: `pendingTurn` itself (true right after a fresh mount/reload that
+  // landed mid-turn, or any time the recovery poll below detects the
+  // server producing new content this tab hasn't caught up to yet) is now
+  // the `useState` declared up near the other recovery-poll refs -- it
+  // already feeds `isBusy` above, which is strictly more complete than a
+  // one-shot "last message is from user" snapshot ever was (it also
+  // correctly covers a reload landing mid-ASSISTANT-stream, not just
+  // before the first token, and only clears once the recovery poll
+  // confirms real settle time has passed -- see that state's own comment
+  // for why). Distinct from `showThinkingIndicator` below, which only
+  // ever covers a turn that started IN this same instance.
   // "Thinking…" indicator: visible from the moment a message is sent until
   // the assistant's reply actually has SOMETHING to show (text, a tool
   // call, or reasoning) — covers response latency, then gets out of the
