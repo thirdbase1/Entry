@@ -417,21 +417,36 @@ function DirectChatSession({
         // error shown" looks like from the outside: not a crash, just this
         // component silently replacing the live turn with a frozen
         // snapshot the instant a tool call handed off to the next step.
-        // Recovery should only ever act on a turn that's ACTUALLY stuck --
-        // a real terminal 'error', the reload-mid-turn case
-        // (`looksIncomplete`) the 2026-07-11 fix above already covers, OR
-        // (2026-07-23) a 'streaming'/'submitted' turn that has produced
-        // ZERO real progress for STALL_MS -- see lastProgressRef's comment
-        // above for exactly why status alone can't be trusted for that
-        // case. A genuinely healthy long tool call keeps advancing parts
-        // well inside this window, so this never re-triggers the
-        // 2026-07-15 clobber bug that guard was written to prevent --
-        // it only fires once the client-visible state has been frozen
-        // solid for a very deliberately generous stretch.
+        // Only ever SKIP the check outright while a turn is actively,
+        // healthily streaming (that's the one case where clobbering with a
+        // 3s-old snapshot is provably wrong -- see the 2026-07-15 bug this
+        // guard exists to prevent, in the block below). Every other state
+        // -- 'ready' included -- falls through to the fetch below and gets
+        // reconciled against the DB every single tick, unconditionally.
+        //
+        // FIXED (2026-07-24, real user-confirmed bug: "it's in the DB but
+        // not displaying in the chat" -- reproduced by reading the actual
+        // row: the DB genuinely had more/newer content than what the tab
+        // was showing, with chat.status sitting on 'ready' the whole time,
+        // not stuck on 'error'/'streaming' at all). The OLD second gate
+        // here (`if (chat.status !== 'error' && !looksIncomplete &&
+        // !isStale) return;`) meant: once a turn settled into 'ready' with
+        // what LOOKED like a complete last assistant message, this poll
+        // permanently stopped reconciling against the DB for that turn --
+        // forever, even though the server can keep running and persisting
+        // MORE after the client's own view of a turn settled (route.ts's
+        // after()+consumeStream() durability model means the server-side
+        // turn is not bound by the client's connection at all). A
+        // reconnect after that point (new tab, page still open, whatever)
+        // had genuinely no path left to ever catch up to what the DB
+        // already had. Removing that gate makes 'ready' behave exactly
+        // like every other non-actively-streaming state: always adopt the
+        // DB's content once the merge check below finds a real diff. This
+        // is safe specifically BECAUSE it only runs when NOT actively
+        // streaming -- there is no live writer to race against.
         const STALL_MS = 20_000;
         const isStale = Date.now() - lastProgressRef.current.at > STALL_MS;
         if ((chat.status === 'streaming' || chat.status === 'submitted') && !isStale) return;
-        if (chat.status !== 'error' && !looksIncomplete && !isStale) return;
         try {
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) {
@@ -462,7 +477,21 @@ function DirectChatSession({
           const snap = await res.json();
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
           if (!persisted || persisted.length === 0) return;
-          if (persisted.length >= chat.messages.length) {
+          // Content-level compare, not just a length check -- now that
+          // this also runs during 'ready', the failure mode to guard
+          // against shifted: the LAST message can grow more parts (a
+          // background continuation appending to the same message id)
+          // without the top-level array length changing at all, which a
+          // bare length check would silently miss forever. Cheap enough
+          // at this scale (one JSON.stringify each way, once per 3s tick,
+          // only while not actively streaming) and it's the only way to
+          // actually guarantee "whatever's in the DB always eventually
+          // shows here" rather than "whatever's in the DB shows here
+          // unless it happened to grow inside the last message only".
+          const persistedIsNewer =
+            persisted.length > chat.messages.length ||
+            (persisted.length === chat.messages.length && JSON.stringify(persisted) !== JSON.stringify(chat.messages));
+          if (persistedIsNewer) {
             chat.setMessages(persisted);
             setTurnError(null);
             chat.clearError();
