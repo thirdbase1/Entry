@@ -82,10 +82,34 @@ import { getKnownService } from '@/lib/integration-services';
  * still present in it. A snapshot can add messages/parts freely; it can
  * never make something already on screen vanish.
  */
+/** Total text length across a message's parts -- the cheap proxy this file
+ *  already uses elsewhere (see lastProgressRef's stall-detection
+ *  signature) for "how much of this message has actually streamed in." */
+function messageTextLength(m: UIMessage): number {
+  return (m.parts ?? []).reduce((sum: number, p: any) => sum + (typeof p?.text === 'string' ? p.text.length : 0), 0);
+}
+
 function isSafeToAdopt(persisted: UIMessage[], current: UIMessage[]): boolean {
   if (persisted.length < current.length) return false;
-  const persistedIds = new Set(persisted.map(m => m.id));
-  return current.every(m => persistedIds.has(m.id));
+  const persistedById = new Map(persisted.map(m => [m.id, m]));
+  return current.every(m => {
+    const match = persistedById.get(m.id);
+    if (!match) return false;
+    // FIXED (2026-07-25, real user report: "message still disappear
+    // sometimes and only show when model turn is complete"). The id-only
+    // check above already guaranteed a message can't vanish outright, but
+    // said nothing about its CONTENT -- a message id being present with
+    // fewer/shorter parts than what's already rendered is just as visible
+    // a regression as the message disappearing entirely (the streamed-in
+    // text on screen visibly shrinks or blanks), and it's exactly what
+    // happens when this poll's DB fetch lands in the ~3s window between
+    // incremental saves: the client has already streamed further ahead
+    // than the DB has been allowed to persist yet. Refuse to adopt a
+    // snapshot that would shrink any message currently on screen -- a
+    // real snapshot can only ever add to a message (more parts arriving,
+    // more text streamed in since the last save), never take away.
+    return messageTextLength(match) >= messageTextLength(m) && (match.parts?.length ?? 0) >= (m.parts?.length ?? 0);
+  });
 }
 
 import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
