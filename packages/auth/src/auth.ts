@@ -89,6 +89,7 @@ export const auth = betterAuth({
       'entry-oneshotsx-thirdbase1s-projects.vercel.app',
       '*.vercel.app', // preview deployments (one per PR/branch)
       'entry-agent-worker.onrender.com', // Render web service (2026-07-22 Vercel->Render migration)
+      'entry.pxxl.pro', // Pxxl web service (2026-07-24 Render->Pxxl migration)
       'localhost:*', // local dev
     ],
   },
@@ -102,6 +103,7 @@ export const auth = betterAuth({
     'https://entry-thirdbase1s-projects.vercel.app',
     'https://entry-oneshotsx-thirdbase1s-projects.vercel.app',
     'https://entry-agent-worker.onrender.com',
+    'https://entry.pxxl.pro',
   ],
 
   // Email/password authentication
@@ -176,7 +178,26 @@ export const auth = betterAuth({
   // secondaryStorage configured those counters lived in each serverless
   // invocation's own memory and never persisted between requests, so they
   // did nothing on Vercel. This one line makes them real.
-  secondaryStorage: redisSecondaryStorage,
+  //
+  // CONDITIONAL (2026-07-24, real prod crash): no Upstash/Redis instance
+  // has ever actually been provisioned for this project — confirmed
+  // UPSTASH_REDIS_URL/REDIS_URL/KV_URL are unset in every real env source
+  // (Render's live service env, every pulled .env snapshot). Unconditionally
+  // wiring secondaryStorage made `getRawRedis()` throw synchronously on the
+  // very first auth request (sign-in, session check, anything hitting
+  // Better Auth's rate limiter), a hard crash with zero graceful fallback.
+  // The underlying reason this existed — Vercel Functions being stateless
+  // per invocation, so in-memory rate-limit counters reset every request —
+  // no longer applies now that this runs as a persistent long-lived server
+  // (Render/Pxxl): a single Node process stays alive across requests, so
+  // Better Auth's default in-memory rate-limit storage genuinely persists
+  // within that process already. Only wire the Redis-backed storage when a
+  // real connection string is actually configured; otherwise fall back to
+  // Better Auth's built-in in-memory limiter (still real protection on a
+  // persistent server, just not shared across multiple replicas).
+  ...(process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL || process.env.KV_URL
+    ? { secondaryStorage: redisSecondaryStorage }
+    : {}),
 
   // Plugins
   plugins: [
