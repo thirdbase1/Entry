@@ -560,10 +560,33 @@ function DirectChatSession({
             isSafeToAdopt(persisted, chat.messages);
           if (persistedIsNewer) {
             // Genuinely new content just showed up server-side since the
-            // last check -- proof the turn is still actively being worked
-            // on right now, regardless of what chat.status says.
+            // last check. Two different situations produce this, and they
+            // need different `pendingTurn` handling:
+            //  1. A turn is genuinely still being worked on (chat.status is
+            //     'streaming'/'submitted', e.g. after a reload landed
+            //     mid-turn) -- real ongoing work, keep the send button
+            //     locked (pendingTurn true) until it settles.
+            //  2. The turn already fully finished (chat.status is 'ready')
+            //     and this is just catching up a message the server
+            //     appended slightly AFTER the stream closed -- e.g. the
+            //     file-change "version card" appended via an `after()`
+            //     callback (see onFinish's own catch-up loop above, which
+            //     already handles the fast path; this poll is only the
+            //     backstop for when that loop doesn't run). There is no
+            //     more work coming after this -- chat.status already told
+            //     us so -- so forcing pendingTurn(true) here just re-locks
+            //     an already-idle send button for no reason, for as long
+            //     as SETTLE_QUIET_MS takes to expire again. FIXED
+            //     (2026-07-24, real user report: "if the agent finish the
+            //     turn or stop, if I want to send another message, the
+            //     send button doesn't allow" -- reproduced exactly via
+            //     this path: a version card landing right after finish
+            //     flipped isBusy back to true for several seconds with no
+            //     visible cause). Only keep the busy-lock when chat.status
+            //     itself says work is still active.
+            const stillActivelyStreaming = chat.status === 'streaming' || chat.status === 'submitted';
             lastGrowthAtRef.current = Date.now();
-            setPendingTurn(true);
+            setPendingTurn(stillActivelyStreaming);
             chat.setMessages(persisted);
             setTurnError(null);
             chat.clearError();
