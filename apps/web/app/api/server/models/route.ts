@@ -22,32 +22,6 @@ import { getReasoningCapableGatewaySlugs } from '@/lib/direct-chat/reasoning-cap
  * (or worse, confusing a user into thinking a plain non-reasoning model is
  * "thinking" when it isn't).
  */
-/**
- * Model ids (or id substrings) known to be fundamentally incompatible
- * with this app's chat, and therefore hidden from the picker entirely --
- * not a quality/preference exclusion, a hard-compatibility one.
- *
- * `antigravity` (2026-07-24, real confirmed incident: a user's turn
- * "stopped while working" ~40s in, mid-conversation, no client-side bug
- * involved at all): Google's API hard-rejects ANY multi-turn request to
- * `antigravity-preview-*` models with a 400 --
- * `Multiturn chat is not enabled for models/antigravity-preview-05-2026`
- * (confirmed via the raw Gateway error body in server logs). This is a
- * genuine, permanent Google-side restriction on this preview model family,
- * not a transient/rate-limit error -- every chat here inherently involves
- * multiple turns (each tool call round-trip is its own turn), so this
- * model family can never complete more than one exchange in this app,
- * no matter what. Excluding it from the catalog entirely is the only
- * real fix -- there's no retry or client-side handling that helps once
- * the model itself refuses the request shape the conversation requires.
- */
-const INCOMPATIBLE_MODEL_ID_SUBSTRINGS = ['antigravity'];
-
-function isCompatibleModel(id: string): boolean {
-  const lower = id.toLowerCase();
-  return !INCOMPATIBLE_MODEL_ID_SUBSTRINGS.some(bad => lower.includes(bad));
-}
-
 export async function GET(_req: NextRequest) {
   try {
     const [{ models }, reasoningSlugs] = await Promise.all([
@@ -55,11 +29,9 @@ export async function GET(_req: NextRequest) {
       getReasoningCapableGatewaySlugs(),
     ]);
 
-    // Filter to language models only (the kind users can chat with), and
-    // drop known-incompatible model families (see
-    // INCOMPATIBLE_MODEL_ID_SUBSTRINGS's own comment above).
+    // Filter to language models only (the kind users can chat with)
     const languageModels = models
-      .filter(m => (m.modelType === 'language' || !m.modelType) && isCompatibleModel(m.id))
+      .filter(m => m.modelType === 'language' || !m.modelType)
       .map(m => ({
         id: m.id,
         name: m.name || m.id,
