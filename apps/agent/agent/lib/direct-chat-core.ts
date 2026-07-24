@@ -85,6 +85,7 @@ import { resolveGatewayModel } from './direct-chat/resolve-gateway-model.js';
 import { getSandboxForChat } from './direct-chat/sandbox.js';
 import { sanitizeDanglingToolCalls } from './direct-chat/sanitize-messages.js';
 import { fillEmptyAssistantReply, describeRefusal } from './direct-chat/fill-empty-refusal.js';
+import { describeApiCallError } from './direct-chat/describe-api-error.js';
 import { stripReasoningParts } from './direct-chat/strip-reasoning-parts.js';
 import { compactMessagesIfNeeded } from './direct-chat/compact-messages.js';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from './direct-chat/prompt-cache.js';
@@ -863,9 +864,10 @@ export async function runDirectChatTurn(
       // and surface a real, readable message to the client instead.
       console.error('[direct chat] turn error', chatId, providerLabel, modelId, error);
       logError({ source: 'direct-chat-turn', error, userId, chatId, context: { providerLabel, modelId } });
-      if (error instanceof Error) return error.message;
-      if (typeof error === 'string') return error;
-      return 'Something went wrong generating a response. Please try again.';
+      // Extracts the real reason even when error.message comes back empty
+      // (confirmed live cause: freemodel.dev's 402 "Usage limit reached"
+      // -- see describe-api-error.ts's file comment for the full story).
+      return describeApiCallError(error);
     },
     async onFinish({ messages: finalMessages }) {
       // Same repair as above, applied to what THIS turn is about to

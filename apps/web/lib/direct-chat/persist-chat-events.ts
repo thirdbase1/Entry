@@ -90,6 +90,95 @@ import { prisma } from '@entry/db';
  * @returns The array actually written to the row's `events` column --
  *          feed this straight back in as the next call's `baseMessages`.
  */
+async function runMergeTransaction(
+  chatId: string,
+  userId: string,
+  baseMessages: unknown[],
+  newMessages: unknown[],
+  extraFields: Record<string, unknown>,
+): Promise<unknown[]> {
+  const delta = newMessages.slice(baseMessages.length);
+
+  // Widened maxWait/timeout (2026-07-24, real user-confirmed bug found
+  // live in Render's logs: "Transaction API error: Unable to start a
+  // transaction in the given time" firing repeatedly during a real
+  // 4-minute tool-heavy turn). Prisma's own defaults here are maxWait:
+  // 2000ms (time allowed to even ACQUIRE a connection from the pool
+  // before starting) and timeout: 5000ms (time allowed for the whole
+  // transaction body to run) -- both are tuned for a low-latency local
+  // Postgres, not a hosted pooled connection (this app's DATABASE_URL
+  // points at Neon's `-pooler` PgBouncer endpoint) under any real
+  // concurrent load. A transient multi-second stall acquiring a
+  // connection is a normal, recoverable blip on a shared pooled
+  // endpoint -- it should never be treated the same as a truly hung
+  // transaction. Widening buys real breathing room without masking a
+  // genuinely stuck query (10s is still far short of anything a human
+  // would sit and wait on).
+  return prisma.$transaction(
+    async tx => {
+      const rows = await tx.$queryRaw<{ events: unknown }[]>`
+        SELECT events FROM eve_chat_sessions WHERE id = ${chatId} AND user_id = ${userId} FOR UPDATE
+      `;
+      const currentEvents = Array.isArray(rows[0]?.events) ? (rows[0]!.events as unknown[]) : [];
+
+      // Nothing newer landed since our own baseline -> this request's own
+      // reconstruction is already correct and complete, write it as-is
+      // (identical to the old behavior for the common, non-overlapping case).
+      // Something newer DID land (another turn committed while we were
+      // running) -> the current row is the authoritative base now; append
+      // only OUR delta on top of it instead of clobbering that newer state.
+      const merged = currentEvents.length > baseMessages.length ? [...currentEvents, ...delta] : newMessages;
+
+      await tx.eveChatSession.update({
+        where: { id: chatId, userId },
+        data: { events: merged as any, ...extraFields },
+      });
+
+      return merged;
+    },
+    { maxWait: 8_000, timeout: 10_000 },
+  );
+}
+
+/**
+ * Only retries errors that are genuinely transient DB/pool contention --
+ * never retries a real application error (e.g. a constraint violation, a
+ * bad query), which would just repeat the same failure 3x for no benefit
+ * and delay surfacing a real bug.
+ */
+function isTransientDbError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    /unable to start a transaction/i.test(message) ||
+    /transaction api error/i.test(message) ||
+    /timeout exceeded when trying to connect/i.test(message) ||
+    /connection terminated/i.test(message) ||
+    /too many (clients|connections)/i.test(message) ||
+    /connection.*(closed|reset|refused)/i.test(message)
+  );
+}
+
+/**
+ * RETRIES A TRANSIENT FAILURE INSTEAD OF SILENTLY LOSING IT (2026-07-24,
+ * real bug confirmed live in Render's logs during an actual 4-minute
+ * tool-heavy turn: "Transaction API error: Unable to start a transaction
+ * in the given time" fired 4 times in about a minute, alongside separate
+ * "timeout exceeded when trying to connect" errors -- pooled-connection
+ * (Neon PgBouncer) contention, not a code bug). Before this fix, the ONLY
+ * caller of this function (route.ts's persistIncremental/persistFinal)
+ * caught any failure here, logged it, and just kept going as if it had
+ * succeeded -- meaning a transient multi-second DB hiccup permanently
+ * dropped that step's save with no second attempt at all, even though
+ * the very next incremental save (or the turn's own final save) might
+ * have sailed through fine a few seconds later. 3 attempts with short
+ * backoff (300ms/900ms) turns "one bad moment permanently loses this
+ * step" into "one bad moment costs at most ~1.2s," which is exactly the
+ * kind of resilience a hosted pooled Postgres endpoint needs under real
+ * concurrent load. Still re-throws after exhausting retries so the
+ * caller's own existing fallback (log + treat newMessages as the new
+ * baseline for chaining, matching the old behavior) is the last resort,
+ * not the first one.
+ */
 export async function mergeAndPersistChatEvents(
   chatId: string,
   userId: string,
@@ -97,27 +186,19 @@ export async function mergeAndPersistChatEvents(
   newMessages: unknown[],
   extraFields: Record<string, unknown> = {},
 ): Promise<unknown[]> {
-  const delta = newMessages.slice(baseMessages.length);
-
-  return prisma.$transaction(async tx => {
-    const rows = await tx.$queryRaw<{ events: unknown }[]>`
-      SELECT events FROM eve_chat_sessions WHERE id = ${chatId} AND user_id = ${userId} FOR UPDATE
-    `;
-    const currentEvents = Array.isArray(rows[0]?.events) ? (rows[0]!.events as unknown[]) : [];
-
-    // Nothing newer landed since our own baseline -> this request's own
-    // reconstruction is already correct and complete, write it as-is
-    // (identical to the old behavior for the common, non-overlapping case).
-    // Something newer DID land (another turn committed while we were
-    // running) -> the current row is the authoritative base now; append
-    // only OUR delta on top of it instead of clobbering that newer state.
-    const merged = currentEvents.length > baseMessages.length ? [...currentEvents, ...delta] : newMessages;
-
-    await tx.eveChatSession.update({
-      where: { id: chatId, userId },
-      data: { events: merged as any, ...extraFields },
-    });
-
-    return merged;
-  });
+  const delays = [300, 900];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await runMergeTransaction(chatId, userId, baseMessages, newMessages, extraFields);
+    } catch (err) {
+      if (attempt >= delays.length || !isTransientDbError(err)) throw err;
+      console.warn(
+        '[direct chat] mergeAndPersistChatEvents transient DB error, retrying',
+        chatId,
+        attempt + 1,
+        err instanceof Error ? err.message : err,
+      );
+      await new Promise(resolve => setTimeout(resolve, delays[attempt]));
+    }
+  }
 }

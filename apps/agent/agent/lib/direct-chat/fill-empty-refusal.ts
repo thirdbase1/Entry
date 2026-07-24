@@ -42,6 +42,18 @@ function hasRealContent(message: UIMessage): boolean {
   return message.parts.some((part: any) => {
     if (part?.type === 'text') return typeof part.text === 'string' && part.text.trim().length > 0;
     if (typeof part?.type === 'string' && (part.type.startsWith('tool-') || part.type === 'dynamic-tool')) return true;
+    // SYNCED FROM apps/web's copy (2026-07-22 fix, was missing here --
+    // real user report: a genuine error -- e.g. "your saved API key
+    // could not be read" -- was getting buried under the generic
+    // "finished without returning any text" fallback below, because a
+    // real `{ type: 'error', errorText }` part was never recognized as
+    // "content" here. That's backwards: an error IS the real, specific,
+    // actionable explanation -- it must never be treated as silence and
+    // papered over with a vague generic message. Directly relevant to
+    // describe-api-error.ts's 2026-07-24 fix: that fix only actually
+    // shows the real reason to the user if THIS check recognizes it as
+    // real content instead of overwriting it with filler text below.
+    if (part?.type === 'error' && typeof part.errorText === 'string' && part.errorText.trim().length > 0) return true;
     return false;
   });
 }

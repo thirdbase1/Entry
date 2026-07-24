@@ -95,6 +95,7 @@ import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
+import { describeApiCallError } from '@/lib/direct-chat/describe-api-error';
 import { mergeAndPersistChatEvents } from '@/lib/direct-chat/persist-chat-events';
 import { stripReasoningParts } from '@/lib/direct-chat/strip-reasoning-parts';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from '@/lib/direct-chat/prompt-cache';
@@ -1122,9 +1123,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // and surface a real, readable message to the client instead.
       console.error('[direct chat] turn error', chatId, providerLabel, modelId, error);
       logError({ source: 'direct-chat-turn', error, userId, chatId, context: { providerLabel, modelId } });
-      if (error instanceof Error) return error.message;
-      if (typeof error === 'string') return error;
-      return 'Something went wrong generating a response. Please try again.';
+      // Extracts the real reason even when error.message comes back empty
+      // (confirmed live cause: freemodel.dev's 402 "Usage limit reached"
+      // -- see describe-api-error.ts's file comment for the full story).
+      return describeApiCallError(error);
     },
     async onFinish({ messages: finalMessages }) {
       // Same repair as above, applied to what THIS turn is about to
