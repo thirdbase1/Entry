@@ -447,11 +447,9 @@ function delegateTools(ctx: ToolExecCtx | undefined, allowedTools?: string[]) {
   // only happen if the enum and this object's keys ever drift -- fails safe by just not including it, rather than crashing the
   // whole delegation over one bad name).
   if (!allowedTools || allowedTools.length === 0) return full;
-  const filtered: Record<string, unknown> = {};
-  for (const name of allowedTools) {
-    if (name in full) filtered[name] = (full as Record<string, unknown>)[name];
-  }
-  return filtered;
+  const allowedSet = new Set(allowedTools);
+  const entries = Object.entries(full as Record<string, unknown>).filter(([name]) => allowedSet.has(name));
+  return Object.fromEntries(entries) as typeof full;
 }
 
 // ADDED (2026-07-24, "Ephemeral Sandbox Branching"): forks the CURRENT live sandbox into an isolated copy via E2B's real
