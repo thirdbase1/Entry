@@ -960,7 +960,33 @@ function DirectChatSession({
                 </div>
               );
             })}
-            {showThinkingIndicator && (!lastMessage || lastMessage.role !== 'assistant') && (
+            {/* FIXED (2026-07-24, real user-reported bug: "I reload the
+                website and the model stops working -- but maybe it's still
+                working in the background?"). That's exactly what was
+                happening: the recovery effect above (see `pendingTurn`)
+                correctly detects a fresh mount that landed mid-turn (last
+                message is the user's own, nothing after it yet) and its 3s
+                poll DOES keep reconciling against the DB in the background
+                -- the server-side turn genuinely keeps running the whole
+                time (see route.ts's consumeStream()-based durability). But
+                this render only ever showed a spinner while `isBusy` was
+                true, which resets to false on every fresh mount (chat.status
+                always re-initializes to 'ready' on reload, regardless of
+                what's actually happening server-side) -- so a reload landed
+                on total silence: just the user's last message, nothing
+                after it, for however long it took the poll to catch up.
+                From the outside that's indistinguishable from "stopped
+                dead". Extending this condition to also cover `pendingTurn`
+                (computed above, independent of `isBusy`) means a reload
+                shows the exact same spinner a live turn would, for as long
+                as it takes tryRecover's poll to bring back the real
+                content -- which is the truth: something IS still
+                happening, it just isn't this component instance's own
+                stream. No new text/copy added (per the 2026-07-15 banner
+                removal above), just the same visual "something is
+                happening" cue reused for a case that was silently missing
+                it entirely. */}
+            {(showThinkingIndicator || pendingTurn) && (!lastMessage || lastMessage.role !== 'assistant') && (
               <div className="flex justify-start flex-col items-start">
                 <ThinkingIndicator />
                 {liveTurnElapsedMs != null && <LiveTurnDurationLabel elapsedMs={liveTurnElapsedMs} />}
