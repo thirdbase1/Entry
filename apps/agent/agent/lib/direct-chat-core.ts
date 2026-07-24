@@ -566,15 +566,30 @@ export async function runDirectChatTurn(
     // node_modules/ai/src/util/set-abort-timeout.ts) -- aborts a step if
     // NO chunk (not even the first) arrives within the window, which
     // turns into a normal catchable error (onError fires, a clean message
-    // reaches the client) instead of a bare platform kill. Deliberately
-    // scoped to "no data at all for 90s", not a cap on total step
+    // reaches the client) instead of a bare platform kill.
+    //
+    // RAISED (2026-07-24, real user-reported bug: agent turns through
+    // this exact channel kept cutting off around ~60-90s, every time,
+    // reproduced live across several consecutive messages). This file is
+    // a SEPARATE, independently-duplicated copy of the same streamText
+    // call in apps/web/app/api/direct/chat/route.ts -- that one got its
+    // stall guard widened from 90_000/240_000 to 240_000/600_000 on
+    // 2026-07-23 (same Vercel->Render reasoning: no more 300s hard
+    // ceiling to stay under), but this copy, used by the direct-chat
+    // channel (channels/direct-chat.ts), was missed entirely and stayed
+    // on the old tight values -- exactly reproducing "stops at 1 minute
+    // plus" on every single turn that took a real BYOK model/relay more
+    // than ~90s to produce a first token (slow first-token latency,
+    // heavy reasoning, a queued free/proxy relay). Deliberately scoped
+    // to "no data at all for 4 minutes", not a cap on total step
     // duration -- a model that's genuinely still producing output stays
     // completely unaffected no matter how long that takes; only a truly
-    // dead connection gets cut. stepMs is a secondary safety net for
-    // the "trickles a few bytes forever but never finishes" variant,
-    // capped well under the 300s hard ceiling so there's still real
-    // margin for onFinish/version-capture/save work to run afterward.
-    timeout: { chunkMs: 90_000, stepMs: 240_000 },
+    // dead connection gets cut. stepMs is a secondary safety net for the
+    // "trickles a few bytes forever but never finishes" variant, raised
+    // proportionally, still comfortably under this channel's own overall
+    // turn time budget so there's real margin for onFinish/version-
+    // capture/save work to run afterward either way.
+    timeout: { chunkMs: 240_000, stepMs: 600_000 },
     // See modelMessages' own comment above for why this (persona prompt +
     // optional compaction summary) moved here instead of being spliced
     // into `messages` as fake `role: 'system'` entries -- this is the
