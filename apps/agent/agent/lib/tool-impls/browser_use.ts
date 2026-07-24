@@ -16,6 +16,7 @@ import {
 } from '../browser-use-cloud-client.js';
 import { createSteelSession, connectSteelBrowser } from '../steel-client.js';
 import { connectBrightDataBrowser, getLiveInspectUrl } from '../brightdata-client.js';
+import { createAnchorSession, performAnchorWebTask, endAnchorSession } from '../anchorbrowser-client.js';
 
 /**
  * REWRITTEN (2026-07-16, explicit user request: "agent uses a real cloud
@@ -92,7 +93,11 @@ const WALL_CLOCK_BUDGET_MS = 60_000;
 const MAX_STEEL_STEPS = 20;
 const MAX_STEPS_STORED = 200;
 
-type Lane = { provider: 'browser_use'; slot: BrowserUseSlot } | { provider: 'steel'; slot: 1 } | { provider: 'brightdata'; slot: 1 | 2 };
+type Lane =
+  | { provider: 'browser_use'; slot: BrowserUseSlot }
+  | { provider: 'steel'; slot: 1 }
+  | { provider: 'brightdata'; slot: 1 | 2 }
+  | { provider: 'anchorbrowser'; slot: 1 };
 
 const LANES: Lane[] = [
   { provider: 'browser_use', slot: 1 },
@@ -103,6 +108,11 @@ const LANES: Lane[] = [
   // CDP credential (BRIGHTDATA_CDP_URL_2), so this chat can now run TWO
   // Bright Data sessions in parallel instead of one.
   { provider: 'brightdata', slot: 2 },
+  // Anchor Browser (2026-07-25, explicit user request: "Integrate anchor
+  // browser") -- fully agentic like browser_use, but resumable via a real
+  // session (see anchorbrowser-client.ts) and with a genuine live view
+  // URL available immediately from session creation.
+  { provider: 'anchorbrowser', slot: 1 },
 ];
 
 type SessionRow = {
@@ -128,7 +138,7 @@ function appendSteps(existing: unknown, add: StepEntry[]): StepEntry[] {
   return merged.length > MAX_STEPS_STORED ? merged.slice(merged.length - MAX_STEPS_STORED) : merged;
 }
 
-async function pickFreeLane(chatId: string, preferred?: 'browser_use' | 'steel' | 'brightdata'): Promise<Lane> {
+async function pickFreeLane(chatId: string, preferred?: 'browser_use' | 'steel' | 'brightdata' | 'anchorbrowser'): Promise<Lane> {
   const active = await prisma.chatBrowserSession.findMany({
     where: { chatId, status: { in: ['running', 'idle'] } },
     select: { provider: true, slot: true },
@@ -142,7 +152,7 @@ async function pickFreeLane(chatId: string, preferred?: 'browser_use' | 'steel' 
     if (!used.has(`${lane.provider}:${lane.slot}`)) return lane;
   }
   throw new Error(
-    'All browser lanes (browser_use, steel, brightdata) are already in use for this chat -- call browser_stop on an existing session_id before starting another, or reuse an existing session_id as a follow-up.',
+    'All browser lanes (browser_use, steel, brightdata x2, anchorbrowser) are already in use for this chat -- call browser_stop on an existing session_id before starting another, or reuse an existing session_id as a follow-up.',
   );
 }
 
@@ -1133,10 +1143,13 @@ export const browserUse = {
     'independent zones/credentials under the hood (added 2026-07-24), so up to two brightdata tasks can run at the ' +
     'same time for this chat, not just one -- e.g. scrape two different sites in parallel by calling browser_use ' +
     'twice with provider: "brightdata" without waiting for the first to finish; the tool picks whichever zone is ' +
-    'free automatically, no extra parameter needed to choose between them. Up to FOUR sessions total can run in ' +
-    'parallel for this chat (browser_use + steel + the two brightdata zones) -- pass `provider` to pick which ' +
-    'provider for a NEW session (defaults to trying browser_use first, cascading automatically through steel then ' +
-    "brightdata if an earlier provider's account itself is unavailable, e.g. out of quota). " +
+    'free automatically, no extra parameter needed to choose between them. anchorbrowser (added 2026-07-25) is ' +
+    "another fully-agentic lane like browser_use -- give it a task, its own agent (browser-use by default) plans " +
+    'and executes it -- and it IS resumable via session_id just like browser_use/steel, with its own genuine live ' +
+    'view. Up to FIVE sessions total can run in parallel for this chat (browser_use + steel + two brightdata zones ' +
+    '+ anchorbrowser) -- pass `provider` to pick which provider for a NEW session (defaults to trying browser_use ' +
+    "first, cascading automatically through steel, then brightdata, then anchorbrowser if an earlier provider's " +
+    'account itself is unavailable, e.g. out of quota). ' +
     'For best results, make `task` as specific and self-contained as possible -- name the exact site/URL, the exact ' +
     'field values or button labels to use, and what "done" looks like -- rather than a vague goal; the steel/brightdata ' +
     "lanes plan one raw action at a time from just this text plus what's visible on the page, so ambiguity there " +
@@ -1155,17 +1168,19 @@ export const browserUse = {
           'valid for browser_use/steel sessions -- brightdata sessions are one-shot and cannot be resumed. Omit to start a brand new session.',
       ),
     provider: z
-      .enum(['browser_use', 'steel', 'brightdata'])
+      .enum(['browser_use', 'steel', 'brightdata', 'anchorbrowser'])
       .optional()
       .describe(
         'Force a specific provider for a NEW session: "browser_use" (fully agentic, hands-off -- its own agent plans and executes the whole task), ' +
-          '"steel" (a raw remote Chrome, driven one action at a time by this tool, resumable via session_id), or "brightdata" (another raw remote ' +
-          "Chrome driven the same way, but ONE-SHOT ONLY -- no session_id follow-up). Omit to auto-pick (tries browser_use first, falls back to " +
-          "steel automatically if browser_use's account can't run anything right now, e.g. out of quota). Ignored when session_id is given -- a " +
-          "follow-up always reuses that session's existing provider.",
+          '"steel" (a raw remote Chrome, driven one action at a time by this tool, resumable via session_id), "brightdata" (another raw remote ' +
+          'Chrome driven the same way, but ONE-SHOT ONLY -- no session_id follow-up, though it has two independent zones so two can run at once), ' +
+          'or "anchorbrowser" (fully agentic like browser_use, its own agent plans and executes the task, resumable via session_id). Omit to ' +
+          "auto-pick (tries browser_use first, cascading through steel, then brightdata, then anchorbrowser if an earlier provider's account can't " +
+          "run anything right now, e.g. out of quota). Ignored when session_id is given -- a follow-up always reuses that session's existing " +
+          'provider.',
       ),
   }),
-  async execute({ task, session_id, provider }: { task: string; session_id?: string; provider?: 'browser_use' | 'steel' | 'brightdata' }, ctx: ToolExecCtx) {
+  async execute({ task, session_id, provider }: { task: string; session_id?: string; provider?: 'browser_use' | 'steel' | 'brightdata' | 'anchorbrowser' }, ctx: ToolExecCtx) {
     const chatId = ctx.session.id;
 
     let row: SessionRow | null = null;
@@ -1181,12 +1196,14 @@ export const browserUse = {
           ? { provider: 'steel', slot: 1 }
           : existing.provider === 'brightdata'
             ? { provider: 'brightdata', slot: existing.slot as 1 | 2 }
-            : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
+            : existing.provider === 'anchorbrowser'
+              ? { provider: 'anchorbrowser', slot: 1 }
+              : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
     } else {
       lane = await pickFreeLane(chatId, provider);
     }
 
-    let fellBackTo: 'steel' | 'brightdata' | null = null;
+    let fellBackTo: 'steel' | 'brightdata' | 'anchorbrowser' | null = null;
     let fellBackToBrightDataSlot: 1 | 2 | null = null;
 
     if (lane.provider === 'browser_use') {
@@ -1252,11 +1269,18 @@ export const browserUse = {
               : 2
             : 1
           : null;
+        // Anchor Browser (2026-07-25) is the last tier of the cascade --
+        // checked only once neither Steel nor Bright Data are free.
+        const anchorbrowserFree =
+          !session_id &&
+          (await prisma.chatBrowserSession.count({ where: { chatId, provider: 'anchorbrowser', slot: 1, status: { in: ['running', 'idle'] } } })) === 0;
         if (!session_id && isProviderUnavailableError(err) && steelFree) {
           fellBackTo = 'steel';
         } else if (!session_id && isProviderUnavailableError(err) && brightdataFreeSlot !== null) {
           fellBackTo = 'brightdata';
           fellBackToBrightDataSlot = brightdataFreeSlot;
+        } else if (!session_id && isProviderUnavailableError(err) && anchorbrowserFree) {
+          fellBackTo = 'anchorbrowser';
         } else {
           throw err;
         }
@@ -1264,10 +1288,15 @@ export const browserUse = {
 
       if (fellBackTo) {
         row = null;
-        lane = fellBackTo === 'brightdata' ? { provider: 'brightdata', slot: fellBackToBrightDataSlot! } : { provider: 'steel', slot: 1 };
-        // Falls through to the Steel/Bright Data section below --
-        // deliberately no `return` here, this is the one case where lane
-        // switches mid-call.
+        lane =
+          fellBackTo === 'brightdata'
+            ? { provider: 'brightdata', slot: fellBackToBrightDataSlot! }
+            : fellBackTo === 'anchorbrowser'
+              ? { provider: 'anchorbrowser', slot: 1 }
+              : { provider: 'steel', slot: 1 };
+        // Falls through to the Steel/Bright Data/Anchor Browser section
+        // below -- deliberately no `return` here, this is the one case
+        // where lane switches mid-call.
       } else {
         const finalResult = laneResult!;
         row = (await prisma.chatBrowserSession.update({
@@ -1370,17 +1399,75 @@ export const browserUse = {
     // --- Bright Data lane (one-shot: always runs the task to completion in
     // this same call, then closes -- see brightdata-client.ts's doc comment
     // for why no session_id follow-up is offered here) ---
-    const bdSlot: 1 | 2 = lane.provider === 'brightdata' ? lane.slot : 1;
-    if (!row) {
+    if (lane.provider === 'brightdata') {
+      const bdSlot: 1 | 2 = lane.slot;
+      if (!row) {
+        row = (await prisma.chatBrowserSession.create({
+          data: { chatId, provider: 'brightdata', slot: bdSlot, providerSessionId: `brightdata-${Date.now()}`, task, status: 'running', steps: [] },
+        })) as SessionRow;
+      }
+
+      const llmModelBd = await model('openai/gpt-4o-mini', ctx?.byokModel);
+      let bdResult: Awaited<ReturnType<typeof runBrightDataLane>>;
+      try {
+        bdResult = await runBrightDataLane({ task, llmModel: llmModelBd, rowId: row.id, priorSteps: row.steps, slot: bdSlot });
+      } catch (err) {
+        await prisma.chatBrowserSession.update({ where: { id: row.id }, data: { status: 'failed' } }).catch(() => {});
+        throw err;
+      }
+
+      row = (await prisma.chatBrowserSession.update({
+        where: { id: row.id },
+        // Always 'stopped', not 'idle' -- there is nothing left alive to
+        // reconnect to once this call returns, so the lane should free up
+        // immediately for the next brightdata task (see the one-shot note
+        // in the tool description above).
+        data: { task, status: 'stopped', output: bdResult.output, isTaskSuccessful: bdResult.isTaskSuccessful, liveUrl: bdResult.liveUrl ?? row.liveUrl },
+      })) as SessionRow;
+
+      const bdFallbackNote =
+        fellBackTo === 'brightdata' ? 'Note: browser_use and Steel are both unavailable right now (e.g. out of quota), so this ran on the Bright Data browser lane instead. ' : '';
+
+      return {
+        status: bdResult.isTaskSuccessful === false ? 'failed' : 'finished',
+        steps: [],
+        screenshotUrl: bdResult.screenshotUrl,
+        markdown: bdFallbackNote + (bdResult.output ?? ''),
+        sessionId: row.id,
+        liveUrl: row.liveUrl,
+        recordingUrl: null,
+        provider: 'brightdata',
+      };
+    }
+
+    // --- Anchor Browser lane (fully agentic, like browser_use, but a much
+    // simpler resumable shape: one synchronous HTTP call per task instead
+    // of a polling loop, since Anchor's own agent runs the whole task
+    // server-side and returns the final result directly -- see
+    // anchorbrowser-client.ts's doc comment) ---
+    let anchorSessionId: string;
+    let anchorLiveUrl: string | null;
+    if (row) {
+      anchorSessionId = row.providerSessionId;
+      anchorLiveUrl = row.liveUrl;
+    } else {
+      const session = await createAnchorSession();
+      anchorSessionId = session.id;
+      anchorLiveUrl = session.liveViewUrl;
       row = (await prisma.chatBrowserSession.create({
-        data: { chatId, provider: 'brightdata', slot: bdSlot, providerSessionId: `brightdata-${Date.now()}`, task, status: 'running', steps: [] },
+        data: { chatId, provider: 'anchorbrowser', slot: 1, providerSessionId: anchorSessionId, task, status: 'running', liveUrl: anchorLiveUrl, steps: [] },
       })) as SessionRow;
     }
 
-    const llmModelBd = await model('openai/gpt-4o-mini', ctx?.byokModel);
-    let bdResult: Awaited<ReturnType<typeof runBrightDataLane>>;
+    let anchorResult: Awaited<ReturnType<typeof performAnchorWebTask>>;
     try {
-      bdResult = await runBrightDataLane({ task, llmModel: llmModelBd, rowId: row.id, priorSteps: row.steps, slot: bdSlot });
+      // No separate `url` passed -- same as the browser_use lane, this
+      // relies entirely on `task`'s own text to name the destination
+      // (see the tool description's "name the exact site/URL" guidance),
+      // which also means a follow-up naturally continues from whatever
+      // page the prior task left the session on if `task` doesn't repeat
+      // a URL.
+      anchorResult = await performAnchorWebTask({ prompt: task, sessionId: anchorSessionId });
     } catch (err) {
       await prisma.chatBrowserSession.update({ where: { id: row.id }, data: { status: 'failed' } }).catch(() => {});
       throw err;
@@ -1388,24 +1475,26 @@ export const browserUse = {
 
     row = (await prisma.chatBrowserSession.update({
       where: { id: row.id },
-      // Always 'stopped', not 'idle' -- there is nothing left alive to
-      // reconnect to once this call returns, so the lane should free up
-      // immediately for the next brightdata task (see the one-shot note
-      // in the tool description above).
-      data: { task, status: 'stopped', output: bdResult.output, isTaskSuccessful: bdResult.isTaskSuccessful, liveUrl: bdResult.liveUrl ?? row.liveUrl },
+      data: { task, status: 'idle', output: anchorResult.output, isTaskSuccessful: anchorResult.isTaskSuccessful },
     })) as SessionRow;
 
-    const bdFallbackNote = fellBackTo === 'brightdata' ? 'Note: browser_use and Steel are both unavailable right now (e.g. out of quota), so this ran on the Bright Data browser lane instead. ' : '';
+    const anchorFallbackNote =
+      fellBackTo === 'anchorbrowser'
+        ? 'Note: browser_use, Steel and Bright Data are all unavailable right now (e.g. out of quota), so this ran on the Anchor Browser lane instead. '
+        : '';
 
     return {
-      status: bdResult.isTaskSuccessful === false ? 'failed' : 'finished',
+      status: anchorResult.isTaskSuccessful === false ? 'failed' : 'finished',
       steps: [],
-      screenshotUrl: bdResult.screenshotUrl,
-      markdown: bdFallbackNote + (bdResult.output ?? ''),
+      screenshotUrl: null,
+      markdown:
+        anchorFallbackNote +
+        (anchorResult.output ??
+          (anchorResult.isTaskSuccessful ? 'Task completed.' : 'The task did not complete successfully.')),
       sessionId: row.id,
       liveUrl: row.liveUrl,
       recordingUrl: null,
-      provider: 'brightdata',
+      provider: 'anchorbrowser',
     };
   },
 };

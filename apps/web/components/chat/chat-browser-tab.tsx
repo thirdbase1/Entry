@@ -55,7 +55,10 @@ interface BrowserSessionEntry {
 
 function providerLabel(provider: string, slot: number): string {
   if (provider === 'steel') return 'Steel';
-  if (provider === 'brightdata') return 'Bright Data';
+  // Bright Data now has two independent zones (2026-07-24) -- show which
+  // one, same as Browser Use's own two slots below.
+  if (provider === 'brightdata') return `Bright Data (${slot})`;
+  if (provider === 'anchorbrowser') return 'Anchor Browser'; // added 2026-07-25
   return `Browser Use (${slot})`;
 }
 

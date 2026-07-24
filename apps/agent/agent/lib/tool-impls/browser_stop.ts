@@ -5,6 +5,7 @@ import { safeExecute } from './safe-execute.js';
 import { withAgentTimeout } from './with-agent-timeout.js';
 import { stopBrowserUseSession, type BrowserUseSlot } from '../browser-use-cloud-client.js';
 import { stopSteelSession } from '../steel-client.js';
+import { endAnchorSession } from '../anchorbrowser-client.js';
 
 /**
  * ADDED (2026-07-16) alongside browser_use.ts's rewrite -- explicit user
@@ -43,7 +44,7 @@ export const browserStop = {
     if (row.status === 'stopped') {
       return { stopped: true, alreadyStopped: true, sessionId: session_id };
     }
-    const taskOnly = Boolean(cancel_task_only) && row.provider !== 'steel' && row.provider !== 'brightdata';
+    const taskOnly = Boolean(cancel_task_only) && row.provider !== 'steel' && row.provider !== 'brightdata' && row.provider !== 'anchorbrowser';
     try {
       if (row.provider === 'steel') {
         await stopSteelSession(row.providerSessionId);
@@ -54,6 +55,11 @@ export const browserStop = {
         // closes its own connection and marks the row 'stopped' before its
         // tool call returns; see browser_use.ts's brightdata dispatch).
         // Nothing provider-side to call.
+      } else if (row.provider === 'anchorbrowser') {
+        // ADDED (2026-07-25) -- Anchor Browser sessions stay alive across
+        // calls (unlike Bright Data), so unlike that lane there IS a real
+        // session to tear down here; mirrors Steel's release call.
+        await endAnchorSession(row.providerSessionId);
       } else {
         await stopBrowserUseSession(row.slot as BrowserUseSlot, row.providerSessionId, taskOnly ? 'task' : 'session');
       }
