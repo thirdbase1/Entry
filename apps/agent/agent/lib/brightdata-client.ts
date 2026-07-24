@@ -6,6 +6,16 @@ import { chromium, type Browser, type Page } from 'playwright-core';
  * (a Puppeteer/Playwright/Selenium-compatible CDP endpoint) and asked
  * for it to be "integrated as another provider."
  *
+ * EXPANDED (2026-07-24) -- explicit user request: added a SECOND Bright
+ * Data zone ("browser2") as a second, fully independent slot, so two
+ * Bright Data sessions can now run at once for the same chat (previously
+ * only one). Each zone is its own static CDP credential -- there is no
+ * shared state between them, they're just two separate Bright Data
+ * "scraping_browser" zones on the same account. `slot` (1 or 2) below
+ * picks which zone's `BRIGHTDATA_CDP_URL[_2]` env var to connect to; the
+ * tool layer (browser_use.ts) now treats brightdata as a 2-slot provider
+ * the exact same way it already treated browser_use's own two slots."
+ *
  * Bright Data's Browser API is architecturally DIFFERENT from both
  * existing lanes, not just a third copy of one of them:
  *   - Browser Use Cloud: a REST API that creates/tracks a session by id,
@@ -39,14 +49,15 @@ import { chromium, type Browser, type Page } from 'playwright-core';
  * extra API calls beyond what's already open.
  */
 
-function cdpUrl(): string {
-  const url = process.env.BRIGHTDATA_CDP_URL;
-  if (!url) throw new Error('BRIGHTDATA_CDP_URL is not set -- cannot use the Bright Data browser lane.');
+function cdpUrl(slot: 1 | 2 = 1): string {
+  const envVar = slot === 2 ? 'BRIGHTDATA_CDP_URL_2' : 'BRIGHTDATA_CDP_URL';
+  const url = process.env[envVar];
+  if (!url) throw new Error(`${envVar} is not set -- cannot use Bright Data browser lane (zone ${slot}).`);
   return url;
 }
 
-export async function connectBrightDataBrowser(): Promise<Browser> {
-  return chromium.connectOverCDP(cdpUrl());
+export async function connectBrightDataBrowser(slot: 1 | 2 = 1): Promise<Browser> {
+  return chromium.connectOverCDP(cdpUrl(slot));
 }
 
 /** Chrome DevTools inspect URL for a specific page -- Bright Data's real-time live-view mechanism (no single embeddable liveUrl exists at the session level like the other two providers have). Returns null if it can't be fetched (never fails the caller over a missing live view). */

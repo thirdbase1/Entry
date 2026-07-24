@@ -92,12 +92,17 @@ const WALL_CLOCK_BUDGET_MS = 60_000;
 const MAX_STEEL_STEPS = 20;
 const MAX_STEPS_STORED = 200;
 
-type Lane = { provider: 'browser_use'; slot: BrowserUseSlot } | { provider: 'steel'; slot: 1 } | { provider: 'brightdata'; slot: 1 };
+type Lane = { provider: 'browser_use'; slot: BrowserUseSlot } | { provider: 'steel'; slot: 1 } | { provider: 'brightdata'; slot: 1 | 2 };
 
 const LANES: Lane[] = [
   { provider: 'browser_use', slot: 1 },
   { provider: 'steel', slot: 1 },
   { provider: 'brightdata', slot: 1 },
+  // Second Bright Data zone (2026-07-24, explicit user request: "add
+  // another bright data v2 to the browser use") -- a fully independent
+  // CDP credential (BRIGHTDATA_CDP_URL_2), so this chat can now run TWO
+  // Bright Data sessions in parallel instead of one.
+  { provider: 'brightdata', slot: 2 },
 ];
 
 type SessionRow = {
@@ -864,13 +869,14 @@ async function runBrightDataLane(params: {
   llmModel: Parameters<typeof generateObject>[0]['model'];
   rowId: string;
   priorSteps: unknown;
+  slot: 1 | 2;
 }): Promise<{
   output: string | null;
   screenshotUrl: string | null;
   isTaskSuccessful: boolean | null;
   liveUrl: string | null;
 }> {
-  const browser = await connectBrightDataBrowser();
+  const browser = await connectBrightDataBrowser(params.slot);
   let steps = params.priorSteps;
   let liveUrl: string | null = null;
   try {
@@ -1123,10 +1129,14 @@ export const browserUse = {
     'in the SAME browser (same cookies/tabs/page state) instead of starting fresh; call browser_stop when genuinely ' +
     'finished with one of those. brightdata is different: it is ONE-SHOT ONLY -- the task runs to completion (or its ' +
     'step limit) and the browser closes at the end of this same call, no session_id follow-up is supported for it ' +
-    '(the underlying provider has no way to reattach to an already-open browser instance). Up to three sessions can ' +
-    'run in parallel for this chat, one per cloud browser provider -- pass `provider` to pick which one for a NEW ' +
-    'session (defaults to trying browser_use first, cascading automatically through steel then brightdata if an ' +
-    "earlier provider's account itself is unavailable, e.g. out of quota). " +
+    '(the underlying provider has no way to reattach to an already-open browser instance). brightdata also has TWO ' +
+    'independent zones/credentials under the hood (added 2026-07-24), so up to two brightdata tasks can run at the ' +
+    'same time for this chat, not just one -- e.g. scrape two different sites in parallel by calling browser_use ' +
+    'twice with provider: "brightdata" without waiting for the first to finish; the tool picks whichever zone is ' +
+    'free automatically, no extra parameter needed to choose between them. Up to FOUR sessions total can run in ' +
+    'parallel for this chat (browser_use + steel + the two brightdata zones) -- pass `provider` to pick which ' +
+    'provider for a NEW session (defaults to trying browser_use first, cascading automatically through steel then ' +
+    "brightdata if an earlier provider's account itself is unavailable, e.g. out of quota). " +
     'For best results, make `task` as specific and self-contained as possible -- name the exact site/URL, the exact ' +
     'field values or button labels to use, and what "done" looks like -- rather than a vague goal; the steel/brightdata ' +
     "lanes plan one raw action at a time from just this text plus what's visible on the page, so ambiguity there " +
@@ -1170,13 +1180,14 @@ export const browserUse = {
         existing.provider === 'steel'
           ? { provider: 'steel', slot: 1 }
           : existing.provider === 'brightdata'
-            ? { provider: 'brightdata', slot: 1 }
+            ? { provider: 'brightdata', slot: existing.slot as 1 | 2 }
             : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
     } else {
       lane = await pickFreeLane(chatId, provider);
     }
 
     let fellBackTo: 'steel' | 'brightdata' | null = null;
+    let fellBackToBrightDataSlot: 1 | 2 | null = null;
 
     if (lane.provider === 'browser_use') {
       // Create the row up front (before the lane even starts polling) so
@@ -1224,13 +1235,28 @@ export const browserUse = {
         const steelFree =
           !session_id &&
           (await prisma.chatBrowserSession.count({ where: { chatId, provider: 'steel', slot: 1, status: { in: ['running', 'idle'] } } })) === 0;
-        const brightdataFree =
-          !session_id &&
-          (await prisma.chatBrowserSession.count({ where: { chatId, provider: 'brightdata', slot: 1, status: { in: ['running', 'idle'] } } })) === 0;
+        // Bright Data now has TWO independent zones/slots (2026-07-24) --
+        // "free" means at least one of the two is unused, not just slot 1.
+        const brightdataActiveSlots = !session_id
+          ? (
+              await prisma.chatBrowserSession.findMany({
+                where: { chatId, provider: 'brightdata', status: { in: ['running', 'idle'] } },
+                select: { slot: true },
+              })
+            ).map(r => r.slot)
+          : [];
+        const brightdataFreeSlot: 1 | 2 | null = !session_id
+          ? brightdataActiveSlots.includes(1)
+            ? brightdataActiveSlots.includes(2)
+              ? null
+              : 2
+            : 1
+          : null;
         if (!session_id && isProviderUnavailableError(err) && steelFree) {
           fellBackTo = 'steel';
-        } else if (!session_id && isProviderUnavailableError(err) && brightdataFree) {
+        } else if (!session_id && isProviderUnavailableError(err) && brightdataFreeSlot !== null) {
           fellBackTo = 'brightdata';
+          fellBackToBrightDataSlot = brightdataFreeSlot;
         } else {
           throw err;
         }
@@ -1238,7 +1264,7 @@ export const browserUse = {
 
       if (fellBackTo) {
         row = null;
-        lane = { provider: fellBackTo, slot: 1 };
+        lane = fellBackTo === 'brightdata' ? { provider: 'brightdata', slot: fellBackToBrightDataSlot! } : { provider: 'steel', slot: 1 };
         // Falls through to the Steel/Bright Data section below --
         // deliberately no `return` here, this is the one case where lane
         // switches mid-call.
@@ -1344,16 +1370,17 @@ export const browserUse = {
     // --- Bright Data lane (one-shot: always runs the task to completion in
     // this same call, then closes -- see brightdata-client.ts's doc comment
     // for why no session_id follow-up is offered here) ---
+    const bdSlot: 1 | 2 = lane.provider === 'brightdata' ? lane.slot : 1;
     if (!row) {
       row = (await prisma.chatBrowserSession.create({
-        data: { chatId, provider: 'brightdata', slot: 1, providerSessionId: `brightdata-${Date.now()}`, task, status: 'running', steps: [] },
+        data: { chatId, provider: 'brightdata', slot: bdSlot, providerSessionId: `brightdata-${Date.now()}`, task, status: 'running', steps: [] },
       })) as SessionRow;
     }
 
     const llmModelBd = await model('openai/gpt-4o-mini', ctx?.byokModel);
     let bdResult: Awaited<ReturnType<typeof runBrightDataLane>>;
     try {
-      bdResult = await runBrightDataLane({ task, llmModel: llmModelBd, rowId: row.id, priorSteps: row.steps });
+      bdResult = await runBrightDataLane({ task, llmModel: llmModelBd, rowId: row.id, priorSteps: row.steps, slot: bdSlot });
     } catch (err) {
       await prisma.chatBrowserSession.update({ where: { id: row.id }, data: { status: 'failed' } }).catch(() => {});
       throw err;
