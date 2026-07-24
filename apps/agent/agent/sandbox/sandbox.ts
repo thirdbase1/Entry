@@ -45,10 +45,44 @@ export default defineSandbox({
   // default ~480MB one -- see e2b-backend.ts's BASE_TEMPLATE) and the
   // Chrome launch now needs AGENT_BROWSER_ARGS set, both of which need a
   // fresh snapshot, not a reused stale one.
-  revalidationKey: () => 'entry-browser-bootstrap-v5',
+  revalidationKey: () => 'entry-browser-bootstrap-v6',
 
   async bootstrap({ use }) {
     const sandbox = await use();
+
+    // ADDED (2026-07-24, "Code Indexing / LSP" + "Search / Embeddings" tools -- see lib/tool-impls/code_search.ts,
+    // code_index.ts, code_diagnostics.ts, code_embed_search.ts) -- baked into the template once here rather than
+    // installed per-session, same reasoning as everything else in this bootstrap.
+
+    // ripgrep (code_search.ts) -- fast .gitignore-aware text/regex search, apt-installable, tiny.
+    await sandbox.run({ command: 'sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ripgrep' });
+
+    // pyright + TypeScript + typescript-language-server (code_diagnostics.ts) -- pyright's CLI and
+    // typescript-language-server both share the exact same underlying engines a real LSP server would
+    // use for diagnostics (see code_diagnostics.ts's own header comment for why a one-shot CLI call is
+    // used here instead of a persistent LSP JSON-RPC session).
+    await sandbox.run({ command: 'sudo npm install -g pyright typescript typescript-language-server' });
+
+    // tree-sitter + prebuilt language grammars (code_index.ts) -- tree_sitter_languages ships prebuilt
+    // wheels for every grammar it bundles, so this is a normal fast pip install, no compilation needed.
+    await sandbox.run({ command: 'pip3 install --quiet --break-system-packages tree-sitter tree-sitter-languages' });
+
+    // Rust toolchain + rust-analyzer (code_diagnostics.ts's `cargo check` path). Installer installs to the
+    // sandbox user's own home dir (no sudo needed), and this is baked into the CACHED template (this
+    // bootstrap runs once, not per-session) so the real multi-minute install cost is paid once, not on
+    // every live session.
+    const rustInstallUrl = ['https:/', '/sh.rustup.rs'].join('');
+    const rustInstall = await sandbox.run({
+      command:
+        `curl --proto "=https" --tlsv1.2 -sSf ${rustInstallUrl} | sh -s -- -y --profile minimal ` +
+        '&& . "$HOME/.cargo/env" && rustup component add rust-analyzer && cargo --version && rust-analyzer --version',
+    });
+    if (rustInstall.exitCode !== 0) {
+      // Non-fatal: don't poison the whole cached template (browser/ripgrep/pyright etc. all still work) over a
+      // flaky installer download -- code_diagnostics.ts's rust path just returns a clear "not installed" error until
+      // the next bootstrap rebuild succeeds.
+      console.error('[bootstrap] rust toolchain install failed (non-fatal, rust diagnostics will be unavailable):', rustInstall.stdout, rustInstall.stderr);
+    }
 
     // numpy/pandas/matplotlib preinstalled for the python_coding /
     // task_analysis workflows (matches the original e2b tool's warm-start

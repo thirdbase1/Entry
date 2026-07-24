@@ -14,6 +14,12 @@ import { codeArtifact } from './code_artifact.js';
 import { pythonCoding } from './python_coding.js';
 import { browserUse } from './browser_use.js';
 import { browserStop } from './browser_stop.js';
+import { agentChannel } from './agent_channel.js';
+import { codeSearch } from './code_search.js';
+import { codeIndex } from './code_index.js';
+import { codeDiagnostics } from './code_diagnostics.js';
+import { codeEmbedSearch } from './code_embed_search.js';
+import { Sandbox as E2BSandbox } from 'e2b';
 import { safeExecute } from './safe-execute.js';
 import { withTransientRetry } from '../transient-provider-error.js';
 import { withTimeoutSignal } from './with-timeout-signal.js';
@@ -152,6 +158,56 @@ const AgentDelegateInputSchema = z.object({
       'Optional explicit wall-clock ceiling for this whole delegated subtask, in seconds -- overrides the default budget-derived timeout ' +
         '(which scales with maxSteps, up to 600s/10min) when given. Set this directly for a subtask you know needs a specific amount of time.'
     ),
+  // ADDED (2026-07-24, "Task-Scoped Tool Restricting"): a bounded subtask often only needs a small slice of the full
+  // delegate tool set -- e.g. a pure research delegate never needs bash/write_file at all. Restricting the set (a) is a real
+  // safety boundary for untrusted/generated instructions flowing into a delegated subtask (a research-only delegate literally
+  // cannot run shell commands if bash isn't in this list), and (b) reduces execution noise/latency (fewer tool schemas in the
+  // sub-agent's own context). Omit to keep the full default set (unchanged behavior).
+  allowedTools: z
+    .array(z.enum(["web_search", "web_crawl", "bash", "list_files", "write_file", "edit_file", "append_file", "code_artifact", "python_coding", "browser_use", "browser_stop", "agent_channel", "code_search", "code_index", "code_diagnostics", "code_embed_search"]))
+    .optional()
+    .describe(
+      'Restrict this delegate to ONLY this list of tool names (e.g. ["web_search", "web_crawl"] for a read-only research delegate ' +
+        'with no sandbox/shell access at all). Omit to give the delegate the full default tool set.'
+    ),
+  // ADDED (2026-07-24, "Ephemeral Sandbox Branching"): risky work (aggressive dependency upgrades, exploratory refactors,
+  // "try rewriting this and see if it still builds") run against the SAME live sandbox as the parent turn by default -- a bad
+  // outcome is real, persisted damage to the user's actual project. Setting this creates an isolated E2B snapshot-forked copy
+  // of the current sandbox first and runs the whole delegated subtask against THAT copy instead -- the parent's real sandbox is
+  // never touched. Returns the branched sandbox's id in the result so a human/parent can inspect it or explicitly bring changes
+  // back over (e.g. via bash reading files from it) once the risky work is verified.
+  isolated: z
+    .boolean()
+    .optional()
+    .describe(
+      'Set true to run this subtask in an ISOLATED branch of the current sandbox (an E2B snapshot fork) instead of the live one -- ' +
+        'use this for risky/exploratory work (aggressive refactors, dependency upgrade experiments, "try this and see if it breaks") ' +
+        'so a bad outcome never touches the real project. Only meaningful when this turn is running on the e2b sandbox backend; a ' +
+        'note is returned instead of an error if branching is not available. Defaults to false (runs in the live shared sandbox, same ' +
+        'as before).'
+    ),
+  // ADDED (2026-07-24, "Direct Inter-Agent Channels"): pass the SAME channel_id to two or more delegated sub-agents (in
+  // separate agent tool calls) so they can hand each other structured data mid-task via the agent_channel tool, without either
+  // one seeing the other's conversation. Purely informational here -- it just gets mentioned in this delegate's own instructions
+  // so it knows to actually use agent_channel with this id; the real mechanism is the agent_channel tool itself.
+  channel_id: z
+    .string()
+    .optional()
+    .describe(
+      'Optional shared channel name to tell this delegate about (e.g. "api-contract") -- it will be told to use the agent_channel ' +
+        'tool with this id to coordinate with another concurrently-delegated sub-agent using the same id.'
+    ),
+});
+
+// ADDED (2026-07-24, "Standardized Artifact Return Schemas"): a plain-text `result` forces the parent model to re-parse
+// prose to pull out anything structured (a file patch, a JSON summary, a list of findings) the delegate produced --
+// wasteful and error-prone at both ends. `artifacts` is optional, additive structured output alongside the existing
+// `result` text (never a replacement -- `result` stays the human-readable summary either way).
+const AgentArtifactSchema = z.object({
+  type: z.enum(['patch', 'json', 'summary', 'file']),
+  path: z.string().optional().describe('Relevant file path, if this artifact is about one specific file (e.g. type "patch" or "file").'),
+  content: z.string().describe('The artifact content itself -- a unified diff for "patch", a JSON string for "json", plain text for "summary"/"file".'),
+  description: z.string().optional(),
 });
 
 const AgentDelegateResultSchema = z.object({
@@ -160,23 +216,54 @@ const AgentDelegateResultSchema = z.object({
   stepsTaken: z.number(),
   truncated: z.boolean().optional(),
   note: z.string().optional(),
+  // Structured output objects the sub-agent explicitly emitted (see SUBAGENT_SYSTEM_PROMPT's ```agent-artifact convention) --
+  // absent entirely when the delegate didn't produce any, so existing callers reading only `result` see no shape change.
+  artifacts: z.array(AgentArtifactSchema).optional(),
+  // ADDED (2026-07-24, "Real-Time Telemetry and Intermediate Callbacks"): a bounded log of what happened at each step
+  // (tool called + a short outcome summary), captured via generateText's own onStepFinish as the subtask runs -- not truly
+  // "live"/streamed to the parent mid-flight (this tool call itself only resolves once, like any other tool result), but it
+  // gives the parent real visibility into HOW a multi-step delegation got to its result instead of just the final text, and is
+  // a building block for a future live-streaming version (the per-step data already exists here, just batched instead of
+  // streamed).
+  progressLog: z.array(z.string()).optional(),
+  // ADDED (2026-07-24, "Ephemeral Sandbox Branching"): present only when `isolated: true` was requested and branching
+  // actually happened -- the id of the forked sandbox the subtask ran in, so a human or the parent can inspect it directly
+  // (e.g. "bash: read file X from sandbox <id>") or decide to bring specific changes back over.
+  isolatedSandboxId: z.string().optional(),
 });
 
-const SUBAGENT_SYSTEM_PROMPT =
-  'You are a focused sub-agent completing ONE delegated task for a parent AI agent. You do not see the parent conversation — ' +
-  'only the task message you were given. Answer completely and directly; your entire reply is returned as-is to the parent, ' +
-  'which will use it to continue helping its own user. ' +
-  // IMPROVED (2026-07-18, "give sub agent tools too, use best judgement"): previously only had web_search/web_crawl, so any
-  // delegated task needing real execution (run this, edit that file, drive a browser) had no way to actually do it -- it could
-  // only ever describe what SHOULD happen, not make it happen. Added the tools that fit a bounded, isolated subtask with no
-  // broader context of its own; see this file's runDelegatedTask for the full tool set + what was deliberately left out and why.
-  'You also have bash, list_files/write_file/edit_file/append_file, code_artifact, python_coding, web_search/web_crawl, and ' +
-  'browser_use/browser_stop. IMPORTANT: bash/file/browser tools run in the SAME live sandbox as the parent turn\'s ongoing project ' +
-  '-- any file you write or command you run is real and persists, not an isolated scratch copy. If you start a browser_use ' +
-  'session, always call browser_stop when you are done with it (or before finishing if you still have one open), so it is not ' +
-  'left running/billing after your task ends. ' +
-  "If you're running low on remaining steps and won't finish in time, don't trail off mid-thought — stop and clearly summarize what you " +
-  "did complete, what's still left, and what the parent should do next (e.g. re-delegate the remainder with your partial result as context).";
+function buildSubagentSystemPrompt(opts: { isolated?: boolean; channelId?: string }): string {
+  let prompt =
+    'You are a focused sub-agent completing ONE delegated task for a parent AI agent. You do not see the parent conversation — ' +
+    'only the task message you were given. Answer completely and directly; your entire reply is returned as-is to the parent, ' +
+    'which will use it to continue helping its own user. ' +
+    'You also have bash, list_files/write_file/edit_file/append_file, code_artifact, python_coding, web_search/web_crawl, ' +
+    'browser_use/browser_stop, code_search (fast ripgrep text/regex search), code_index (tree-sitter structural file outline: ' +
+    'functions/classes/methods with real line numbers), code_diagnostics (real tsc/pyright/cargo-check compiler diagnostics), and ' +
+    'code_embed_search (semantic "by meaning" code search -- index a path once, then search it by natural language). ' +
+    'IMPORTANT: bash/file/browser tools run in the SAME live sandbox as the parent turn\'s ongoing project ' +
+    '-- any file you write or command you run is real and persists, not an isolated scratch copy' +
+    (opts.isolated
+      ? ', EXCEPT this specific task, which is running in an ISOLATED BRANCHED COPY of that sandbox -- changes here are ' +
+        'safe experiments and will NOT automatically affect the real project unless the parent explicitly pulls them back over. ' +
+        'Say so clearly in your result if you made changes worth keeping.'
+      : '.') +
+    ' If you start a browser_use session, always call browser_stop when you are done with it (or before finishing if you still ' +
+    'have one open), so it is not left running/billing after your task ends. ' +
+    "If you're running low on remaining steps and won't finish in time, don't trail off mid-thought — stop and clearly summarize what you " +
+    "did complete, what's still left, and what the parent should do next (e.g. re-delegate the remainder with your partial result as context). " +
+    'If your task produces something structured worth returning as data (a file patch/diff, a JSON object, a distinct list of findings) ' +
+    'in ADDITION to your normal text answer, end your reply with one or more fenced blocks like:\n' +
+    '```agent-artifact\n{"type": "patch" | "json" | "summary" | "file", "path": "optional/file/path", "content": "...", "description": "optional"}\n```\n' +
+    'This is OPTIONAL -- only do it when there is genuinely something structured to hand back, never as a substitute for a real text answer.';
+  if (opts.channelId) {
+    prompt +=
+      ` You have access to a shared channel named "${opts.channelId}" via the agent_channel tool -- use it to read/write/append ` +
+      'structured data another concurrently-delegated sub-agent using the same channel_id may be reading or writing, to coordinate ' +
+      'without going back through the parent.';
+  }
+  return prompt;
+}
 
 function isTruncatedFinish(steps: { finishReason?: string }[], maxSteps: number): boolean {
   if (steps.length < maxSteps) return false;
@@ -333,21 +420,103 @@ function ctxTool<TArgs>(impl: { description: string; inputSchema: unknown; execu
  *     task -- adding a nested planner on top is extra cost/latency without
  *     a matching benefit at this scope.
  */
-function delegateTools(ctx: ToolExecCtx | undefined) {
+function delegateTools(ctx: ToolExecCtx | undefined, allowedTools?: string[]) {
   const base = { web_search: tool(webSearch as any), web_crawl: tool(webCrawl as any) };
-  if (!ctx) return base; // defensive: ctx-dependent tools need a real sandbox/session to bind to
-  return {
-    ...base,
-    bash: ctxTool(bash, ctx),
-    list_files: ctxTool(listFilesTool, ctx),
-    write_file: ctxTool(writeFileTool, ctx),
-    edit_file: ctxTool(editFileTool, ctx),
-    append_file: ctxTool(appendFileTool, ctx),
-    code_artifact: ctxTool(codeArtifact, ctx),
-    python_coding: ctxTool(pythonCoding, ctx),
-    browser_use: ctxTool(browserUse, ctx),
-    browser_stop: ctxTool(browserStop, ctx),
-  };
+  const full = !ctx
+    ? base // defensive: ctx-dependent tools need a real sandbox/session to bind to
+    : {
+        ...base,
+        bash: ctxTool(bash, ctx),
+        list_files: ctxTool(listFilesTool, ctx),
+        write_file: ctxTool(writeFileTool, ctx),
+        edit_file: ctxTool(editFileTool, ctx),
+        append_file: ctxTool(appendFileTool, ctx),
+        code_artifact: ctxTool(codeArtifact, ctx),
+        python_coding: ctxTool(pythonCoding, ctx),
+        browser_use: ctxTool(browserUse, ctx),
+        browser_stop: ctxTool(browserStop, ctx),
+        agent_channel: ctxTool(agentChannel, ctx),
+        code_search: ctxTool(codeSearch, ctx),
+        code_index: ctxTool(codeIndex, ctx),
+        code_diagnostics: ctxTool(codeDiagnostics, ctx),
+        code_embed_search: ctxTool(codeEmbedSearch, ctx),
+      };
+  // ADDED (2026-07-24, "Task-Scoped Tool Restricting"): filter down to only the caller-requested subset when given -- see
+  // AgentDelegateInputSchema's `allowedTools` field for the rationale. An unknown/misspelled name in the list is silently
+  // ignored rather than erroring (schema validation already constrains it to a real z.enum of known tool names, so this can
+  // only happen if the enum and this object's keys ever drift -- fails safe by just not including it, rather than crashing the
+  // whole delegation over one bad name).
+  if (!allowedTools || allowedTools.length === 0) return full;
+  const filtered: Record<string, unknown> = {};
+  for (const name of allowedTools) {
+    if (name in full) filtered[name] = (full as Record<string, unknown>)[name];
+  }
+  return filtered;
+}
+
+// ADDED (2026-07-24, "Ephemeral Sandbox Branching"): forks the CURRENT live sandbox into an isolated copy via E2B's real
+// snapshot primitive (confirmed API: `sandbox.createSnapshot()` -> `{snapshotId}`, then `E2BSandbox.create(snapshotId, ...)`
+// spawns an independent new sandbox starting from that exact filesystem+memory state -- "one-to-many", the original keeps
+// running untouched; see e2b-backend.ts's own doc comment for the same primitive used there for template reuse). Returns
+// null (never throws) when branching isn't possible -- e.g. this turn is on the vercel() sandbox backend instead of e2b(), or
+// the live E2B API key is missing -- so an isolated request degrades to a clear note instead of failing the whole delegation.
+async function tryBranchSandbox(
+  baseSandboxId: string
+): Promise<{
+  id: string;
+  run(opts: { command: string; env?: Record<string, string>; signal?: AbortSignal }): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+} | null> {
+  const apiKey = process.env.E2B_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const snapshot = await E2BSandbox.createSnapshot(baseSandboxId);
+    const branched = await E2BSandbox.create(snapshot.snapshotId, { apiKey, timeoutMs: 15 * 60 * 1000 });
+    return {
+      id: branched.sandboxId,
+      run: async (opts: { command: string; env?: Record<string, string>; signal?: AbortSignal }) => {
+        // Every other tool in this file assumes paths resolve relative to /workspace (see e2b-backend.ts's own
+        // resolvePath()) -- without an explicit cwd here, commands would run relative to E2B's default user home dir
+        // instead, silently breaking every relative-path file op the branched delegate makes. `env` forwarded so tools
+        // that rely on it (browser_use's AGENT_BROWSER_ARGS) still work against the branched sandbox. Matches
+        // e2b-backend.ts's own real run() exactly (cwd/envs/timeoutMs only -- that implementation never actually
+        // forwards its own declared `abortSignal` option into the real E2B SDK call either, so `signal` is accepted
+        // on this wrapper's input type for interface compatibility but intentionally not passed further, same as there).
+        const r = await branched.commands.run(opts.command, { cwd: '/workspace', envs: opts.env, timeoutMs: 10 * 60 * 1000 });
+        return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+      },
+    };
+  } catch (err) {
+    console.warn('[agent] isolated sandbox branch failed, falling back to live sandbox:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ADDED (2026-07-24, "Standardized Artifact Return Schemas"): pulls any trailing ```agent-artifact fenced JSON blocks
+// (see buildSubagentSystemPrompt's convention) out of the sub-agent's final text, parses each into the AgentArtifactSchema
+// shape, and returns the ORIGINAL text with those blocks stripped out (so the human-facing `result` doesn't duplicate the
+// same content as raw JSON alongside the structured `artifacts` array). A malformed block is skipped rather than thrown --
+// a sub-agent producing slightly-invalid JSON should still return its normal text result cleanly.
+function extractArtifacts(text: string): { cleanText: string; artifacts: { type: string; path?: string; content: string; description?: string }[] } {
+  const artifacts: { type: string; path?: string; content: string; description?: string }[] = [];
+  const re = /```agent-artifact\s*\n([\s\S]*?)\n?```/g;
+  const cleanText = text.replace(re, (_match, jsonText) => {
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (parsed && typeof parsed === 'object' && typeof parsed.type === 'string' && typeof parsed.content === 'string') {
+        artifacts.push({ type: parsed.type, path: parsed.path, content: parsed.content, description: parsed.description });
+      }
+    } catch {
+      // Malformed artifact JSON -- drop it silently, keep the rest of the result intact.
+    }
+    return '';
+  }).trim();
+  return { cleanText, artifacts };
+}
+
+interface RunDelegatedTaskOptions {
+  allowedTools?: string[];
+  isolated?: boolean;
+  channelId?: string;
 }
 
 async function runDelegatedTask(
@@ -355,25 +524,67 @@ async function runDelegatedTask(
   message: string,
   budget: number,
   outerCtx: ToolExecCtx | undefined,
-  explicitTimeoutMs?: number
-): Promise<{ text: string; steps: { finishReason?: string }[] }> {
+  explicitTimeoutMs?: number,
+  options: RunDelegatedTaskOptions = {}
+): Promise<{
+  text: string;
+  steps: { finishReason?: string }[];
+  artifacts: { type: string; path?: string; content: string; description?: string }[];
+  progressLog: string[];
+  isolatedSandboxId?: string;
+}> {
   const t = withTimeoutSignal(outerCtx?.abortSignal, explicitTimeoutMs ?? timeoutForBudget(budget), 'agent');
   // Same ctx nested tools bind to, except abortSignal is swapped for `t.signal`
   // -- so if THIS delegation's own timeout fires (not just the outer turn's
   // cancellation), any in-flight bash/browser/file call the sub-agent is
   // running gets cut off too, not just the top-level generateText polling loop.
-  const delegateCtx: ToolExecCtx | undefined = outerCtx ? { ...outerCtx, abortSignal: t.signal } : undefined;
+  let delegateCtx: ToolExecCtx | undefined = outerCtx ? { ...outerCtx, abortSignal: t.signal } : undefined;
+  let isolatedSandboxId: string | undefined;
+
+  // "Ephemeral Sandbox Branching" -- fork the live sandbox once up front (before any tool call runs), so EVERY bash/file
+  // call this delegation makes for its whole lifetime goes to the branch, not just some of them.
+  if (options.isolated && outerCtx) {
+    try {
+      const baseSandbox = await outerCtx.getSandbox();
+      const branched = await tryBranchSandbox(baseSandbox.id);
+      if (branched) {
+        isolatedSandboxId = branched.id;
+        delegateCtx = { ...outerCtx, abortSignal: t.signal, getSandbox: async () => branched as any };
+      }
+    } catch (err) {
+      console.warn('[agent] isolated branch setup failed, continuing on the live sandbox:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  // "Real-Time Telemetry and Intermediate Callbacks" -- bounded per-step log (tool name + a short outcome summary),
+  // captured as the subtask actually runs rather than only ever seeing the final text.
+  const progressLog: string[] = [];
+  const MAX_PROGRESS_ENTRIES = 40;
+  const MAX_ENTRY_CHARS = 220;
+
   try {
-    return await withTransientRetry(() =>
+    const { text, steps } = await withTransientRetry(() =>
       generateText({
         model,
-        system: SUBAGENT_SYSTEM_PROMPT,
+        system: buildSubagentSystemPrompt({ isolated: Boolean(isolatedSandboxId), channelId: options.channelId }),
         messages: [{ role: 'user', content: message }],
-        tools: delegateTools(delegateCtx),
+        tools: delegateTools(delegateCtx, options.allowedTools),
         stopWhen: stepCountIs(budget),
         abortSignal: t.signal,
+        onStepFinish: step => {
+          if (progressLog.length >= MAX_PROGRESS_ENTRIES) return;
+          const calls = (step.toolCalls ?? []) as { toolName?: string }[];
+          if (calls.length > 0) {
+            const names = calls.map(c => c.toolName).filter(Boolean).join(', ');
+            progressLog.push(`step ${progressLog.length + 1}: called ${names}`);
+          } else if (step.text) {
+            progressLog.push(`step ${progressLog.length + 1}: reasoned — ${step.text.slice(0, MAX_ENTRY_CHARS)}`);
+          }
+        },
       })
     );
+    const { cleanText, artifacts } = extractArtifacts(text);
+    return { text: cleanText, steps, artifacts, progressLog, isolatedSandboxId };
   } catch (err) {
     throw t.rethrow(err);
   } finally {
@@ -392,11 +603,35 @@ export const agentDelegate = {
     'does Y and run it") is a real thing you can delegate, not just research. Returns its final result as plain text, plus `truncated: true` if it ' +
     'ran out of steps before genuinely finishing (re-delegate a continuation using the partial result as context in that case, rather than ' +
     'treating it as complete). Pass `maxSteps` for a task you expect to be long/involved. Omit `provider`/`model` to delegate to a copy of ' +
-    'yourself instead of a different model.',
+    'yourself instead of a different model. Also has code_search (ripgrep), code_index (tree-sitter structural outline), code_diagnostics ' +
+    '(real tsc/pyright/cargo-check), and code_embed_search (semantic code search) for real code-intelligence work, not just guessing from ' +
+    'reading files. Pass `allowedTools` to restrict a delegate to a safe subset (e.g. research-only, no shell access). Pass `isolated: true` ' +
+    'to run risky/exploratory work in a branched copy of the sandbox instead of the live project. Pass the same `channel_id` to two ' +
+    'delegated sub-agents so they can hand each other structured data mid-task via the agent_channel tool. The result also includes an ' +
+    'optional `artifacts` array (structured patches/JSON/summaries the delegate explicitly produced) and `progressLog` (a short per-step ' +
+    'trace of what it did along the way), on top of the plain-text `result`.',
   inputSchema: AgentDelegateInputSchema,
   outputSchema: AgentDelegateResultSchema,
   async execute(
-    { message, provider, model, maxSteps, timeout_seconds }: { message: string; provider?: string; model?: string; maxSteps?: number; timeout_seconds?: number },
+    {
+      message,
+      provider,
+      model,
+      maxSteps,
+      timeout_seconds,
+      allowedTools,
+      isolated,
+      channel_id,
+    }: {
+      message: string;
+      provider?: string;
+      model?: string;
+      maxSteps?: number;
+      timeout_seconds?: number;
+      allowedTools?: string[];
+      isolated?: boolean;
+      channel_id?: string;
+    },
     ctx?: ToolExecCtx
   ) {
     let note: string | undefined;
@@ -404,6 +639,7 @@ export const agentDelegate = {
     const budget = maxSteps ?? 15;
     const explicitTimeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : undefined;
     const userId = ctx?.session?.auth?.current?.principalId;
+    const delegateOptions = { allowedTools, isolated, channelId: channel_id };
 
     // ADDED (2026-07-18, "it can also specify... provider aerolink, model
     // gpt-5.6-sol" -- a user's own saved custom/BYOK provider from their
@@ -420,7 +656,7 @@ export const agentDelegate = {
     if (provider && userId && !catalogMenu.providers.includes(provider)) {
       const custom = await resolveUserCustomProviderModel(userId, provider, model).catch(() => null);
       if (custom) {
-        const { text, steps } = await runDelegatedTask(custom.model, message, budget, ctx, explicitTimeoutMs);
+        const { text, steps, artifacts, progressLog, isolatedSandboxId } = await runDelegatedTask(custom.model, message, budget, ctx, explicitTimeoutMs, delegateOptions);
         const truncated = isTruncatedFinish(steps, budget);
         return {
           result: text,
@@ -430,6 +666,9 @@ export const agentDelegate = {
           note: truncated
             ? `Ran out of its ${budget}-step budget before finishing on its own — treat "result" as partial progress, not a final answer.`
             : undefined,
+          artifacts: artifacts.length > 0 ? artifacts : undefined,
+          progressLog: progressLog.length > 0 ? progressLog : undefined,
+          isolatedSandboxId,
         };
       }
     }
@@ -453,7 +692,7 @@ export const agentDelegate = {
             ? ` (If you meant one of your own saved providers, your options are: ${custom.join(', ')}.)`
             : '');
       }
-      const { text, steps } = await runDelegatedTask(ctx.byokModel, message, budget, ctx, explicitTimeoutMs);
+      const { text, steps, artifacts, progressLog, isolatedSandboxId } = await runDelegatedTask(ctx.byokModel, message, budget, ctx, explicitTimeoutMs, delegateOptions);
       const truncated = isTruncatedFinish(steps, budget);
       return {
         result: text,
@@ -465,6 +704,9 @@ export const agentDelegate = {
               .filter(Boolean)
               .join(' ')
           : note,
+        artifacts: artifacts.length > 0 ? artifacts : undefined,
+        progressLog: progressLog.length > 0 ? progressLog : undefined,
+        isolatedSandboxId,
       };
     }
 
@@ -517,7 +759,7 @@ export const agentDelegate = {
       );
     }
 
-    const { text, steps } = await runDelegatedTask(gateway(modelId), message, budget, ctx, explicitTimeoutMs);
+    const { text, steps, artifacts, progressLog, isolatedSandboxId } = await runDelegatedTask(gateway(modelId), message, budget, ctx, explicitTimeoutMs, delegateOptions);
 
     const truncated = isTruncatedFinish(steps, budget);
     return {
@@ -530,6 +772,9 @@ export const agentDelegate = {
             .filter(Boolean)
             .join(' ')
         : note,
+      artifacts: artifacts.length > 0 ? artifacts : undefined,
+      progressLog: progressLog.length > 0 ? progressLog : undefined,
+      isolatedSandboxId,
     };
   },
 };
