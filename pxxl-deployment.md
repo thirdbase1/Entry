@@ -193,3 +193,104 @@ inherently a bit flaky on Pxxl's side. If a deploy fails at "Proxy route
 promotion delayed", just retry `pxxl deploy` again as-is; it's a transient
 race, not a config problem, as long as startCommand uses the standalone
 server.
+
+## Pulling authoritative env vars from Render (2026-07-24)
+
+When standing up a brand-new Pxxl project/test deploy, Render is the
+source of truth for env vars (it's the primary confirmed-stable
+production host). Pull directly via Render's API rather than retyping
+values by hand:
+
+```bash
+curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/services/srv-d9f70md7vvec73fp4g30/env-vars?limit=100" \
+  -o /tmp/render_env.json
+
+python3 -c "
+import json
+with open('/tmp/render_env.json') as f:
+    d = json.load(f)
+lines = []
+for item in d:
+    k = item['envVar']['key']
+    v = item['envVar'].get('value', '')
+    v_escaped = v.replace('\"', '\\\\\"')
+    lines.append(f'{k}=\"{v_escaped}\"')
+with open('.env.render', 'w') as out:
+    out.write('\n'.join(lines) + '\n')
+"
+```
+
+This pulled **35 env vars** from Render on 2026-07-24 (confirmed working
+set, all needed for the app to run): `VERCEL_OAUTH_CLIENT_SECRET`,
+`VERCEL_OAUTH_CLIENT_ID`, `NEXT_PUBLIC_APP_URL`, `GITHUB_OAUTH_CLIENT_SECRET`,
+`GITHUB_OAUTH_CLIENT_ID`, `E2B_API_KEY`, `EVE_INTERNAL_JWT_SECRET`,
+`BETTER_AUTH_SECRET`, `HOSTNAME`, `NODE_ENV`, `DATABASE_URL`,
+`CREDENTIAL_VAULT_KEY`, `CHAT_IMMEDIATE_BACKGROUND`, `BYOK_ENCRYPTION_KEY`,
+`BLOB_READ_WRITE_TOKEN`, `AI_GATEWAY_API_KEY`, `ADMIN_DEBUG_TOKEN`,
+`TRIGGER_SECRET_KEY`, `PARALLEL_API_KEY`, `STEEL_API_KEY`,
+`GOOGLE_CLIENT_ID`, `BROWSER_USE_API_KEY`, `LAMCH_API_KEY`,
+`DATABASE_URL_UNPOOLED`, `KV_REST_API_READ_ONLY_TOKEN`,
+`KV_REST_API_TOKEN`, `KV_REST_API_URL`, `KV_URL`, `REDIS_URL`,
+`SENDBYTE_FROM_DOMAIN`, `SENDBYTE_API_KEY`, `GOOGLE_CLIENT_SECRET`,
+`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `BRIGHTDATA_CDP_URL`.
+
+Before pushing this set to a NEW Pxxl project/domain, always override
+`NEXT_PUBLIC_APP_URL` to that project's own domain first — otherwise
+OAuth redirects, CORS/allowedHosts checks, and absolute link generation
+will silently point at the wrong (production) domain:
+
+```bash
+sed -i 's|NEXT_PUBLIC_APP_URL=.*|NEXT_PUBLIC_APP_URL="https://<new-domain>"|' .env.render
+pxxl env push --force .env.render <project-id>
+pxxl redeploy <project-id>   # env vars only take effect after a redeploy/restart
+```
+
+## "DB unreachable" on a brand-new deploy — false alarm, not a Neon block
+
+On the first `entry-test` deploy (2026-07-24), `/api/health` reported
+`db: "unreachable"` consistently across ~6 checks over ~40s, even though
+the exact same `DATABASE_URL` was reporting `connected` on the main
+`entry` production project at the same time. This looked exactly like a
+Neon IP-allowlist block (different Pxxl account/project → different
+egress IP → not on an allowlist) and was initially treated as one.
+
+**It wasn't.** After pushing the full 35-var Render-sourced env (vs. an
+earlier incomplete 17-var push) and redeploying, the FIRST health check
+after the new container started still showed `unreachable`, but the very
+next check ~15s later showed `connected`, and it has stayed `connected`
+on every check since. Root cause: `/api/health`'s DB probe
+(`apps/web/app/api/health/route.ts`) uses a hard **2-second** timeout
+(`DB_PROBE_TIMEOUT_MS = 2_000`) specifically so a slow DB never blocks
+the liveness response Render/Pxxl's health checker needs instantly. A
+brand-new container's very first Postgres connection has to do a fresh
+TLS handshake plus Neon's `channel_binding=require` negotiation, which
+occasionally exceeds 2s — the main project's health checks look instant
+because its process has had a live/warm connection pool for hours.
+
+**No Neon IP allowlist change was made or needed.** If `db: unreachable`
+shows up on a fresh deploy, retry a few times over ~30-60s before
+assuming a network/credentials problem — it's very likely just the
+same first-connection cold start, not a real block.
+
+## Root cause note: why Redis is conditional, not missing (carried over from BYOK work)
+
+Direct quote, worth keeping verbatim since it explains a design decision
+that might otherwise look like a bug (`REDIS_URL` present in env but the
+app not requiring it to boot):
+
+> No Redis instance exists anywhere in this infra — it was only ever
+> needed to fix Vercel's stateless serverless problem. Since we're now on
+> a persistent server (Pxxl/Render), in-memory rate limiting works fine
+> within one process. Making it conditional instead of provisioning
+> unnecessary infra.
+
+Practically: Better Auth's `secondaryStorage` (used for rate limiting) is
+wired to only initialize against Redis if a real `REDIS_URL` is present
+and valid; otherwise it falls back to in-memory state. This is safe on
+Pxxl/Render specifically because both are long-running single processes,
+not cold-starting serverless functions — in-memory state persists across
+requests the way it never could on Vercel. Do not "fix" this by
+provisioning a Redis/Upstash instance unless the app moves to a
+multi-instance or serverless deployment model again, where in-memory
+state would stop being shared correctly.
