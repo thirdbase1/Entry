@@ -1,0 +1,13 @@
+name = "oneshotsx-entry"
+domainChoice = "pxxl.pro"
+environment = "production"
+deployEnvironment = "prod"
+port = 3000
+projectId = "proj_pebeqy7m1noy6zo5jwq5"
+installCommand = "npm install"
+buildCommand = "npm run build"
+startCommand = "cd apps/web && npx next start -H 0.0.0.0 -p 3000"
+deploymentId = "dep_vsx2njjioef989jrp00jk"
+projectUrl = "https://oneshotsx-entry.pxxl.pro"
+deploymentUrl = "https://pxxl.app/dashboard/projects/proj_pebeqy7m1noy6zo5jwq5/deployments/dep_vsx2njjioef989jrp00jk"
+lastDeployedAt = "2026-07-24T14:22:12.641Z"
