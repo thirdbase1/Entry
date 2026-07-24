@@ -40,6 +40,7 @@
  */
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport, type UIMessage } from 'ai';
+import { fetchWithIdleTimeout } from '@/lib/chat/fetch-with-idle-timeout';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
@@ -233,6 +234,13 @@ function DirectChatSession({
         // same-origin now, no conditional left to accidentally re-arm.
         api: '/api/direct/chat',
         body: byokModelId ? { byokModelId } : { requestedModel },
+        // ADDED (2026-07-24, real confirmed incident: a mid-turn Render
+        // health-check-kill restarted the server -- the turn itself
+        // survived and finished correctly server-side, but the open
+        // fetch on THIS side never got a clean error, leaving the chat UI
+        // stuck instead of recovering. 20s matches STALL_MS below -- see
+        // fetch-with-idle-timeout.ts's file comment for the full story.
+        fetch: fetchWithIdleTimeout(20_000),
       }),
     [byokModelId, requestedModel]
   );
