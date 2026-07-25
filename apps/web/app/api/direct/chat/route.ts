@@ -836,6 +836,26 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // file's earlier investigation), so no per-model capability check is
     // needed here anymore either.
     reasoning: reasoningRequested ? 'medium' : 'provider-default',
+    // BROAD-COMPATIBILITY REASONING PASSTHROUGH (2026-07-25, real ask:
+    // "make the reasoning enable buttons work 100%") -- see
+    // direct-chat-core.ts's identical 2026-07-25 comment (this route's
+    // sibling implementation for the other channel) for the full
+    // writeup. Short version: the portable `reasoning:` option above is
+    // correctly translated for a REAL Anthropic/Google/OpenAI-Responses
+    // connection, but most BYOK connections here are arbitrary third-
+    // party OpenAI-compatible relays, and @ai-sdk/openai-compatible only
+    // ever sends the OpenAI convention (`reasoning_effort`) for those --
+    // not every relay's underlying model keys off that. Its own
+    // confirmed source-level passthrough (getArgs() spreads any extra
+    // key under providerOptions[providerOptionsName], which is exactly
+    // this connection's own provider.label, straight into the raw
+    // request body) lets this also send `enable_thinking` (Qwen-style)
+    // and `thinking: { type: "enabled" }` (Anthropic-shaped-but-served-
+    // over-openai-compatible-style) at the same time -- unrecognized
+    // extra fields are harmless no-ops for relays that don't use them.
+    ...(reasoningRequested && byokModelId
+      ? { providerOptions: { [providerLabel]: { enable_thinking: true, thinking: { type: 'enabled' } } } }
+      : {}),
     // FIXED (2026-07-16, confirmed live from production error logs): the
     // "Woino" relay (api.woino.app, a known-flaky third-party proxy --
     // already flagged once before as unreliable) 400s on the step-2+

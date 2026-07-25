@@ -38,6 +38,10 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
         lastTestedAt: m.lastTestedAt,
         lastTestStatus: m.lastTestStatus,
         lastTestError: m.lastTestError,
+        lastReasoningTestedAt: m.lastReasoningTestedAt,
+        lastReasoningTestStatus: m.lastReasoningTestStatus,
+        lastReasoningTestError: m.lastReasoningTestError,
+        lastReasoningTokens: m.lastReasoningTokens,
       })),
     })),
   });

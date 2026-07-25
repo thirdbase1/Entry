@@ -503,6 +503,25 @@ model UserModelProviderModel {
   lastTestStatus String?  @map("last_test_status") @db.VarChar // 'success' | 'error', null = never tested
   lastTestError  String?  @map("last_test_error") @db.Text
 
+  // Reasoning-specific test result (2026-07-25, real ask: "instantly test
+  // the model reasoning as I toggle it on" + "if model dies show the real
+  // error from the API in the UI"). Deliberately its own separate set of
+  // columns from lastTestStatus/lastTestError above -- that one is a
+  // plain "does this model answer at all" check with no reasoning forced
+  // on; this one specifically forces reasoning on and inspects whether
+  // real reasoning/thinking content actually came back, which is a
+  // genuinely different question with three outcomes instead of two:
+  // 'success' (reasoning text was actually returned), 'no_reasoning' (the
+  // call succeeded normally but the model/relay returned zero reasoning
+  // content despite being asked -- not an error, just means this specific
+  // connection doesn't expose thinking even if it does "reason"
+  // internally), or 'error' (the real upstream error message, verbatim,
+  // same extraction as describeApiCallError).
+  lastReasoningTestedAt  DateTime? @map("last_reasoning_tested_at") @db.Timestamptz(3)
+  lastReasoningTestStatus String?  @map("last_reasoning_test_status") @db.VarChar // 'success' | 'no_reasoning' | 'error'
+  lastReasoningTestError  String?  @map("last_reasoning_test_error") @db.Text
+  lastReasoningTokens     Int?     @map("last_reasoning_tokens")
+
   provider UserModelProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
 
   @@unique([providerId, modelId])

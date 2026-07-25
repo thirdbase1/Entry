@@ -87,6 +87,7 @@ import { sanitizeDanglingToolCalls } from './direct-chat/sanitize-messages.js';
 import { fillEmptyAssistantReply, describeRefusal } from './direct-chat/fill-empty-refusal.js';
 import { describeApiCallError } from './direct-chat/describe-api-error.js';
 import { stripReasoningParts } from './direct-chat/strip-reasoning-parts.js';
+import { isGatewayModelReasoningCapable } from './direct-chat/reasoning-capability.js';
 import { compactMessagesIfNeeded } from './direct-chat/compact-messages.js';
 import { applyToolCacheBreakpoint, buildCachedSystemMessage, applyConversationCacheControl } from './direct-chat/prompt-cache.js';
 import { buildPersonaInstructions } from '@entry/agent/lib/persona';
@@ -198,6 +199,19 @@ export async function runDirectChatTurn(
     ? await resolveByokModel(byokModelId, userId)
     : resolveGatewayModel(requestedModel!);
   const { model, providerLabel, modelId } = resolved;
+  // FIXED (2026-07-25, real bug: BYOK models' per-model "Thinking" toggle
+  // -- reasoningEnabled on the provider row, set from the settings page --
+  // was silently NEVER read on this channel at all; `reasoning:` further
+  // down was hardcoded to 'provider-default' unconditionally. Any BYOK
+  // model routed through THIS path (channels/direct-chat.ts, not the web
+  // app's own apps/web/app/api/direct/chat/route.ts) never got extended
+  // thinking no matter what the user toggled, with zero error or signal
+  // that anything was wrong -- it just silently never engaged. Mirrors
+  // route.ts's identical `reasoningRequested` gate exactly, including
+  // failing closed to `false` on a Gateway-catalog fetch failure.
+  const reasoningRequested = 'reasoningEnabled' in resolved
+    ? resolved.reasoningEnabled
+    : await isGatewayModelReasoningCapable(modelId).catch(() => false);
   // See strip-reasoning-parts.ts's file comment for the exact bug this
   // fixes (only set on the BYOK path -- resolveGatewayModel's return type
   // has no such flag, always undefined/false there).
@@ -625,14 +639,36 @@ export async function runDirectChatTurn(
     // providerOptions/cache_control attachment.
     instructions: await instructions,
     messages: await modelMessages,
-    // No client-side reasoning-effort control anymore (2026-07-15,
-    // explicit removal request) -- every model just runs at its own
-    // provider default reasoning behavior. `'provider-default'` is always
-    // a safe no-op to pass regardless of whether the resolved model
-    // actually supports extended reasoning at all (confirmed in this same
-    // file's earlier investigation), so no per-model capability check is
-    // needed here anymore either.
-    reasoning: 'provider-default',
+    reasoning: reasoningRequested ? 'medium' : 'provider-default',
+    // BROAD-COMPATIBILITY REASONING PASSTHROUGH (2026-07-25, real ask:
+    // "make the reasoning enable buttons work 100%"). The portable
+    // `reasoning:` option above is correctly translated by the AI SDK's
+    // own dedicated provider packages for a REAL Anthropic/Google/OpenAI-
+    // Responses connection (thinking/thinkingConfig/reasoning.effort --
+    // confirmed straight from node_modules). But most BYOK connections
+    // here are arbitrary third-party OpenAI-compatible relays -- the
+    // catch-all @ai-sdk/openai-compatible branch -- and the SDK only ever
+    // sends `reasoning_effort` for those, which is the OpenAI convention,
+    // not universal: some relays proxy models that actually key off
+    // `enable_thinking` (Qwen-style) or `thinking: { type: "enabled" }`
+    // (Anthropic-shaped, but served through a generic OpenAI-compatible
+    // body) instead. @ai-sdk/openai-compatible has a real, confirmed
+    // passthrough for this (getArgs() in its own source spreads any extra
+    // key under providerOptions[providerOptionsName] straight into the
+    // raw request body verbatim, after already setting reasoning_effort
+    // separately) -- providerOptionsName is exactly the `name` this BYOK
+    // connection was built with (provider.label, see build-model-client.ts),
+    // so keying by that sends all three conventions at once. Unrecognized
+    // extra JSON fields are harmless no-ops for relays that don't use
+    // them; this only ever adds coverage, never breaks an existing one.
+    // Harmless (simply unused, wrong namespace) for the ANTHROPIC/GOOGLE/
+    // OPENAI_RESPONSES/AI_GATEWAY compatibility modes too, which is why
+    // this isn't gated on compatibility mode at all -- only on whether
+    // reasoning was actually requested and this is a BYOK model in the
+    // first place.
+    ...(reasoningRequested && byokModelId
+      ? { providerOptions: { [providerLabel]: { enable_thinking: true, thinking: { type: 'enabled' } } } }
+      : {}),
     // FIXED (2026-07-16, confirmed live from production error logs): the
     // "Woino" relay (api.woino.app, a known-flaky third-party proxy --
     // already flagged once before as unreliable) 400s on the step-2+

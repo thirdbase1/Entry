@@ -37,6 +37,15 @@ interface ProviderModel {
   lastTestedAt?: string | null;
   lastTestStatus?: 'success' | 'error' | null;
   lastTestError?: string | null;
+  /** Dedicated reasoning-specific test result (2026-07-25) — separate
+   *  from the plain connectivity test above. 'no_reasoning' means the
+   *  call succeeded but returned zero visible thinking content even with
+   *  it requested — an honest warning, not a failure. Fired automatically
+   *  the instant the "Thinking" toggle below is switched ON. */
+  lastReasoningTestedAt?: string | null;
+  lastReasoningTestStatus?: 'success' | 'no_reasoning' | 'error' | null;
+  lastReasoningTestError?: string | null;
+  lastReasoningTokens?: number | null;
 }
 
 interface Provider {
@@ -386,6 +395,11 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
   const [fetchError, setFetchError] = useState<string | null>(provider.lastError ?? null);
   const [editingKey, setEditingKey] = useState(false);
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
+  // Which model row currently has an in-flight reasoning test running
+  // (2026-07-25) -- lets the UI show a live "Testing reasoning..." state
+  // right under the toggle the instant it's switched on, distinct from
+  // the plain "Test connection" button's own `testing` state below.
+  const [testingReasoningModelId, setTestingReasoningModelId] = useState<string | null>(null);
 
   // Copy-the-key-I-already-added (2026-07-15, explicit request) — the key
   // is AES-256-GCM at rest (packages/db/src/crypto/byok.ts), always
@@ -498,6 +512,47 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reasoningEnabled }),
       });
+
+      // INSTANT REASONING TEST (2026-07-25, explicit ask: "instantly test
+      // the model reasoning as I toggle it on"). Only fires on the ON
+      // transition -- turning it off just clears any prior result back to
+      // untested, no call needed, since there's nothing to verify about a
+      // feature the user just disabled.
+      if (!reasoningEnabled) {
+        onUpdate({
+          ...provider,
+          models: provider.models.map(m =>
+            m.id === modelRowId
+              ? { ...m, reasoningEnabled, lastReasoningTestedAt: null, lastReasoningTestStatus: null, lastReasoningTestError: null, lastReasoningTokens: null }
+              : m
+          ),
+        });
+        return;
+      }
+
+      setTestingReasoningModelId(modelRowId);
+      try {
+        const res = await fetch(`/api/user/byok/providers/${provider.id}/models/${modelRowId}/test-reasoning`, { method: 'POST' });
+        const json = await safeJson(res);
+        const status: 'success' | 'no_reasoning' | 'error' = json.status ?? 'error';
+        onUpdate({
+          ...provider,
+          models: provider.models.map(m =>
+            m.id === modelRowId
+              ? {
+                  ...m,
+                  reasoningEnabled,
+                  lastReasoningTestedAt: new Date().toISOString(),
+                  lastReasoningTestStatus: status,
+                  lastReasoningTestError: status === 'success' ? null : (json.error ?? 'Reasoning test failed'),
+                  lastReasoningTokens: json.reasoningTokens ?? null,
+                }
+              : m
+          ),
+        });
+      } finally {
+        setTestingReasoningModelId(null);
+      }
     },
     [provider, onUpdate]
   );
@@ -691,34 +746,60 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
 
       {provider.models.length > 0 && (
         <div className="flex flex-col gap-1 border-t pt-2">
-          {provider.models.map(m => (
-            <div key={m.id} className="flex items-center gap-2 py-1">
-              <span
-                title={
-                  m.lastTestStatus === 'success'
-                    ? `Connection OK${m.lastTestedAt ? ' — ' + new Date(m.lastTestedAt).toLocaleString() : ''}`
-                    : m.lastTestStatus === 'error'
-                      ? (m.lastTestError ?? 'Test failed')
-                      : 'Not tested yet'
-                }
-                className={cn(
-                  'w-2 h-2 rounded-full shrink-0',
-                  m.lastTestStatus === 'success' && 'bg-green-500',
-                  m.lastTestStatus === 'error' && 'bg-destructive',
-                  !m.lastTestStatus && 'bg-muted-foreground/30'
-                )}
-              />
-              <span className="flex-1 truncate text-sm text-foreground font-mono">{m.label || m.modelId}</span>
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-muted-foreground">Thinking</span>
-                <Toggle checked={m.reasoningEnabled} onChange={() => toggleReasoning(m.id, !m.reasoningEnabled)} />
+          {provider.models.map(m => {
+            const isTestingReasoning = testingReasoningModelId === m.id;
+            return (
+            <div key={m.id} className="flex flex-col gap-0.5 py-1">
+              <div className="flex items-center gap-2">
+                <span
+                  title={
+                    m.lastTestStatus === 'success'
+                      ? `Connection OK${m.lastTestedAt ? ' — ' + new Date(m.lastTestedAt).toLocaleString() : ''}`
+                      : m.lastTestStatus === 'error'
+                        ? (m.lastTestError ?? 'Test failed')
+                        : 'Not tested yet'
+                  }
+                  className={cn(
+                    'w-2 h-2 rounded-full shrink-0',
+                    m.lastTestStatus === 'success' && 'bg-green-500',
+                    m.lastTestStatus === 'error' && 'bg-destructive',
+                    !m.lastTestStatus && 'bg-muted-foreground/30'
+                  )}
+                />
+                <span className="flex-1 truncate text-sm text-foreground font-mono">{m.label || m.modelId}</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Thinking</span>
+                  <Toggle checked={m.reasoningEnabled} onChange={() => toggleReasoning(m.id, !m.reasoningEnabled)} />
+                </div>
+                <Toggle checked={m.isEnabled} onChange={() => toggleModel(m.id, !m.isEnabled)} />
+                <button onClick={() => removeModel(m.id)} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-destructive">
+                  <DeleteIcon className="w-3.5 h-3.5" />
+                </button>
               </div>
-              <Toggle checked={m.isEnabled} onChange={() => toggleModel(m.id, !m.isEnabled)} />
-              <button onClick={() => removeModel(m.id)} className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-destructive">
-                <DeleteIcon className="w-3.5 h-3.5" />
-              </button>
+              {/* Instant reasoning-test status (2026-07-25) -- only shown
+                  once the toggle is on and there's something to say: a
+                  live "testing" state, a real green confirmation (with
+                  how many reasoning tokens came back, when known), an
+                  honest amber "connected fine but no thinking returned"
+                  warning, or the real upstream error text verbatim. */}
+              {m.reasoningEnabled && (isTestingReasoning || m.lastReasoningTestStatus) && (
+                <div className="pl-4 text-xs flex items-start gap-1.5">
+                  {isTestingReasoning ? (
+                    <span className="text-muted-foreground animate-pulse">Testing reasoning…</span>
+                  ) : m.lastReasoningTestStatus === 'success' ? (
+                    <span className="text-green-600">
+                      ✓ Reasoning confirmed{m.lastReasoningTokens ? ` — ${m.lastReasoningTokens} reasoning tokens` : ''}
+                    </span>
+                  ) : m.lastReasoningTestStatus === 'no_reasoning' ? (
+                    <span className="text-amber-600">⚠ {m.lastReasoningTestError || 'No thinking content returned by this model.'}</span>
+                  ) : (
+                    <span className="text-destructive">✕ {m.lastReasoningTestError || 'Reasoning test failed'}</span>
+                  )}
+                </div>
+              )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
