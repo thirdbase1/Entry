@@ -61,6 +61,24 @@ const GENERIC_BODY_MAX_LENGTH = 400;
 // NOT the relay glitch, don't retry it away.
 const PERMANENT_SIGNAL_PATTERN = /invalid[_ ]?api[_ ]?key|unauthorized|authentication|insufficient[_ ]?quota|insufficient[_ ]?balance|rate[_ ]?limit|model[_ ]?not[_ ]?found|does not exist|permission|forbidden/i;
 
+// FIXED (2026-07-25, confirmed live: Claude Opus 5 via freemodel.dev,
+// real BYOK turn genuinely mid-work): the exact body
+// {"type":"rate_limit_error","message":"Concurrency limit exceeded for
+// account, please retry later"} was hitting PERMANENT_SIGNAL_PATTERN's
+// `rate[_ ]?limit` keyword and being given up on INSTANTLY, no retry at
+// all -- indistinguishable to the user from "the model just stopped".
+// That keyword's original intent was catching genuine QUOTA exhaustion
+// (no tokens/credit left until a plan resets, e.g. "insufficient_quota"),
+// which really is permanent -- but a per-account CONCURRENCY/throughput
+// cap (too many simultaneous requests RIGHT NOW) is a completely
+// different, textbook-transient failure: the provider's own message
+// here literally says "please retry later". Checked FIRST, before the
+// permanent-signal check below, so it wins even though the same body
+// also matches `rate[_ ]?limit` -- these phrasings never show up in a
+// genuinely permanent error (a real dead API key or exhausted balance
+// never says "retry later" or mentions concurrency).
+const TRANSIENT_DESPITE_RATE_LIMIT_WORDING = /concurrency[_ ]?limit|too many (concurrent|simultaneous)|please retry|try again (in|later)|temporarily unavailable|overloaded/i;
+
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -79,6 +97,14 @@ function extractMessageText(bodyText: string): string {
 function matchesKnownTransientBody(status: number, bodyText: string): boolean {
   const trimmed = bodyText.trim();
   const messageText = extractMessageText(trimmed);
+
+  // See TRANSIENT_DESPITE_RATE_LIMIT_WORDING's own comment -- must run
+  // BEFORE the permanent-signal check a few lines down, on ANY status
+  // code (not just 5xx), since a relay can wrap a concurrency error in
+  // whatever HTTP status it wants (this one used a bare 500).
+  if (TRANSIENT_DESPITE_RATE_LIMIT_WORDING.test(messageText) || TRANSIENT_DESPITE_RATE_LIMIT_WORDING.test(trimmed)) {
+    return true;
+  }
 
   // Any 404 on this relay is the known routing glitch -- see file comment
   // for why a legitimate 404 is not possible for how we call this API.

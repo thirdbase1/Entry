@@ -92,6 +92,7 @@ import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel } from '@/lib/byok/resolve-model';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
+import { isGatewayModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { fillEmptyAssistantReply, describeRefusal } from '@/lib/direct-chat/fill-empty-refusal';
@@ -308,6 +309,31 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     throw err;
   }
   const { model, providerLabel, modelId } = resolved;
+
+  // THINKING/REASONING WIRING (2026-07-25, confirmed live bug): the AI
+  // SDK's 'reasoning' call option only actually enables a provider's
+  // extended-thinking mode when given a real effort value ('low' /
+  // 'medium' / 'high' / etc) -- see @ai-sdk/provider-utils's own
+  // isCustomReasoning(), which explicitly excludes 'provider-default'
+  // from ever being translated into Anthropic's `thinking` param (or
+  // Google's `thinkingConfig`, or OpenAI's `reasoning_effort`). Passing
+  // 'provider-default' unconditionally (as this route always did since
+  // the 2026-07-15 removal of the old per-message effort picker) means
+  // NONE of those providers' real thinking params are EVER sent,
+  // regardless of the settings page's per-model "Thinking" toggle --
+  // confirmed directly against a real captured freemodel.dev request
+  // body (Claude Opus 5, BYOK), which had no `thinking` field at all.
+  // That toggle (`reasoningEnabled` on a BYOK model row) was being
+  // persisted and shown as on in the UI, but had zero effect server-
+  // side. Fixed by actually branching on it: a real effort level is only
+  // sent when the user opted in (BYOK's per-model toggle) or the
+  // resolved Gateway model is confirmed reasoning-capable (no per-model
+  // toggle exists there -- see reasoning-capability.ts, which already
+  // fails closed to `false` on any catalog-fetch error, so this can never
+  // wrongly send an unsupported provider a reasoning param).
+  const reasoningRequested = 'reasoningEnabled' in resolved
+    ? resolved.reasoningEnabled
+    : await isGatewayModelReasoningCapable(modelId).catch(() => false);
   // FIX (2026-07-22): when neither byokModelId nor requestedModel was sent
   // by the client (the "Default model" / nothing explicitly picked case),
   // preSave above persisted requestedModel as null -- meaning a plain
@@ -759,7 +785,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // actually supports extended reasoning at all (confirmed in this same
     // file's earlier investigation), so no per-model capability check is
     // needed here anymore either.
-    reasoning: 'provider-default',
+    reasoning: reasoningRequested ? 'medium' : 'provider-default',
     // FIXED (2026-07-16, confirmed live from production error logs): the
     // "Woino" relay (api.woino.app, a known-flaky third-party proxy --
     // already flagged once before as unreliable) 400s on the step-2+
@@ -776,9 +802,47 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // by far the better trade for an unreliable relay we don't control.
     // Keyed off providerLabel (exact match) rather than baseUrl since
     // that's what's already resolved and logged for every turn.
-    prepareStep({ stepNumber }) {
+    prepareStep({ stepNumber, messages }) {
+      // REASONING-STRIP-ACROSS-STEPS (2026-07-25, confirmed live: real
+      // production log, Claude Opus 5 via freemodel.dev -- a known
+      // third-party Anthropic relay, not real api.anthropic.com --
+      // showed a GROWING count of "unsupported reasoning metadata"
+      // warnings step over step (2 at step 4, 3 at step 5) once thinking
+      // was enabled for this model). Root cause: stripReasoningParts
+      // (see that file's own comment) only ever cleaned the PRE-LOADED
+      // chat history before a turn starts -- it has no way to touch
+      // reasoning parts the model itself produces DURING this same turn's
+      // earlier steps, which the AI SDK automatically resends on every
+      // later step of the same multi-step tool-calling loop. A relay that
+      // can't issue a genuine Anthropic `signature`/`redactedData` on its
+      // thinking blocks (every third-party relay, by definition) has that
+      // resent reasoning silently dropped with a warning EACH time,
+      // forever, for the rest of the turn -- same underlying problem as
+      // strip-reasoning-parts.ts, just occurring one level lower (within
+      // a single turn's own step loop instead of across turns). Fixed the
+      // same way: for exactly this relay class, strip any `reasoning`
+      // content part out of `messages` before every step past the first
+      // -- `messages` overrides here carry forward to all later steps
+      // (the AI SDK's own documented behavior), so this needs to run once
+      // per step, not just once per turn. Never affects real Anthropic/
+      // OpenAI connections or Gateway models -- gated on the exact same
+      // isThirdPartyAnthropicRelay/isThirdPartyResponsesRelay flags
+      // resolve-model.ts already computes.
+      const needsReasoningStrip =
+        (isThirdPartyAnthropicRelay || isThirdPartyResponsesRelay) &&
+        messages.some(m => m.role === 'assistant' && Array.isArray(m.content) && m.content.some(p => p.type === 'reasoning'));
+      const reasoningStripOverride = needsReasoningStrip
+        ? {
+            messages: messages.map(m =>
+              m.role === 'assistant' && Array.isArray(m.content)
+                ? { ...m, content: m.content.filter(p => p.type !== 'reasoning') }
+                : m,
+            ),
+          }
+        : {};
+
       if (stepNumber > 0 && FLAKY_PROVIDERS_DROP_TOOLS_AFTER_STEP_1.has(providerLabel)) {
-        return { activeTools: [] };
+        return { activeTools: [], ...reasoningStripOverride };
       }
       // SOFT DEADLINE (bumped 20min -> 55min, 2026-07-23, real ask: "fix
       // entry so model can do a very long task" -- e.g. a full admin-page
@@ -801,9 +865,9 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // runaway turn still wraps up eventually instead of running forever.
       if (Date.now() - requestStartedAt > SOFT_DEADLINE_MS) {
         softDeadlineHit = true;
-        return { activeTools: [] };
+        return { activeTools: [], ...reasoningStripOverride };
       }
-      return {};
+      return { ...reasoningStripOverride };
     },
     // ADDED (2026-07-19, real bug: AI_NoSuchToolError: Model tried to call
     // unavailable tool 'Agent'/'Read' -- the model emitted a hallucinated

@@ -15,6 +15,7 @@
 import type { LanguageModel } from 'ai';
 import { prisma, decryptApiKey } from '@entry/db';
 import { buildModelClient } from './build-model-client';
+import { prepareGoogleCache } from './google-context-cache';
 
 export interface ResolvedByokModel {
   model: LanguageModel;
@@ -58,6 +59,16 @@ export interface ResolvedByokModel {
    *  never resend a previous turn's reasoning to a relay that can't
    *  actually replay it — see strip-reasoning-parts.ts. */
   isThirdPartyAnthropicRelay: boolean;
+  /** Non-null only for a real (non-relay) GOOGLE-compatibility connection
+   *  -- see google-context-cache.ts's file comment for why Gemini needs
+   *  this explicit create-or-reuse step instead of a simple per-message
+   *  marker like Anthropic's. Call with the turn's actual system prompt +
+   *  tool schemas once both are known (route.ts, right before the model
+   *  call) to get back a `cachedContents/...` resource name to attach via
+   *  `providerOptions.google.cachedContent`, or `null` if caching wasn't
+   *  applicable/possible this turn -- never throws, safe to call
+   *  unconditionally every turn. */
+  prepareGoogleCache: ((systemText: string, toolSchemasJson: string) => Promise<string | null>) | null;
 }
 
 /** Ownership-checked: a model row id alone is never sufficient — it must belong to userId. */
@@ -109,6 +120,10 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
     provider.compatibility === 'ANTHROPIC' &&
     !/(^|\.)api\.anthropic\.com$/.test(new URL(provider.baseUrl).hostname);
 
+  const isRealGoogleEndpoint =
+    provider.compatibility === 'GOOGLE' &&
+    /(^|\.)generativelanguage\.googleapis\.com$/.test(new URL(provider.baseUrl).hostname);
+
   return {
     model,
     providerLabel: provider.label,
@@ -116,5 +131,10 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
     reasoningEnabled: modelRow.reasoningEnabled,
     isThirdPartyResponsesRelay,
     isThirdPartyAnthropicRelay,
+    prepareGoogleCache:
+      isRealGoogleEndpoint && apiKey
+        ? (systemText: string, toolSchemasJson: string) =>
+            prepareGoogleCache({ apiKey, baseUrl: provider.baseUrl, modelId: modelRow.modelId, systemText, toolSchemasJson, userId })
+        : null,
   };
 }
