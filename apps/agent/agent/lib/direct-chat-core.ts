@@ -549,6 +549,21 @@ export async function runDirectChatTurn(
 
   const result = streamText({
     model,
+    // RAISED (2026-07-25, real production log: "[direct chat] turn error
+    // ... Failed after 3 attempts. Last error: AI_APICallError: You
+    // exceeded your current quota" -- Google's free-tier Gemini quota is
+    // a shared, per-minute bucket across every concurrent user on this
+    // relay, so a burst of traffic can trip it for a few seconds even
+    // though the account is nowhere near a real/permanent limit. The AI
+    // SDK's own internal retry defaults to `maxRetries: 2` (3 attempts
+    // total) with a short backoff -- nowhere near enough runway to ride
+    // out even the ~2s retryDelay Google's own error response suggested,
+    // let alone a slightly longer burst. This is a pure config bump, same
+    // request budget either way (SOFT_DEADLINE_MS/the chunk timeout below
+    // still bound the worst case) -- it just gives transient 429/quota
+    // bursts more real chances to clear before the turn gives up and
+    // surfaces an error to the user at all.
+    maxRetries: 5,
     stopWhen: stepCountIs(120), // generous ceiling so a long agentic turn is bounded by the 1800s time budget, not an arbitrary low step count
     // FIXED (2026-07-19, confirmed live from production logs): a 'Free'
     // BYOK relay (model id "claude-fable-5") hung completely on a turn --

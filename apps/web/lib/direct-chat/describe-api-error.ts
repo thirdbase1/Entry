@@ -37,6 +37,24 @@
 export function describeApiCallError(error: unknown): string {
   if (error instanceof Error) {
     const trimmedMessage = error.message?.trim();
+    // FIXED (2026-07-25, real production case: a Gemini free-tier quota
+    // error came through as `error.message` already POPULATED (unlike the
+    // freemodel.dev empty-message case below) -- so this function
+    // returned it completely raw and unmodified: "Failed after 3
+    // attempts. Last error: AI_APICallError: You exceeded your current
+    // quota, please check your plan and billing details. For more
+    // information on this error, head to: https://ai.google.dev/...".
+    // That's a dense, multi-line, developer-facing SDK/HTTP dump -- to a
+    // non-technical user it reads exactly like "the agent broke", not
+    // "this specific external quota is temporarily full." Detect this
+    // shape specifically (matches Google's Gemini quota wording and the
+    // generic "429"/"rate limit" family other providers use) and return
+    // one clean, honest, actionable sentence instead -- same principle as
+    // the freemodel.dev branch further down, just catching the case where
+    // a real message exists but is unreadable rather than empty.
+    if (trimmedMessage && /exceeded your current quota|resource_exhausted|rate.?limit|\b429\b|too many requests/i.test(trimmedMessage)) {
+      return "This model's free-tier usage limit is temporarily full (shared across everyone using it right now) -- it usually clears within a minute. Try again in a moment, or switch to a different model if this keeps happening.";
+    }
     if (trimmedMessage) return trimmedMessage;
 
     // error.message was empty (or whitespace-only) -- this is exactly the
