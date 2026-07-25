@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@entry/db';
+import { prisma, decryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { z } from 'zod';
 import { withApiErrorHandling } from '@/lib/api-error';
+import { logError } from '@entry/db/error-log';
+import { autoTestReasoningInBackground } from '@/lib/byok/test-reasoning';
 
 const AddModelSchema = z.object({
   modelId: z.string().min(1),
@@ -31,6 +33,33 @@ export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { 
     create: { providerId, modelId: body.data.modelId, label: body.data.label },
     update: { label: body.data.label },
   });
+
+  // AUTO REASONING TEST (2026-07-26, explicit ask: "when add model id it
+  // should test it"). Same fire-and-forget shared helper fetch-models
+  // uses -- response returns immediately, the row's lastReasoningTest*
+  // columns update in the background once the real check completes.
+  if (provider.encryptedApiKey) {
+    let apiKey: string | undefined;
+    try {
+      apiKey = decryptApiKey(provider.encryptedApiKey);
+    } catch (err) {
+      logError({
+        source: 'byok-add-model-auto-test-decrypt-failed',
+        error: err,
+        userId: session.user.id,
+        context: { providerId, modelId: model.modelId, providerLabel: provider.label },
+      });
+      apiKey = undefined;
+    }
+    if (apiKey) {
+      autoTestReasoningInBackground(
+        [{ modelRowId: model.id, modelId: model.modelId }],
+        { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl },
+        apiKey,
+        session.user.id
+      );
+    }
+  }
 
   return NextResponse.json({
     id: model.id,

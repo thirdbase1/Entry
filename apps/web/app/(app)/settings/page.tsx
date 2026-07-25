@@ -10,7 +10,7 @@
  * /api/direct/chat at chat time (no eve/root-agent relay), with full
  * tool parity, nothing gated.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';
 import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
@@ -473,6 +473,65 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
     [provider.compatibility, patchProvider]
   );
 
+  // Kept in sync via effect below so the background reasoning-test poll
+  // (see pollReasoningResults) always merges onto the LATEST model list,
+  // never a stale snapshot captured when the poll started -- avoids
+  // clobbering an unrelated toggle/edit a user makes elsewhere on the
+  // card while a batch of auto-tests is still running in the background.
+  const providerRef = useRef(provider);
+  useEffect(() => {
+    providerRef.current = provider;
+  }, [provider]);
+
+  // Polls for the auto reasoning-test results the server kicks off in the
+  // background right after fetch-models / add-model-manually (2026-07-26,
+  // explicit ask: "when I fetch model it should test all model reasoning,
+  // and when add model id it should test it"). Those endpoints return
+  // immediately -- the actual test(s) run server-side afterward -- so this
+  // is what surfaces the result on the settings page without requiring a
+  // manual reload. Stops itself once every watched model row has a
+  // lastReasoningTestedAt (test complete, one way or another) or after a
+  // generous ceiling in case a row got deleted mid-poll.
+  const pollReasoningResults = useCallback((modelRowIds: string[]) => {
+    if (modelRowIds.length === 0) return;
+    let attempts = 0;
+    const maxAttempts = 20; // ~80s at 4s -- comfortably covers a batch tested at concurrency 3, ~60s ceiling each
+    const interval = setInterval(async () => {
+      attempts += 1;
+      try {
+        const res = await fetch('/api/user/byok/providers');
+        const json = await safeJson(res);
+        if (res.ok) {
+          const fresh = (json.providers ?? []).find((p: Provider) => p.id === providerRef.current.id);
+          if (fresh) {
+            let stillPending = false;
+            const current = providerRef.current;
+            onUpdate({
+              ...current,
+              models: current.models.map(m => {
+                if (!modelRowIds.includes(m.id)) return m;
+                const freshModel = fresh.models.find((fm: ProviderModel) => fm.id === m.id);
+                if (!freshModel) return m; // row deleted mid-poll -- leave local state as-is
+                if (!freshModel.lastReasoningTestedAt) stillPending = true;
+                return {
+                  ...m,
+                  lastReasoningTestedAt: freshModel.lastReasoningTestedAt,
+                  lastReasoningTestStatus: freshModel.lastReasoningTestStatus,
+                  lastReasoningTestError: freshModel.lastReasoningTestError,
+                  lastReasoningTokens: freshModel.lastReasoningTokens,
+                };
+              }),
+            });
+            if (!stillPending) clearInterval(interval);
+          }
+        }
+      } catch {
+        // Transient poll failure -- just try again next tick.
+      }
+      if (attempts >= maxAttempts) clearInterval(interval);
+    }, 4000);
+  }, [onUpdate]);
+
   const fetchModels = useCallback(async () => {
     setFetching(true);
     setFetchError(null);
@@ -481,12 +540,16 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json.error ?? 'Fetch failed');
       onUpdate({ ...provider, models: json.models, lastError: null });
+      // Auto-test kicks off server-side for every model in this batch --
+      // watch for results landing so the page reflects them without a
+      // manual reload.
+      pollReasoningResults(json.models.map((m: ProviderModel) => m.id));
     } catch (e: any) {
       setFetchError(e.message ?? 'Failed to fetch models');
     } finally {
       setFetching(false);
     }
-  }, [provider, onUpdate]);
+  }, [provider, onUpdate, pollReasoningResults]);
 
   const toggleModel = useCallback(
     async (modelRowId: string, isEnabled: boolean) => {
@@ -776,13 +839,18 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
                   <DeleteIcon className="w-3.5 h-3.5" />
                 </button>
               </div>
-              {/* Instant reasoning-test status (2026-07-25) -- only shown
-                  once the toggle is on and there's something to say: a
-                  live "testing" state, a real green confirmation (with
-                  how many reasoning tokens came back, when known), an
-                  honest amber "connected fine but no thinking returned"
-                  warning, or the real upstream error text verbatim. */}
-              {m.reasoningEnabled && (isTestingReasoning || m.lastReasoningTestStatus) && (
+              {/* Reasoning-test status (2026-07-25/26) -- shown whenever
+                  there's something to say: a live "testing" state (toggle
+                  just flipped on), or a real result -- green confirmation
+                  (with reasoning token count, when known), an honest amber
+                  "connected fine but no thinking returned" warning, or the
+                  real upstream error text verbatim. Shown regardless of
+                  the current toggle state (2026-07-26) -- auto-tests now
+                  run the moment a model is fetched/added, before the user
+                  has decided whether to enable the toggle at all, so they
+                  can see reasoning support up front instead of only after
+                  flipping it on themselves. */}
+              {(isTestingReasoning || m.lastReasoningTestStatus) && (
                 <div className="pl-4 text-xs flex items-start gap-1.5">
                   {isTestingReasoning ? (
                     <span className="text-muted-foreground animate-pulse">Testing reasoning…</span>
@@ -805,7 +873,12 @@ function ProviderCard({ provider, onUpdate, onDelete }: { provider: Provider; on
 
       <ManualModelAdd
         providerId={provider.id}
-        onAdded={m => onUpdate({ ...provider, models: [...provider.models.filter(x => x.modelId !== m.modelId), m] })}
+        onAdded={m => {
+          onUpdate({ ...provider, models: [...provider.models.filter(x => x.modelId !== m.modelId), m] });
+          // Server already kicked off an auto reasoning-test for this
+          // model in the background (2026-07-26) -- watch for the result.
+          pollReasoningResults([m.id]);
+        }}
       />
 
       {provider.models.length > 0 && (

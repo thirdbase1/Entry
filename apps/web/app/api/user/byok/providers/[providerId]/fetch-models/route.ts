@@ -3,6 +3,7 @@ import { prisma, decryptApiKey } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
+import { autoTestReasoningInBackground } from '@/lib/byok/test-reasoning';
 import { createGateway } from '@ai-sdk/gateway';
 
 /**
@@ -145,6 +146,23 @@ export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { 
     ]);
 
     const models = await prisma.userModelProviderModel.findMany({ where: { providerId }, orderBy: { modelId: 'asc' } });
+
+    // AUTO REASONING TEST (2026-07-26, explicit ask: "when I fetch model
+    // it should test all model reasoning"). Fire-and-forget, limited
+    // concurrency -- the HTTP response below returns immediately with
+    // whatever lastReasoningTest* state each row already had; results
+    // land on the rows as the background tests complete (same columns
+    // the manual per-model "test reasoning" toggle already writes to),
+    // so the settings page picks them up on its next poll/reload without
+    // this endpoint's caller needing to wait through however many models
+    // just got discovered.
+    autoTestReasoningInBackground(
+      models.map(m => ({ modelRowId: m.id, modelId: m.modelId })),
+      { label: provider.label, compatibility: provider.compatibility, baseUrl: provider.baseUrl },
+      apiKey,
+      session.user.id
+    );
+
     return NextResponse.json({
       fetched: discovered.length,
       models: models.map(m => ({
