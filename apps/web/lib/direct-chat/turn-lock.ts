@@ -158,7 +158,34 @@ export async function* readTurnStream(
         console.error('[turn-stream] xread failed', chatId, err);
         return;
       }
-      if (!res) continue;
+      if (!res) {
+        // KEEP-ALIVE FIX (2026-07-26, real user report: a turn that
+        // genuinely ran ~20min server-side -- confirmed complete and
+        // correct in the DB the whole time -- still showed a "Couldn't
+        // reach the server" banner on the reattached tab). Root cause:
+        // XREAD's BLOCK window here (10s) can come back empty over and
+        // over during a real, healthy silent gap -- a long-running tool
+        // call (bash, a build, anything) easily goes 20s+ with zero new
+        // stream chunks to mirror, since there's genuinely nothing new to
+        // report yet. Previously this branch was a bare `continue`,
+        // meaning literally zero bytes reached the client for the entire
+        // gap -- and the client's own `fetchWithIdleTimeout(20_000)` (see
+        // that file's comment) correctly, but WRONGLY in this specific
+        // case, treats "no bytes for 20s" as a dead connection and aborts,
+        // surfacing a scary false-alarm error banner for a turn that was
+        // never actually stuck at all. Yielding a real, spec-recognized,
+        // fully-inert chunk here every ~10s (comfortably under the
+        // client's 20s watchdog) keeps bytes flowing on the wire without
+        // ever touching the reconstructed message: confirmed directly
+        // against node_modules/ai's `processUIMessageStream` --
+        // `case "message-metadata"` calls `updateMessageMetadata(undefined)`,
+        // which no-ops entirely (`if (metadata != null)` guard) and never
+        // even triggers a re-render (the `write()` call there is also
+        // gated on `messageMetadata != null`). A true keep-alive: real
+        // wire bytes, zero visible or state-level side effects.
+        yield { chunk: { type: 'message-metadata' }, turnId: '' };
+        continue;
+      }
       const [, entries] = res[0];
       for (const [id, fields] of entries) {
         lastId = id;

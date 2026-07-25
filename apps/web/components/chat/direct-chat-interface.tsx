@@ -287,6 +287,16 @@ function DirectChatSession({
   });
   const pollIdRef = useRef<number | undefined>(undefined);
   const [turnError, setTurnError] = useState<string | null>(null);
+  // Always-fresh mirror of turnError for the recovery-poll effect below,
+  // whose `tryRecover` closures only get recreated when [sessionId,
+  // chat.id, chat.status] change -- turnError itself isn't in that
+  // dependency list, so reading the plain state variable inside an old
+  // closure could see a stale (already-cleared, or not-yet-set) value.
+  // A ref sidesteps that entirely: always reads whatever is truly current.
+  const turnErrorRef = useRef(turnError);
+  useEffect(() => {
+    turnErrorRef.current = turnError;
+  }, [turnError]);
   // STALL DETECTION (2026-07-23, explicit user report: "anytime my screen
   // turn off the agent stop instantly... never stop even if it lose
   // internet connection"). Root cause: the recovery poll right below this
@@ -612,6 +622,40 @@ function DirectChatSession({
             (persisted.length > chat.messages.length ||
               (persisted.length === chat.messages.length && JSON.stringify(persisted) !== JSON.stringify(chat.messages))) &&
             isSafeToAdopt(persisted, chat.messages);
+
+          // STALE-ERROR-BANNER FIX (2026-07-26, real user report: turn
+          // genuinely ran ~20min server-side, all tool calls rendered and
+          // completed correctly via this very poll, yet a "Couldn't reach
+          // the server" banner sat there at the end regardless). Root
+          // cause: `resume: true`'s own reattached stream (AI SDK's
+          // resumeStream(), a SEPARATE GET from this poll's `/api/chats`
+          // fetch, going over the SAME `fetchWithIdleTimeout(20_000)`
+          // transport) can hit its own 20s-idle abort independently --
+          // e.g. a long tool call with no incremental bytes on the wire
+          // for >20s -- and that surfaces through `onError` as a real
+          // transport failure, setting `turnError`, even while THIS poll
+          // (a totally different request) keeps succeeding and rendering
+          // fine the whole time via `chat.setMessages`. The two paths
+          // never talked to each other: `turnError` only got cleared
+          // above inside the `persistedIsNewer` branch, so if that one
+          // resumed-stream error happened to fire during a tick where
+          // nothing new had landed yet (or after the DB poll had already
+          // caught everything up), the banner just sat there forever with
+          // no future event left to clear it, even though the DB -- the
+          // actual server-side ground truth -- already shows the turn
+          // completed cleanly. The DB always wins: if the last persisted
+          // message is a real, non-empty assistant reply and we're not
+          // actively mid-stream right now, whatever transport hiccup set
+          // turnError is moot -- clear it unconditionally, on every tick,
+          // not just the "new content just landed" branch.
+          const dbLastMsg = persisted[persisted.length - 1];
+          const dbLooksComplete = dbLastMsg?.role === 'assistant' && messageTextLength(dbLastMsg) > 0;
+          const activelyStreamingNow = chat.status === 'streaming' || chat.status === 'submitted';
+          if (dbLooksComplete && !activelyStreamingNow && turnErrorRef.current) {
+            setTurnError(null);
+            chat.clearError();
+          }
+
           if (persistedIsNewer) {
             // Genuinely new content just showed up server-side since the
             // last check. Two different situations produce this, and they
