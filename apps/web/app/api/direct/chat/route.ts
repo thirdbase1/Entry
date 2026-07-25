@@ -138,6 +138,7 @@ import { agentDelegate } from '@entry/agent/tool-impls/agent';
 import { rememberAboutUserTool } from '@entry/agent/tool-impls/remember_about_user';
 import { getWorkingMemory } from '@entry/agent/lib/working-memory';
 import { z } from 'zod';
+import { acquireTurnLock, releaseTurnLock, startTurnHeartbeat, publishTurnChunk, publishTurnEnd } from '@/lib/direct-chat/turn-lock';
 
 // ENABLED (2026-07-15, user request): direct-chat now wires the real
 // `agent` (sub-agent delegation) tool into its own `tools` object below,
@@ -183,6 +184,38 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // working-memory.ts's 2026-07-23 comment: this note is per-CHAT now, not
   // per-user, so it must never be fetched before we know which chat this is.
   const chatId = typeof id === 'string' && id ? id : crypto.randomUUID();
+
+  // CONCURRENCY GUARD (2026-07-25) -- see turn-lock.ts's file comment for
+  // the full "two responses to one message" bug this closes. Deliberately
+  // checked BEFORE preSave/model resolution/anything else below: a second
+  // POST for a chat that already has a turn in flight must never reach
+  // the model at all, just fail fast so the client can attach to the
+  // ALREADY-running turn (via useChat's resumeStream(), see the new
+  // [chatId]/stream GET route) instead of starting a duplicate one.
+  const turnId = crypto.randomUUID();
+  const lockAcquired = await acquireTurnLock(chatId, turnId);
+  if (!lockAcquired) {
+    return Response.json(
+      { error: 'turn_in_progress', chatId, message: 'Still working on your last message in this chat.' },
+      { status: 409 }
+    );
+  }
+  const stopTurnHeartbeat = startTurnHeartbeat(chatId, turnId);
+  // Single place every exit path (normal finish, thrown error, refusal
+  // fallback) funnels through to release the lock + stop the heartbeat +
+  // mark the mirrored stream done. Safe to call more than once (release/
+  // publishTurnEnd are both idempotent-ish -- a second release is just a
+  // no-op "I don't own it anymore" GET/DEL, a second end-marker is
+  // harmless) so every call site below can call this without needing to
+  // track whether an earlier one already fired.
+  let turnEnded = false;
+  const endTurn = () => {
+    if (turnEnded) return;
+    turnEnded = true;
+    stopTurnHeartbeat();
+    void publishTurnEnd(chatId, turnId);
+    void releaseTurnLock(chatId, turnId);
+  };
 
   // BYOK TTFT FIX (2026-07-19): resolving a BYOK model reads/decrypts its
   // provider row, while Working Memory is a completely independent read.
@@ -271,6 +304,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         : resolveGatewayModel(await resolveModelIdForProvider('anthropic'));
   } catch (err) {
     await preSave;
+    endTurn();
     throw err;
   }
   const { model, providerLabel, modelId } = resolved;
@@ -1015,7 +1049,26 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // synthetic per-word wait entirely -- pure time-to-completion win,
     // no downside for a chat UI that's already rendering tokens as they
     // arrive.
-    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 0 }),
+    //
+    // REVERTED PARTIALLY 2026-07-25 (explicit user report on THIS route:
+    // "some model are damn faster so it lags"; matches the exact bug
+    // already diagnosed and fixed on the sibling channel-chat path --
+    // see apps/agent/agent/lib/direct-chat-core.ts's 2026-07-20 comment,
+    // written for the same Pxxl port this route also now runs on but
+    // never back-ported here): `delayInMs: 0` means smoothStream
+    // re-chunks by word boundary but flushes every chunk with zero
+    // pacing, so a fast provider/model that bursts several sentences
+    // into one network chunk (common for OpenAI-compatible proxies/
+    // relays) still renders as one big visual jump on this Pxxl
+    // deployment, just chopped at word boundaries instead of mid-word --
+    // the exact "fast but not smooth / laggy" symptom, and worse the
+    // faster the model, since more real content piles up per burst.
+    // `delayInMs: 6` is the same deliberate middle ground already proven
+    // on the sibling path: real but small cost (a 500-word reply loses
+    // 3s vs the SDK default's 5s) against a genuine perceived-smoothness
+    // win -- a steady word-by-word reveal reads as faster to a human
+    // than the same total duration delivered in bursts.
+    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 6 }),
   });
 
   // Make sure the durability write has actually landed before the
@@ -1384,18 +1437,32 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
             ]);
           }
           controller.enqueue(chunk);
+          // MIRROR (2026-07-25) -- see turn-lock.ts's file comment. Fire-
+          // and-forget: this must never gate the actual chunk reaching
+          // the live client on a Redis round-trip, and a dropped mirror
+          // write only degrades a reconnect's replay, never the live
+          // turn itself.
+          void publishTurnChunk(chatId, turnId, chunk);
         }
       } catch (err) {
+        endTurn();
         controller.error(err);
         return;
       }
       if (!sawRealContent) {
         const id = crypto.randomUUID();
         const fallbackText = describeRefusal(lastFinishReason, lastRawFinishReason);
-        controller.enqueue({ type: 'text-start', id });
-        controller.enqueue({ type: 'text-delta', id, delta: fallbackText });
-        controller.enqueue({ type: 'text-end', id });
+        const fallbackChunks: UIMessageChunk[] = [
+          { type: 'text-start', id },
+          { type: 'text-delta', id, delta: fallbackText },
+          { type: 'text-end', id },
+        ];
+        for (const fc of fallbackChunks) {
+          controller.enqueue(fc);
+          void publishTurnChunk(chatId, turnId, fc);
+        }
       }
+      endTurn();
       controller.close();
     },
   });

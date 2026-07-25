@@ -341,6 +341,27 @@ function DirectChatSession({
     id: sessionId,
     messages: initialMessages,
     transport,
+    // RESUMABLE STREAM (2026-07-25, explicit user report: "if a task is
+    // working in background I can still send multiple prompts and I get
+    // multiple responses" + "if I reload the page [it] should not
+    // disconnect [from a turn that's still running]"). `resume: true`
+    // makes useChat call `resumeStream()` once on mount -- the AI SDK's
+    // own built-in reconnect protocol (confirmed directly against
+    // node_modules/ai's `reconnectToStream`: GETs
+    // `/api/direct/chat/{chatId}/stream`, a 204 means nothing to resume,
+    // otherwise it's a normal live UI-message-stream body). Server side:
+    // see the new [chatId]/stream/route.ts GET route + turn-lock.ts. This
+    // is what lets a fresh page load (reload, new tab, another device)
+    // discover a turn that's STILL running server-side and attach to its
+    // live remaining output instead of only finding out once it's fully
+    // done via the DB recovery poll below -- and, just as importantly,
+    // it flips `chat.status` to 'streaming' immediately on mount for a
+    // truly-still-running turn, closing the exact window where `isBusy`
+    // could read false right after a reload even though the server was
+    // still working (the bug behind both reports above: the send button
+    // looking free to use, and a second prompt racing the still-running
+    // first one).
+    resume: true,
     // Throttle UI updates to at most once per 50ms (2026-07-18, "streaming
     // lags when the model is super fast" report) -- unset by default,
     // which means every single raw text-delta chunk from the stream
@@ -361,6 +382,15 @@ function DirectChatSession({
     throttle: 50,
     onError(error) {
       console.error('[direct chat turn error]', error);
+      // A 409 from the new turn-lock guard (see route.ts / turn-lock.ts)
+      // means a turn for this chat was ALREADY in flight when this send
+      // fired -- never a real failure. Attach to the live turn instead of
+      // surfacing a scary error for what the user correctly expects to
+      // just keep working.
+      if (error instanceof Error && error.message.includes('turn_in_progress')) {
+        void chat.resumeStream();
+        return;
+      }
       reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
       setTurnError(readableChatErrorMessage(error));
     },
@@ -855,6 +885,22 @@ function DirectChatSession({
   useStreamingAutoScroll(scrollRef, `${messages.length}:${showThinkingIndicator}`);
 
   const onSend = (input: string, opts?: { attached?: AttachedContext[]; disabledTools?: string[]; model?: string; images?: ChatImageAttachment[] }) => {
+    // CLIENT-SIDE DOUBLE-SEND GUARD (2026-07-25, explicit user report:
+    // "if a task is working in background I can still send multiple
+    // prompt and I get multiple responses so it's confusing"). `isBusy`
+    // already gates the input's own `sending` prop (disables the visible
+    // send affordance), but that's advisory only -- anything that still
+    // calls `onSend` directly while a turn is genuinely in flight (a
+    // stale keyboard-submit event, a race right as a turn starts/ends)
+    // used to fall straight through to `chat.sendMessage`, which is
+    // exactly how a second, PARALLEL turn got started against the same
+    // chat. This is the actual hard stop: bail before touching
+    // `chat.sendMessage` at all whenever `isBusy` is true. The server-side
+    // lock (turn-lock.ts) is the real, authoritative guard against a
+    // second concurrent turn (covers races this can't, like a second
+    // tab) -- this is just the fast, no-network first line of defense for
+    // the overwhelmingly common single-tab case.
+    if (isBusy) return;
     // Switching to a different model mid-chat is handled by the parent
     // (chat-interface.tsx remounts into the right path); here we only ever
     // send under the current byokModelId/requestedModel.
