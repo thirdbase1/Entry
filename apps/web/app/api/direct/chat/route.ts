@@ -69,7 +69,7 @@ import { NextRequest } from 'next/server';
 // all), the constant was already 100% inert dead code -- kept only as a
 // misleading relic of the old Vercel deploy that made this route look
 // artificially capped at 300s when nothing was actually enforcing that
-// anymore. The route's real ceiling is SOFT_DEADLINE_MS below (20 min).
+// anymore. The route's real ceiling is SOFT_DEADLINE_MS below (55 min).
 import {
   streamText,
   tool,
@@ -760,17 +760,36 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // the assistant's turn just ends. Widened to give real slow-starting
     // models genuine room to actually produce their first token, while
     // still eventually catching a truly dead connection well within
-    // SOFT_DEADLINE_MS's 20-minute budget above (so onFinish/version-
+    // SOFT_DEADLINE_MS's 55-minute budget above (so onFinish/version-
     // capture/save still always gets to run afterward either way).
     // Deliberately scoped to "no data at all for 4 minutes", not a cap on
     // total step duration -- a model that's genuinely still producing
     // output stays completely unaffected no matter how long that takes;
-    // only a truly dead connection gets cut. stepMs is a secondary safety
-    // net for the "trickles a few bytes forever but never finishes"
-    // variant, raised proportionally, still comfortably under
-    // SOFT_DEADLINE_MS so there's real margin for onFinish/version-
-    // capture/save work to run afterward.
-    timeout: { chunkMs: 240_000, stepMs: 600_000 },
+    // only a truly dead connection gets cut.
+    //
+    // FIXED (2026-07-25, real user-reported bug: Claude Opus 5 BYOK turns
+    // -- genuinely working, real tool calls, real progress -- reliably
+    // cut off right around the ~10-minute mark, every long turn, no
+    // exceptions). Root cause traced into node_modules/ai/src/generate-
+    // text/stream-text.ts directly: unlike chunkTimeoutId (reset on EVERY
+    // semantic chunk via resetChunkTimeout()), stepTimeoutId is armed
+    // ONCE at the top of streamStep() and is NEVER reset for the rest of
+    // that step -- so `stepMs` is actually a hard absolute ceiling on one
+    // full step's total duration, not a "no progress" detector the way
+    // the comment above (and this value's own prior history) assumed.
+    // 600_000 (10 min) was carried over from when this was genuinely just
+    // meant as "secondary safety net, comfortably under the old, much
+    // shorter SOFT_DEADLINE_MS" -- but a single step from a heavy-
+    // reasoning BYOK model (large context reprocessing + adaptive/
+    // extended thinking + a long generated response) routinely NEEDS more
+    // than 10 minutes, and was getting killed mid-work every time despite
+    // streaming real chunks the whole way. Raised to 1_800_000 (30 min,
+    // still well under SOFT_DEADLINE_MS's 55-minute budget with real
+    // margin left for onFinish/version-capture/save) -- chunkMs above is
+    // the thing that actually catches a truly dead connection; stepMs
+    // only needs to catch the pathological "trickles forever, never
+    // finishes" case, which 30 minutes still does just fine.
+    timeout: { chunkMs: 240_000, stepMs: 1_800_000 },
     // See modelMessages' own comment above for why this (persona prompt +
     // optional compaction summary) moved here instead of being spliced
     // into `messages` as fake `role: 'system'` entries -- this is the

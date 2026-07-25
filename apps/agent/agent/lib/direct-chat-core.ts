@@ -605,7 +605,19 @@ export async function runDirectChatTurn(
     // proportionally, still comfortably under this channel's own overall
     // turn time budget so there's real margin for onFinish/version-
     // capture/save work to run afterward either way.
-    timeout: { chunkMs: 240_000, stepMs: 600_000 },
+    // FIXED (2026-07-25, see apps/web/app/api/direct/chat/route.ts's
+    // matching 2026-07-25 comment for the full root-cause writeup):
+    // stepTimeoutId in node_modules/ai's stream-text.ts is armed ONCE per
+    // step and never reset by ongoing chunks -- so stepMs is a hard
+    // absolute per-step ceiling, not a "no progress" detector. 600_000
+    // (10 min) was killing genuinely healthy, actively-streaming Claude
+    // Opus 5 BYOK turns mid-work every time a single step (heavy
+    // reasoning + large context + long output) ran past 10 minutes.
+    // Raised to 1_800_000 (30 min) to match the other copy of this same
+    // config -- this channel has no separate wall-clock SOFT_DEADLINE_MS
+    // of its own (only stepCountIs(120) bounds it), so there's no
+    // competing budget this could exceed.
+    timeout: { chunkMs: 240_000, stepMs: 1_800_000 },
     // See modelMessages' own comment above for why this (persona prompt +
     // optional compaction summary) moved here instead of being spliced
     // into `messages` as fake `role: 'system'` entries -- this is the

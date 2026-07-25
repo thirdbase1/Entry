@@ -2,18 +2,29 @@ import { z } from 'zod';
 import { withTimeoutSignal } from './with-timeout-signal.js';
 
 /**
- * Default tool-call ceiling: 10 minutes (2026-07-20, "bump the limit of
- * everything up to 10 minutes by default" for the standalone Pxxl/Render
- * worker). The old low per-tool ceilings across this directory (bash's
- * 240s, python_coding/task_analysis/code_artifact's 75s, agent's 280s
- * cap) all existed specifically to leave headroom under Vercel Hobby's
- * serverless maxDuration (300s) -- see bash.ts's own 2026-07-18 history
- * comment. The worker is a persistent long-lived process, not a
- * serverless function -- there is no outer 300s ceiling forcing tool
- * timeouts to stay artificially short here, so the default moves to a
- * much more generous 10 minutes.
+ * Default tool-call ceiling: 20 minutes (raised 2026-07-25, real
+ * user-reported bug: long BYOK turns doing genuine sustained work --
+ * builds, installs, browser sessions -- kept getting cut off, and the
+ * model had no reason to know it needed to pass a larger
+ * `timeout_seconds` up front for an ordinary-looking call). Previously
+ * 10 minutes (2026-07-20, "bump the limit of everything up to 10 minutes
+ * by default" for the standalone Pxxl/Render worker) -- the old low
+ * per-tool ceilings across this directory (bash's 240s, python_coding/
+ * task_analysis/code_artifact's 75s, agent's 280s cap) all existed
+ * specifically to leave headroom under Vercel Hobby's serverless
+ * maxDuration (300s) -- see bash.ts's own 2026-07-18 history comment.
+ * The worker is a persistent long-lived process, not a serverless
+ * function -- there is no outer 300s (or 600s) ceiling forcing tool
+ * timeouts to stay artificially short here. 10 minutes was still just an
+ * arbitrary leftover number once that constraint was gone, and real
+ * tool calls (a slow npm install, a multi-page browser_use session, a
+ * large sandbox build) routinely run past it with no way for the model
+ * to have known to override `timeout_seconds` in advance for what looked
+ * like an ordinary call. The model can still always request up to
+ * MAX_TIMEOUT_SECONDS (1 hour) explicitly for a call it knows will be
+ * genuinely long-running.
  */
-export const DEFAULT_TOOL_TIMEOUT_MS = 10 * 60 * 1000;
+export const DEFAULT_TOOL_TIMEOUT_MS = 20 * 60 * 1000;
 
 /** Model-facing cap on the override itself -- generous, but not unbounded. */
 const MAX_TIMEOUT_SECONDS = 3600; // 1 hour
