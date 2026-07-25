@@ -9,6 +9,7 @@
     "migrate:deploy": "node ../../packages/db/scripts/run-production-migrate.js"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "4.0.20",
     "@ai-sdk/openai": "4.0.15",
     "@ai-sdk/react": "^4.0.21",
     "@babel/core": "^8.0.1",
