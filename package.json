@@ -24,10 +24,16 @@
     "patch-package": "^8.0.1"
   },
   "overrides": {
-    "postcss": "^8.5.10",
+    "postcss": "^8.5.23",
     "@hono/node-server": "^1.19.13",
     "@blocksuite/icons": "file:patches/blocksuite-icons-patched.tgz",
-    "glob": "^13.0.6"
+    "glob": "^13.0.6",
+    "sharp": "^0.35.3",
+    "tar": "^7.5.22",
+    "valibot": "^1.4.2",
+    "brace-expansion": "^5.0.8",
+    "fast-uri": "^3.1.4",
+    "find-my-way": "^9.7.0"
   },
   "allowScripts": {
     "@prisma/engines@7.8.0": true,
