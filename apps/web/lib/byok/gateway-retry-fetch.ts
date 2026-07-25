@@ -43,6 +43,25 @@
  * 404, and any 5xx body containing a real permanent-error signal
  * (auth/quota/rate-limit/model-not-found keywords), passes straight
  * through untouched.
+ *
+ * FIXED (2026-07-25, confirmed live on the "Claudev" BYOK provider): a
+ * 403 came back with `content-type: application/octet-stream`, a
+ * `cf-ray` header (Cloudflare edge), and a genuinely BINARY body (not
+ * gzip we failed to decode -- there was no content-encoding header at
+ * all -- an actual non-text Cloudflare bot-challenge/block payload).
+ * That shape never matched any existing rule (403 isn't in the 5xx
+ * bucket, and none of the transient-body regexes can match binary
+ * garbage), so it was treated as instantly permanent -- indistinguishable
+ * to the user from "the model just stopped mid-turn," even though a
+ * near-identical failure on this SAME provider label recovered clean
+ * after exactly one retry minutes earlier. A genuine per-request auth
+ * 403 from a real API (bad key, revoked token, forbidden model) always
+ * comes back as small, readable JSON/text naming what's wrong -- an
+ * edge/CDN-level bot challenge is structurally different (binary,
+ * `cf-ray` present, no readable error message at all) and, like the
+ * 502/503/504 infra case above, worth a few retries since it's about the
+ * request/connection being flagged, not a fact about the account that a
+ * retry can't change.
  */
 
 import { logError } from '@entry/db/error-log';
@@ -94,7 +113,7 @@ function extractMessageText(bodyText: string): string {
   }
 }
 
-function matchesKnownTransientBody(status: number, bodyText: string): boolean {
+function matchesKnownTransientBody(status: number, bodyText: string, headers?: Headers): boolean {
   const trimmed = bodyText.trim();
   const messageText = extractMessageText(trimmed);
 
@@ -104,6 +123,17 @@ function matchesKnownTransientBody(status: number, bodyText: string): boolean {
   // whatever HTTP status it wants (this one used a bare 500).
   if (TRANSIENT_DESPITE_RATE_LIMIT_WORDING.test(messageText) || TRANSIENT_DESPITE_RATE_LIMIT_WORDING.test(trimmed)) {
     return true;
+  }
+
+  // See file comment (2026-07-25 update) -- a 403 that's actually a
+  // Cloudflare edge-level bot block/challenge (binary body, no readable
+  // message, `cf-ray` present) is worth retrying; a real per-request auth
+  // 403 always comes back as short readable text naming what's wrong, so
+  // that case still falls through to "not transient" below untouched.
+  if (status === 403 && headers?.get('cf-ray')) {
+    const looksBinary = /[\u0000-\u0008\u000E-\u001F\uFFFD]/.test(bodyText) || !messageText;
+    const looksLikeRealAuthError = PERMANENT_SIGNAL_PATTERN.test(messageText) || PERMANENT_SIGNAL_PATTERN.test(trimmed);
+    if (looksBinary && !looksLikeRealAuthError) return true;
   }
 
   // Any 404 on this relay is the known routing glitch -- see file comment
@@ -199,7 +229,7 @@ export function createGatewayRetryFetch(ctx?: GatewayRetryContext): typeof fetch
         return response; // couldn't read it, don't swallow a real error blind
       }
 
-      if (!matchesKnownTransientBody(response.status, bodyText)) return response;
+      if (!matchesKnownTransientBody(response.status, bodyText, response.headers)) return response;
 
       lastResponse = response;
       retriedAtLeastOnce = true;

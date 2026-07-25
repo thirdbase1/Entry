@@ -20,6 +20,56 @@
  */
 import { prisma } from './db.js';
 
+/**
+ * Strip characters Postgres's own text/JSONB validation will reject
+ * outright before we ever get to see a useful error. Confirmed live
+ * (2026-07-25): a BYOK relay's raw error response body was actually
+ * binary (a Cloudflare bot-challenge payload, not JSON/text at all --
+ * see gateway-retry-fetch.ts), and that raw string -- lone/unpaired
+ * UTF-16 surrogates, NUL bytes, other non-printable control bytes --
+ * flowed straight into `responseBody` and then `context`. `JSON.stringify`
+ * happily encodes lone surrogates as \uXXXX escapes, but Postgres's
+ * UTF-8 validation on the way into a text/jsonb column rejects those same
+ * escapes as invalid ("unsupported Unicode escape sequence", code
+ * 22P05) -- so the create() call itself threw, and the ONE place that's
+ * supposed to durably capture "what actually happened" instead silently
+ * lost the error entirely (see the catch below -- by design it doesn't
+ * retry or rethrow, so this failure mode was invisible without a live
+ * log tail at the exact moment it happened). Replacing anything that
+ * isn't valid, storable text with a placeholder means logError can never
+ * itself be the reason an error goes unrecorded, regardless of how
+ * garbled the thing it's describing is.
+ */
+function sanitizeForStorage(value: string): string {
+  // Drop lone (unpaired) surrogates -- valid in a JS string, not valid
+  // UTF-8/UTF-16 text once serialized. A valid pair is [\uD800-\uDBFF]
+  // immediately followed by [\uDC00-\uDFFF]; anything else is lone.
+  const noLoneSurrogates = value.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    '\uFFFD'
+  );
+  // Drop NUL and other C0 control bytes Postgres text also rejects,
+  // keeping common whitespace (tab/newline/CR).
+  return noLoneSurrogates.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '\uFFFD');
+}
+
+/** Recursively sanitize every string value in an arbitrary JSON-ish
+ *  structure (the `context` payload) so nothing buried inside it -- a
+ *  responseBody two levels deep in apiCallDetail, etc. -- can trip the
+ *  same Postgres rejection. */
+function sanitizeContextDeep(value: unknown, depth = 0): unknown {
+  if (depth > 10) return value; // guard against pathological nesting
+  if (typeof value === 'string') return sanitizeForStorage(value);
+  if (Array.isArray(value)) return value.map(v => sanitizeContextDeep(v, depth + 1));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = sanitizeContextDeep(v, depth + 1);
+    return out;
+  }
+  return value;
+}
+
+
 export interface LogErrorInput {
   source: string;
   error: unknown;
@@ -67,11 +117,11 @@ export function logError({ source, error, userId, chatId, context }: LogErrorInp
     .create({
       data: {
         source,
-        message: message.slice(0, 8000),
-        stack: stack?.slice(0, 8000),
+        message: sanitizeForStorage(message.slice(0, 8000)),
+        stack: stack ? sanitizeForStorage(stack.slice(0, 8000)) : undefined,
         userId,
         chatId,
-        context: mergedContext as any,
+        context: sanitizeContextDeep(mergedContext) as any,
       },
     })
     .catch(err => {
