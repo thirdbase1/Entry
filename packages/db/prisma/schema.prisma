@@ -906,6 +906,28 @@ model ChatVersion {
   // History page skip showing a Revert button on a version that IS the
   // live head.
   revertedFromVersionNumber Int?     @map("reverted_from_version_number")
+  // FIXED (2026-07-25, real user-reported bug: the version HISTORY list
+  // showed many more entries than actual turns -- e.g. #6, #10, #11, #12
+  // all from what was really one single agentic turn). Root cause:
+  // captureVersionFromSandboxDiff is called from TWO places -- once,
+  // silently, after EVERY agent step (onStepFinish, skipCard: true, a
+  // safety-net snapshot so in-progress work survives a mid-turn crash),
+  // and once for real at the true end of the turn (onFinish, skipCard:
+  // false, this is the one meant to be user-facing). `skipCard` only ever
+  // suppressed the inline CHAT card -- writeVersionRows() still gave every
+  // single one of those silent per-step snapshots its own real, permanent,
+  // incrementing versionNumber and persisted it as an ordinary row, and
+  // the versions-list route (GET .../versions) returns every row
+  // unconditionally. So the *chat transcript* correctly showed one card
+  // per turn (matching "1 version = 1 turn"), but the separate version
+  // HISTORY panel showed every hidden intermediate snapshot too.
+  // `hasCard` records which is which, straight from that same `skipCard`
+  // flag; the list route now filters to `hasCard: true` so it matches
+  // what the user actually experiences as "a version" -- one per turn --
+  // while the hidden snapshot rows still exist and still work exactly as
+  // before for their real purpose (git-diff baseline chain, revert-target
+  // lookups, mid-crash recovery).
+  hasCard                   Boolean  @default(true) @map("has_card")
   createdAt                 DateTime @default(now()) @map("created_at")
 
   @@unique([chatId, versionNumber])

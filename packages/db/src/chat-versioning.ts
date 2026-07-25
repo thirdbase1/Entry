@@ -170,6 +170,12 @@ async function writeVersionRows(
         linesAdded: totalAdded,
         linesRemoved: totalRemoved,
         revertedFromVersionNumber: opts.revertedFromVersionNumber ?? null,
+        // See ChatVersion.hasCard's schema comment -- a skipCard call is a
+        // silent per-step safety-net snapshot, not a real user-facing
+        // version; hasCard records exactly that distinction so the
+        // versions-list route can filter to what a user actually
+        // recognizes as "a version" (one per turn).
+        hasCard: !opts.skipCard,
       },
     });
 

@@ -517,7 +517,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     edit_file: tool({
       description: editFileTool.description,
       inputSchema: editFileTool.inputSchema,
-      execute: (input: { path: string; old_text: string; new_text: string; replace_all?: boolean }) => editFileTool.execute(input, execCtx),
+      execute: (input: { path: string; old_text?: string; new_text?: string; old_str?: string; new_str?: string; replace_all?: boolean }) => editFileTool.execute(input, execCtx),
     }),
     read_file: tool({
       description: readFileTool.description,

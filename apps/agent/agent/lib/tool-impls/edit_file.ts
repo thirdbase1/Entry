@@ -20,6 +20,30 @@ import { sandboxReadFile, sandboxWriteFile } from './sandbox-file-io.js';
  * enough surrounding context to unambiguously target one location,
  * rather than silently editing the wrong occurrence of a common snippet.
  */
+// FIXED (2026-07-25, real production failure: AI_InvalidToolInputError,
+// confirmed via error_logs on chatId pNoDkjoDqK9Ild5D, Claude Opus mid-turn
+// during a real user task). Claude models are heavily trained on
+// Anthropic's OWN built-in `str_replace_based_edit_tool` / text_editor
+// tool, whose parameters are literally named `old_str`/`new_str` -- so
+// despite this tool's description and schema saying `old_text`/`new_text`,
+// Claude periodically calls it with the OTHER, equally-natural-to-it
+// naming anyway (worse under load/distraction, but not exclusively --
+// it's a genuine trained habit, not a one-off slip). That mismatch is a
+// hard schema validation failure, not a soft "wrong content" mistake --
+// the whole tool call is thrown out before `execute` ever runs, wasting a
+// full step and, worse, reads to the user as the turn having silently
+// died for no reason.
+//
+// Deliberately NOT a z.preprocess() wrapper here even though that would
+// be simpler -- ToolImpl requires a genuine ZodObject (its `.shape` is
+// used elsewhere to build the JSON-schema tool declaration sent to the
+// model), and z.preprocess()'s return type is a ZodEffects/ZodPreprocess
+// wrapper, not a ZodObject, so it fails that type check. Instead:
+// old_str/new_str are real, declared-but-optional alias fields on the
+// SAME ZodObject (so the model can freely use either naming without any
+// validation error), and execute() below picks whichever pair was
+// actually provided, preferring the canonical old_text/new_text if both
+// happen to be present.
 export const editFileTool = {
   description:
     'Make a targeted edit to an EXISTING file by replacing one exact snippet of text with another, without ' +
@@ -29,19 +53,36 @@ export const editFileTool = {
     'and must appear exactly once, unless `replace_all` is set.',
   inputSchema: z.object({
     path: z.string().describe('Relative path (from the project root) of the file to edit.'),
-    old_text: z.string().describe('The exact existing text to find and replace. Must match exactly, including whitespace.'),
-    new_text: z.string().describe('The text to replace it with.'),
+    old_text: z.string().optional().describe('The exact existing text to find and replace. Must match exactly, including whitespace.'),
+    new_text: z.string().optional().describe('The text to replace it with.'),
+    old_str: z.string().optional().describe('Alias for old_text (accepted for compatibility).'),
+    new_str: z.string().optional().describe('Alias for new_text (accepted for compatibility).'),
     replace_all: z.boolean().optional().describe('Replace every occurrence of old_text instead of requiring exactly one match. Default false.'),
   }),
   async execute(
-    { path, old_text, new_text, replace_all }: { path: string; old_text: string; new_text: string; replace_all?: boolean },
+    { path, old_text, new_text, old_str, new_str, replace_all }: {
+      path: string;
+      old_text?: string;
+      new_text?: string;
+      old_str?: string;
+      new_str?: string;
+      replace_all?: boolean;
+    },
     ctx: ToolExecCtx
   ) {
+    const resolvedOldText = old_text ?? old_str;
+    const resolvedNewText = new_text ?? new_str;
+    if (resolvedOldText === undefined || resolvedNewText === undefined) {
+      return { ok: false, error: 'Both old_text (or old_str) and new_text (or new_str) are required.' };
+    }
+
     const read = await sandboxReadFile(ctx, path);
     if (!read.ok) return { ok: false, error: read.error };
 
     const { content } = read;
-    const occurrences = content.split(old_text).length - 1;
+    const old_text_resolved = resolvedOldText;
+    const new_text_resolved = resolvedNewText;
+    const occurrences = content.split(old_text_resolved).length - 1;
 
     if (occurrences === 0) {
       return { ok: false, error: `old_text was not found in "${path}". Read the current file content first to get an exact match.` };
@@ -53,7 +94,7 @@ export const editFileTool = {
       };
     }
 
-    const updated = replace_all ? content.split(old_text).join(new_text) : content.replace(old_text, new_text);
+    const updated = replace_all ? content.split(old_text_resolved).join(new_text_resolved) : content.replace(old_text_resolved, new_text_resolved);
 
     const write = await sandboxWriteFile(ctx, path, updated);
     if (!write.ok) return { ok: false, error: write.error };

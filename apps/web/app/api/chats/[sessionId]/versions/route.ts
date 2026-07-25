@@ -45,7 +45,17 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   // every ordinary turn.
   const onlyReverts = url.searchParams.get('onlyReverts') === '1';
 
-  const where: Record<string, unknown> = { chatId: sessionId };
+  // FIXED (2026-07-25, real bug: this list showed several entries per
+  // single turn -- e.g. #6, #10, #11, #12 all from one turn). See
+  // ChatVersion.hasCard's schema comment: captureVersionFromSandboxDiff
+  // also writes a real, numbered row after every individual agent STEP
+  // as a silent crash-safety snapshot (skipCard: true) -- those aren't
+  // versions a user ever consciously created, only the one written at
+  // the true end of the turn (onFinish, hasCard: true) is. Filtering here
+  // makes this list match "1 version = 1 turn" like it's supposed to;
+  // the hidden rows still exist and still work exactly as before for
+  // revert-target lookups, diff baselines, and crash recovery.
+  const where: Record<string, unknown> = { chatId: sessionId, hasCard: true };
   if (before && Number.isInteger(before)) where.versionNumber = { lt: before };
   if (onlyReverts) where.revertedFromVersionNumber = { not: null };
   if (q) {
@@ -77,14 +87,18 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   // `where` built above.
   const [versions, headVersion, totals] = await Promise.all([
     prisma.chatVersion.findMany({ where, orderBy: { versionNumber: 'desc' }, take: PAGE_SIZE + 1 }),
-    prisma.chatVersion.findFirst({ where: { chatId: sessionId }, orderBy: { versionNumber: 'desc' } }),
+    // Deliberately still hasCard-filtered here too -- "Live"/isHead below
+    // must point at the newest version the user can actually SEE and
+    // revert to in this list, not at a hidden mid-turn safety snapshot
+    // that happens to have a higher raw versionNumber.
+    prisma.chatVersion.findFirst({ where: { chatId: sessionId, hasCard: true }, orderBy: { versionNumber: 'desc' } }),
     prisma.chatVersion.aggregate({
-      where: { chatId: sessionId },
+      where: { chatId: sessionId, hasCard: true },
       _count: { _all: true },
       _sum: { linesAdded: true, linesRemoved: true },
     }),
   ]);
-  const revertCount = await prisma.chatVersion.count({ where: { chatId: sessionId, revertedFromVersionNumber: { not: null } } });
+  const revertCount = await prisma.chatVersion.count({ where: { chatId: sessionId, hasCard: true, revertedFromVersionNumber: { not: null } } });
 
   const hasMore = versions.length > PAGE_SIZE;
   const page = hasMore ? versions.slice(0, PAGE_SIZE) : versions;
