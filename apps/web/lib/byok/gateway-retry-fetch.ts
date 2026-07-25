@@ -78,7 +78,7 @@ const GENERIC_BODY_MAX_LENGTH = 400;
 // Keywords that mean "this is a REAL, permanent, descriptive error" -- if
 // any of these show up in an otherwise-generic-looking 5xx body, it's
 // NOT the relay glitch, don't retry it away.
-const PERMANENT_SIGNAL_PATTERN = /invalid[_ ]?api[_ ]?key|unauthorized|authentication|insufficient[_ ]?quota|insufficient[_ ]?balance|rate[_ ]?limit|model[_ ]?not[_ ]?found|does not exist|permission|forbidden/i;
+export const PERMANENT_SIGNAL_PATTERN = /invalid[_ ]?api[_ ]?key|unauthorized|authentication|insufficient[_ ]?quota|insufficient[_ ]?balance|rate[_ ]?limit|model[_ ]?not[_ ]?found|does not exist|permission|forbidden/i;
 
 // FIXED (2026-07-25, confirmed live: Claude Opus 5 via freemodel.dev,
 // real BYOK turn genuinely mid-work): the exact body

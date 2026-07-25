@@ -6,7 +6,7 @@ buildCommand = "SKIP_PRODUCTION_MIGRATE_GUARD=1 npm run build && mkdir -p apps/w
 startCommand = "node apps/web/.next/standalone/apps/web/server.js"
 port = 3000
 projectId = "proj_ibab5ldta4l63qoentq7"
-deploymentId = "dep_rmpcknkazqjlix6s0chl3"
+deploymentId = "dep_hm6h1mkhjr5wzqpbb9wk1"
 projectUrl = "https://entry.pxxl.pro"
-deploymentUrl = "https://pxxl.app/dashboard/projects/proj_ibab5ldta4l63qoentq7/deployments/dep_rmpcknkazqjlix6s0chl3"
-lastDeployedAt = "2026-07-25T19:54:57.095Z"
+deploymentUrl = "https://pxxl.app/dashboard/projects/proj_ibab5ldta4l63qoentq7/deployments/dep_hm6h1mkhjr5wzqpbb9wk1"
+lastDeployedAt = "2026-07-25T20:05:03.580Z"

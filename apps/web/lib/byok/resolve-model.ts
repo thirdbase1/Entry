@@ -69,6 +69,10 @@ export interface ResolvedByokModel {
    *  applicable/possible this turn -- never throws, safe to call
    *  unconditionally every turn. */
   prepareGoogleCache: ((systemText: string, toolSchemasJson: string) => Promise<string | null>) | null;
+  /** The owning UserModelProvider row id -- used by provider-cooldown.ts to track/avoid a provider whose account just hit a permanent error (insufficient balance, quota, etc). */
+  providerId: string;
+  /** The UserModelProviderModel row id actually used -- may differ from the id passed in if resolveByokModel substituted a fallback (see route.ts's cooldown check). */
+  byokModelId: string;
 }
 
 /** Ownership-checked: a model row id alone is never sufficient — it must belong to userId. */
@@ -136,5 +140,35 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
         ? (systemText: string, toolSchemasJson: string) =>
             prepareGoogleCache({ apiKey, baseUrl: provider.baseUrl, modelId: modelRow.modelId, systemText, toolSchemasJson, userId })
         : null,
+    providerId: provider.id,
+    byokModelId: modelRow.id,
   };
+}
+
+/**
+ * Cross-provider fallback picker (2026-07-25, see provider-cooldown.ts's
+ * file comment for the full incident this fixes). Called only when the
+ * user's originally-requested model's provider is currently in cooldown
+ * (a real, recent permanent account-level error) -- finds the best OTHER
+ * enabled model for this user, preferring a DIFFERENT provider (an
+ * account-level failure is almost always provider-account-scoped, so
+ * switching models on the exact same dead account rarely helps) and,
+ * among those, one that last tested successfully. Returns null if there's
+ * genuinely nothing else enabled to fall back to (turn proceeds on the
+ * original model either way -- something is always better than resolveByokModel
+ * throwing "not found" for a model that, in fact, exists and is enabled).
+ */
+export async function pickFallbackByokModel(userId: string, excludeProviderId: string): Promise<string | null> {
+  const candidates = await prisma.userModelProviderModel.findMany({
+    where: { isEnabled: true, provider: { userId } },
+    select: { id: true, providerId: true, lastTestStatus: true, lastTestedAt: true },
+    orderBy: [{ lastTestedAt: 'desc' }],
+  });
+  const otherProvider = candidates.find(c => c.providerId !== excludeProviderId && c.lastTestStatus === 'success');
+  if (otherProvider) return otherProvider.id;
+  const anyOtherProvider = candidates.find(c => c.providerId !== excludeProviderId);
+  if (anyOtherProvider) return anyOtherProvider.id;
+  // Nothing on a different provider at all -- last resort, another model on the SAME provider (still better than nothing if the account error was actually model-specific, not account-wide).
+  const sameProviderOther = candidates.find(c => c.providerId === excludeProviderId);
+  return sameProviderOther?.id ?? null;
 }

@@ -89,7 +89,9 @@ import { logError } from '@entry/db/error-log';
 import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
 import { recordUsageEvent } from '@entry/db/usage-metering';
 import { withApiErrorHandling } from '@/lib/api-error';
-import { resolveByokModel } from '@/lib/byok/resolve-model';
+import { resolveByokModel, pickFallbackByokModel } from '@/lib/byok/resolve-model';
+import { getProviderCooldown, markProviderCooldown } from '@/lib/byok/provider-cooldown';
+import { PERMANENT_SIGNAL_PATTERN } from '@/lib/byok/gateway-retry-fetch';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
 import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { isGatewayModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
@@ -297,12 +299,41 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // always awaited before a resolution failure's error response goes out
   // -- the user's message is now guaranteed saved even on this path.
   let resolved: Awaited<ReturnType<typeof resolveByokModel>> | ReturnType<typeof resolveGatewayModel>;
+  // Plain 'in' narrowing on this union degrades to an unhelpful intersection type
+  // (ResolvedGatewayModel has no providerId field at all, not even optional) --
+  // an explicit type guard narrows cleanly instead.
+  const isByokResolved = (r: typeof resolved): r is Awaited<ReturnType<typeof resolveByokModel>> => 'providerId' in r;
   try {
     resolved = byokModelId
       ? await resolveByokModel(byokModelId, userId)
       : requestedModel
         ? resolveGatewayModel(requestedModel)
         : resolveGatewayModel(await resolveModelIdForProvider('anthropic'));
+
+    // FALLBACK ON COOLDOWN (2026-07-25, see provider-cooldown.ts's file
+    // comment for the incident this fixes): a BYOK provider whose account
+    // just hit a permanent error (insufficient balance, quota exhausted,
+    // etc) stays in cooldown for 15 minutes. Re-selecting a model on that
+    // exact same account every single turn just reproduces the identical
+    // dead-on-arrival failure -- so if the resolved model's provider is
+    // currently in cooldown, transparently substitute the best other
+    // enabled model (different provider preferred) BEFORE any streaming
+    // starts, instead of letting the turn die the same way again.
+    if (isByokResolved(resolved)) {
+      const cooldownReason = getProviderCooldown(resolved.providerId);
+      if (cooldownReason) {
+        const fallbackId = await pickFallbackByokModel(userId, resolved.providerId);
+        if (fallbackId && fallbackId !== resolved.byokModelId) {
+          console.warn('[direct chat] provider in cooldown, substituting fallback model', {
+            chatId,
+            deadProvider: resolved.providerLabel,
+            cooldownReason,
+            fallbackByokModelId: fallbackId,
+          });
+          resolved = await resolveByokModel(fallbackId, userId);
+        }
+      }
+    }
   } catch (err) {
     await preSave;
     endTurn();
@@ -945,6 +976,17 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     onError({ error }) {
       console.error('[direct chat] streamText error', chatId, providerLabel, modelId, error);
       logError({ source: 'direct-chat-streamtext', error, userId, chatId, context: { providerLabel, modelId } });
+      // See provider-cooldown.ts + the fallback-substitution block above --
+      // only a genuinely PERMANENT account-level signal (insufficient
+      // balance/quota, real auth failure, etc) should take this provider
+      // out of rotation; a transient blip has no business benching a
+      // provider that's actually fine.
+      if (isByokResolved(resolved)) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (PERMANENT_SIGNAL_PATTERN.test(message)) {
+          markProviderCooldown(resolved.providerId, message);
+        }
+      }
     },
     // Added 2026-07-15 (explicit user report: "after one tool call model
     // still failed so log everything") — onError/turn-error above only
