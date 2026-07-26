@@ -432,13 +432,29 @@ function DirectChatSession({
       // reattach itself throws (the one condition that actually rules
       // out "still working, just a rough patch on this connection").
       void (async () => {
-        try {
-          await chat.resumeStream();
-        } catch (resumeErr) {
-          console.error('[direct chat turn error] resumeStream also failed', resumeErr);
-          reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
-          setTurnError(readableChatErrorMessage(error));
+        // RETRY WITH BACKOFF (2026-07-26, continuation of the same
+        // reconnect-first fix): a single resumeStream() attempt can
+        // itself transiently fail -- e.g. the reattach GET races a flaky
+        // edge hop right as the original connection is being torn down
+        // -- even though the turn-lock backing it is genuinely still
+        // held and the turn is still running. Since resumeStream() is a
+        // cheap idempotent GET (204 if there's truly nothing left, see
+        // [chatId]/stream/route.ts), it's safe to retry a few times with
+        // backoff before concluding it's a real error rather than giving
+        // up on the very first hiccup.
+        let lastResumeErr: unknown = null;
+        for (const delayMs of [0, 1000, 3000, 6000]) {
+          if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+          try {
+            await chat.resumeStream();
+            return;
+          } catch (resumeErr) {
+            lastResumeErr = resumeErr;
+          }
         }
+        console.error('[direct chat turn error] resumeStream retries exhausted', lastResumeErr);
+        reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
+        setTurnError(readableChatErrorMessage(error));
       })();
     },
     async onFinish() {
@@ -756,6 +772,20 @@ function DirectChatSession({
               const stillActive = statusRes.ok && (await statusRes.json())?.active === true;
               if (stillActive) {
                 setPendingTurn(true);
+                // ACTIVELY REATTACH (2026-07-26, real user report: "if am
+                // online the stuff supposed to stream which is not
+                // doing"). Confirming the turn is still alive server-side
+                // isn't enough on its own -- it used to just flip the
+                // busy flag and wait for the next slow poll tick to
+                // eventually catch up via DB snapshots. If this browser
+                // isn't already mid-stream (chat.status !== 'streaming'/
+                // 'submitted'), actively pull the live Redis-mirrored
+                // stream now so tokens actually appear in real time
+                // instead of the tab just sitting there quietly "busy"
+                // until the turn finishes.
+                if (chat.status !== 'streaming' && chat.status !== 'submitted') {
+                  void chat.resumeStream();
+                }
               } else {
                 setPendingTurn(false);
               }
