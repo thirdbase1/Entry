@@ -53,6 +53,7 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
     select: {
       model: true,
       provider: true,
+      source: true,
       inputTokens: true,
       outputTokens: true,
       cacheCreationTokens: true,
@@ -119,6 +120,7 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
       const lastUsedAt = rows.reduce((max, r) => (r.createdAt > max ? r.createdAt : max), rows[0].createdAt);
       const failedCalls = rows.filter(r => !r.success).length;
       const sharedMeta = kind === 'shared' ? sharedProviderMeta.get(provider.slice('shared:'.length)) : null;
+      const modelCacheHitRate = agg.inputTokens + agg.cacheReadTokens > 0 ? agg.cacheReadTokens / (agg.inputTokens + agg.cacheReadTokens) : 0;
       return {
         model,
         provider,
@@ -126,9 +128,12 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
         providerLabel:
           kind === 'byok' ? provider.slice('byok:'.length) : kind === 'shared' ? sharedMeta?.label ?? 'Shared' : 'Entry',
         ...agg,
+        avgCostPerCallUsd: agg.calls > 0 ? agg.costUsd / agg.calls : 0,
+        cacheHitRate: modelCacheHitRate,
         unpricedCalls,
         failedCalls,
         lastUsedAt,
+        firstUsedAt: rows.reduce((min, r) => (r.createdAt < min ? r.createdAt : min), rows[0].createdAt),
         spendCapUsd: sharedMeta?.spendCapUsd != null ? Number(sharedMeta.spendCapUsd) : null,
       };
     })
@@ -149,11 +154,59 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
     };
   });
 
+  // 14-day daily trend -- cost + tokens per calendar day, oldest first, so
+  // the UI can render a simple bar chart without doing any date math
+  // client-side. Days with zero events still get an explicit zero row
+  // (never skipped) so the chart's x-axis stays evenly spaced.
+  const trendDays = 14;
+  const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const byDay = new Map<string, Row[]>();
+  for (const e of events) {
+    const key = dayKey(e.createdAt);
+    const arr = byDay.get(key) ?? [];
+    arr.push(e);
+    byDay.set(key, arr);
+  }
+  const dailyTrend = Array.from({ length: trendDays }, (_, i) => {
+    const d = new Date(startOfToday);
+    d.setDate(d.getDate() - (trendDays - 1 - i));
+    const key = dayKey(d);
+    const rows = byDay.get(key) ?? [];
+    return { date: key, ...sum(rows) };
+  });
+
+  // Per-route breakdown ("source" = which server code path served the
+  // call, e.g. "direct-chat" vs a future router path) -- separate axis
+  // from per-model, useful for spotting a specific surface driving spend.
+  const bySourceMap = new Map<string, Row[]>();
+  for (const e of events) {
+    const rows = bySourceMap.get(e.source) ?? [];
+    rows.push(e);
+    bySourceMap.set(e.source, rows);
+  }
+  const bySource = Array.from(bySourceMap.entries())
+    .map(([source, rows]) => ({ source, ...sum(rows) }))
+    .sort((a, b) => b.totalTokens - a.totalTokens);
+
+  const allTimeTotals = sum(events);
+  const cacheHitRate =
+    allTimeTotals.inputTokens + allTimeTotals.cacheReadTokens > 0
+      ? allTimeTotals.cacheReadTokens / (allTimeTotals.inputTokens + allTimeTotals.cacheReadTokens)
+      : 0;
+
   return NextResponse.json({
     today: sum(todayRows),
     month: sum(monthRows),
-    allTime: sum(events),
+    allTime: allTimeTotals,
+    averages: {
+      costPerCallUsd: allTimeTotals.calls > 0 ? allTimeTotals.costUsd / allTimeTotals.calls : 0,
+      tokensPerCall: allTimeTotals.calls > 0 ? allTimeTotals.totalTokens / allTimeTotals.calls : 0,
+      cacheHitRate,
+      failureRate: events.length > 0 ? events.filter(e => !e.success).length / events.length : 0,
+    },
     byModel,
+    bySource,
+    dailyTrend,
     sharedProviders,
     // Surfaced so the UI can honestly say "as of this many recorded
     // calls" rather than implying it's a live-updating total between
