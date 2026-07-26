@@ -22,8 +22,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   const chat = await getChatSession(session.user.id, sessionId);
   if (!chat) return Response.json({ error: 'Not found' }, { status: 404 });
 
+  // FIXED (2026-07-26, real bug: no hasCard filter here at all). The
+  // list route filters to hasCard:true specifically because every bash
+  // call >=10s creates its own hidden, skipCard:true safety-snapshot row
+  // (see chat-versioning.ts) -- this export ignored that entirely, so a
+  // chat with any heavy bash usage got its exported changelog padded
+  // with dozens of near-duplicate entries for one real turn, AND could
+  // burn through the whole EXPORT_CAP on that invisible noise instead of
+  // the real, user-visible history it's actually capped to protect.
   const versions = await prisma.chatVersion.findMany({
-    where: { chatId: sessionId },
+    where: { chatId: sessionId, hasCard: true },
     orderBy: { versionNumber: 'desc' },
     take: EXPORT_CAP,
   });

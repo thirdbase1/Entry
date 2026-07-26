@@ -30,7 +30,17 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
     orderBy: { path: 'asc' },
   });
 
-  const head = await prisma.chatVersion.findFirst({ where: { chatId: sessionId }, orderBy: { versionNumber: 'desc' } });
+  // FIXED (2026-07-26, real bug: isHead here was computed from the raw
+  // MAX(versionNumber) with no `hasCard` filter, unlike the list route's
+  // own headVersionNumber query (see that route's own comment for why:
+  // "Live" must point at the newest version the user can actually SEE,
+  // not a hidden mid-turn safety snapshot that happens to have a higher
+  // raw versionNumber). This route disagreeing with the list on which
+  // version is "Live" meant tapping a card could land on a detail page
+  // that either wrongly showed the true current version as NOT live, or
+  // wrongly tagged some other version as live -- exactly the kind of
+  // inconsistency this whole history feature exists to avoid.
+  const head = await prisma.chatVersion.findFirst({ where: { chatId: sessionId, hasCard: true }, orderBy: { versionNumber: 'desc' } });
 
   return Response.json({
     versionNumber: version.versionNumber,
