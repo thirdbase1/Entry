@@ -1559,7 +1559,18 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           const raced = await Promise.race([pending, timeout]);
           clearTimeout(timeoutId!);
           if (raced === 'timeout') {
-            controller.enqueue({ type: 'custom', kind: 'entry.heartbeat' });
+            // PADDED (2026-07-26, part of the 'stops in 30s' investigation):
+            // Cloudflare sits in front of entry.pxxl.pro (confirmed via
+            // cf-ray/cf-cache-status response headers) and CDN-family edges
+            // are known to coalesce/delay flushing very small streamed
+            // chunks rather than forwarding each one the instant it's
+            // written -- a few bytes of JSON is well inside that danger
+            // zone. Padding with a filler field costs nothing (the client
+            // ignores unknown `kind`s outright, see this chunk's own
+            // original comment above) but makes each heartbeat large enough
+            // that buffering-by-size heuristics are far less likely to sit
+            // on it.
+            controller.enqueue({ type: 'custom', kind: 'entry.heartbeat', providerMetadata: { entry: { pad: '0'.repeat(2048) } } });
             continue;
           }
           const { value: chunk, done } = raced;

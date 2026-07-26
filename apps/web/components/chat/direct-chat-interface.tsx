@@ -297,6 +297,14 @@ function DirectChatSession({
   useEffect(() => {
     turnErrorRef.current = turnError;
   }, [turnError]);
+  // Same staleness problem turnErrorRef solves, for the same reason:
+  // scheduleNext()'s closure below (recreated only on [sessionId, chat.id,
+  // chat.status]) needs an always-fresh read of pendingTurn, not whatever
+  // it was when the effect last ran.
+  const pendingTurnRef = useRef(pendingTurn);
+  useEffect(() => {
+    pendingTurnRef.current = pendingTurn;
+  }, [pendingTurn]);
   // STALL DETECTION (2026-07-23, explicit user report: "anytime my screen
   // turn off the agent stop instantly... never stop even if it lose
   // internet connection"). Root cause: the recovery poll right below this
@@ -338,7 +346,15 @@ function DirectChatSession({
         // fetch on THIS side never got a clean error, leaving the chat UI
         // stuck instead of recovering. 20s matches STALL_MS below -- see
         // fetch-with-idle-timeout.ts's file comment for the full story.
-        fetch: fetchWithIdleTimeout(20_000),
+        // WIDENED (2026-07-26, part of the 'stops in 30s' investigation):
+        // was 20_000, only ~1.3x the server's 15s heartbeat interval -- a
+        // single slow/buffered heartbeat (Cloudflare sits in front of
+        // entry.pxxl.pro and is known to coalesce small chunks under some
+        // conditions) could trip this before a 2nd heartbeat had a chance
+        // to land. 45_000 gives 3 full heartbeat cycles of slack -- still
+        // fires fast on a genuinely dead connection, just no longer a hair
+        // trigger on ordinary heartbeat jitter.
+        fetch: fetchWithIdleTimeout(45_000),
       }),
     [byokModelId, requestedModel]
   );
@@ -797,7 +813,12 @@ function DirectChatSession({
     const scheduleNext = () => {
       if (cancelled || gaveUpRef.current) return;
       const last = chat.messages[chat.messages.length - 1];
-      const stillCatchingUp = !last || last.role === 'user';
+      // WIDENED (2026-07-26): used to only fast-poll while waiting on the
+      // very first reply (last message still from 'user'). Also fast-poll
+      // whenever pendingTurn thinks a turn is active -- e.g. mid-tool-call
+      // background work -- so catch-up snapshots read as a near-continuous
+      // stream instead of one big 3s-later jump.
+      const stillCatchingUp = !last || last.role === 'user' || pendingTurnRef.current;
       pollIdRef.current = window.setTimeout(() => {
         tryRecover();
         scheduleNext();
