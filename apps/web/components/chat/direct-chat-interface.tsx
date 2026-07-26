@@ -604,6 +604,17 @@ function DirectChatSession({
         // persisted under.
         const activeId = sessionId ?? chat.id;
         if (!activeId) return;
+        // BUG FIX (owner report 2026-07-26: "I didn't send any chat but
+        // once my chat load it shows [the connection-error banner]"):
+        // a genuinely brand-new chat -- zero messages, nothing ever sent
+        // -- was NEVER persisted server-side in the first place, so
+        // `/api/chats/${activeId}` legitimately 404s for it, every single
+        // poll, forever. After 8 misses this recovery loop (whose whole
+        // purpose is recovering an INTERRUPTED turn) was firing the scary
+        // "Couldn't send that message" error at someone who never sent
+        // anything at all. There is nothing to recover when there are no
+        // messages yet -- skip the recovery loop entirely in that case.
+        if (chat.messages.length === 0) return;
         // Confirmed real gap (2026-07-11): this used to bail out unless
         // `chat.status` was already 'streaming'/'submitted'/'error' -- but
         // status is a property of THIS component instance, reset to

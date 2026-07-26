@@ -232,7 +232,11 @@ export function UsageSection() {
         <StatCard label="Today" value={fmtUsd(data.today.costUsd)} sub={`${fmtTokens(data.today.totalTokens)} tokens · ${data.today.calls} calls`} />
         <StatCard label="This month" value={fmtUsd(data.month.costUsd)} sub={`${fmtTokens(data.month.totalTokens)} tokens · ${data.month.calls} calls`} />
         <StatCard label="All time spend" value={fmtUsd(data.allTime.costUsd)} sub={`${data.allTime.calls} calls total`} />
-        <StatCard label="All time tokens" value={fmtTokens(data.allTime.totalTokens)} sub={`${fmtTokens(data.allTime.inputTokens)} in · ${fmtTokens(data.allTime.outputTokens)} out`} />
+        <StatCard
+          label="All time tokens"
+          value={fmtTokens(data.allTime.totalTokens)}
+          sub={`${fmtTokens(data.allTime.inputTokens)} in · ${fmtTokens(data.allTime.outputTokens)} out · ${fmtTokens(data.allTime.cacheCreationTokens + data.allTime.cacheReadTokens)} cached`}
+        />
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

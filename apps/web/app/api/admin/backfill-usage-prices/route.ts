@@ -51,9 +51,18 @@ export async function POST(req: NextRequest) {
   let repriced = 0;
   let stillUnmatched = 0;
   const unmatchedModels = new Set<string>();
+  // Look up "the best rate known TODAY", not "the rate effective at the
+  // historical call's own timestamp" -- almost every rate row just seeded
+  // has an effectiveFrom of today, which is AFTER most of the history
+  // we're trying to backfill, so a same-timestamp lookup would find
+  // nothing for calls made before the rate existed. This is a one-off
+  // backfill precisely to apply newly-known rates retroactively, so
+  // "now" is the correct anchor -- ongoing recordUsageEvent() calls still
+  // price strictly against the rate effective at THEIR own call time.
+  const now = new Date();
 
   for (const row of rows) {
-    const rate = await findRateForModel(row.model, row.createdAt);
+    const rate = await findRateForModel(row.model, now);
     if (!rate) {
       stillUnmatched += 1;
       unmatchedModels.add(row.model);

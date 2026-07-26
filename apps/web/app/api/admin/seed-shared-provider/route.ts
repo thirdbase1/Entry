@@ -112,13 +112,19 @@ export async function POST(req: Request) {
     const existing = await prisma.userModelProviderModel.findFirst({
       where: { providerId: provider.id, modelId: m.alias },
     });
+    // reasoningEnabled: true -- owner ask 2026-07-26: "make sure all
+    // hncsec model thinking mode is enabled by default". These are shared,
+    // platform-picked models (not a user's own BYOK key), so defaulting
+    // thinking ON for all of them is a one-time product decision made
+    // here at seed time, not something the end user has to opt into per
+    // model.
     const row = existing
       ? await prisma.userModelProviderModel.update({
           where: { id: existing.id },
-          data: { label: m.displayLabel, isEnabled: true },
+          data: { label: m.displayLabel, isEnabled: true, reasoningEnabled: true },
         })
       : await prisma.userModelProviderModel.create({
-          data: { providerId: provider.id, modelId: m.alias, label: m.displayLabel, isEnabled: true },
+          data: { providerId: provider.id, modelId: m.alias, label: m.displayLabel, isEnabled: true, reasoningEnabled: true },
         });
 
     if (m.priced) {
