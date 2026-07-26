@@ -401,8 +401,29 @@ function DirectChatSession({
         void chat.resumeStream();
         return;
       }
-      reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
-      setTurnError(readableChatErrorMessage(error));
+      // RECONNECT-FIRST (2026-07-26, real user report: "it stops in 30s
+      // ... after an hour it shows it worked for 16 minutes" -- the
+      // `fetchWithIdleTimeout(20_000)` abort below is expected and
+      // healthy for a long silent tool call (see that file's comment),
+      // but this handler used to just show a scary "couldn't reach
+      // server" error and stop, never attempting to reattach to the
+      // turn that's still genuinely running server-side. Any transport-
+      // shaped failure (idle-timeout abort, a dropped connection, a
+      // transient network blip) should ALWAYS try to reattach to the
+      // live Redis-mirrored stream first -- the `/stream` route is
+      // idempotent (204 if the turn already finished) so this is safe to
+      // call unconditionally. Only surface a real error banner if the
+      // reattach itself throws (the one condition that actually rules
+      // out "still working, just a rough patch on this connection").
+      void (async () => {
+        try {
+          await chat.resumeStream();
+        } catch (resumeErr) {
+          console.error('[direct chat turn error] resumeStream also failed', resumeErr);
+          reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
+          setTurnError(readableChatErrorMessage(error));
+        }
+      })();
     },
     async onFinish() {
       setTurnError(null);
@@ -698,13 +719,35 @@ function DirectChatSession({
               if (!sessionId) silentlyUpdateChatUrl(`/chats/${activeId}`);
             }
           } else if (Date.now() - lastGrowthAtRef.current > SETTLE_QUIET_MS) {
-            // Only declare the turn actually settled once it's been quiet
-            // for comfortably longer than the server's own incremental-
-            // save throttle window -- otherwise a perfectly healthy,
-            // still-running turn sitting inside a normal save gap would
-            // flip the button back to idle for a moment, then black again
-            // right after, which reads as broken/flickery.
-            setPendingTurn(false);
+            // AUTHORITATIVE SETTLE CHECK (2026-07-26, real user report:
+            // "it stops in 30s ... after an hour it shows it worked for
+            // 16 minutes"). This used to declare "settled" (pendingTurn
+            // -> false, UI looks fully idle) from wall-clock quiet time
+            // ALONE -- correct for the 3s incremental-save throttle gap
+            // this was originally written for, but dead wrong for a
+            // legitimately long-running SILENT tool call (a sandbox run,
+            // browser_use, a slow search) that can go minutes between DB
+            // saves while still very much alive. Before giving up, ask
+            // the one place that actually knows: the Redis turn-lock
+            // (same one route.ts renews via `startTurnHeartbeat` for as
+            // long as the turn's own async work is alive, independent of
+            // this tab's connection). Only genuinely declare idle when
+            // the server confirms there's no active turn; otherwise keep
+            // the busy-lock and let the next tick re-check, no matter how
+            // long the quiet stretch runs.
+            try {
+              const statusRes = await fetch(`/api/direct/chat/${activeId}/turn-status`);
+              const stillActive = statusRes.ok && (await statusRes.json())?.active === true;
+              if (stillActive) {
+                setPendingTurn(true);
+              } else {
+                setPendingTurn(false);
+              }
+            } catch {
+              // Network hiccup checking status -- don't falsely declare
+              // idle off the back of a failed status check; try again
+              // next tick.
+            }
           }
         } catch {
           // best-effort -- retried on the next online/visibility event
