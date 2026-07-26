@@ -161,13 +161,66 @@ export async function publishTurnEnd(chatId: string, turnId: string): Promise<vo
   }
 }
 
+// DUPLICATE-CONTENT FIX (2026-07-27, real user report + screen
+// recording, THIRD time this exact symptom was reported: an already-
+// finished paragraph of an assistant reply visibly repeating itself over
+// and over, growing for ~30s, on a single continuously-open tab with a
+// visibly flaky mobile connection -- no reload, no second tab). Root
+// cause, confirmed by reading this file + direct-chat-interface.tsx's
+// onError handler together (not assumed): `readTurnStream` always
+// started `lastId` at Redis's `'0'`, i.e. EVERY single call replayed the
+// turn's ENTIRE mirrored chunk history from the very beginning, no
+// matter how many times it's called. But `readTurnStream` is ONLY ever
+// invoked by the GET `/stream` reattach route -- the original live turn
+// (route.ts's own POST response) enqueues chunks to its OWN controller
+// directly and never calls this function at all (confirmed: its only
+// interaction with turn-lock.ts is the fire-and-forget `publishTurnChunk`
+// mirror write). So every call to this generator is inherently a
+// RECONNECT. On a flaky connection, `direct-chat-interface.tsx`'s onError
+// handler retries `chat.resumeStream()` up to 4 times with backoff
+// (`[0, 1000, 3000, 6000]`) PER hiccup, and `resume: true` also fires it
+// once on every mount -- and the SAME tab, having never reloaded, already
+// holds 100% of everything generated so far in `chat.messages`. Every one
+// of those resumeStream() calls re-streamed the FULL history from '0'
+// straight into that same already-populated message via ordinary
+// 'text-delta' chunks (which are pure-append by protocol, there is no
+// "replace" semantic per chunk) -- each reconnect attempt stacked another
+// full duplicate copy of everything generated so far on top of the
+// message, worse the flakier the connection (matches the video exactly:
+// multiple duplicate copies appearing within one continuous ~30s
+// recording, correlating with visibly dropping network throughput).
+//
+// FIX: track, per chatId+turnId, the highest stream entry id any PRIOR
+// reconnect for this exact still-active turn has already delivered
+// (module-level Map -- same "persistent long-lived Pxxl process" pattern
+// already used by provider-cooldown.ts's cooldown map and this file's own
+// lock/heartbeat state). The FIRST reconnect for a turn still legitimately
+// replays from '0' (a reload landing very early, before any incremental DB
+// save has landed, must not silently lose the whole response) -- every
+// SUBSEQUENT reconnect for that SAME turn resumes exactly where the
+// previous one left off instead of re-replaying what's already been sent,
+// closing off the duplication at its actual source. Cleared the moment
+// the turn ends (TURN_END_MARKER) so it can never leak across turns or
+// grow unbounded.
+const turnReplayWatermark = new Map<string, string>();
+function watermarkKey(chatId: string, turnId: string): string {
+  return `${chatId}:${turnId}`;
+}
+
 export async function* readTurnStream(
   chatId: string,
   signal: AbortSignal
 ): AsyncGenerator<{ chunk: unknown; turnId: string }> {
   const redis = getRawRedis().duplicate();
   const key = streamKey(chatId);
-  let lastId = '0';
+  // Best-effort turnId for the watermark lookup: acquireTurnLock/
+  // getActiveTurnId already scope one turnId per active lock, so read it
+  // once up front -- if it's ever unavailable (lock just expired between
+  // the route's own getActiveTurnId check and here), '0' is still the
+  // safe fallback (equivalent to today's always-full-replay behavior for
+  // that edge case only).
+  const activeTurnId = await getActiveTurnId(chatId);
+  let lastId = (activeTurnId && turnReplayWatermark.get(watermarkKey(chatId, activeTurnId))) || '0';
   const onAbort = () => {
     redis.disconnect();
   };
@@ -225,7 +278,17 @@ export async function* readTurnStream(
         } catch {
           continue;
         }
-        if ((parsed as { type?: string })?.type === TURN_END_MARKER) return;
+        // Record the watermark for whichever turnId this chunk actually
+        // belongs to BEFORE yielding -- if the consumer (the HTTP
+        // controller) throws partway through forwarding this batch, the
+        // worst case is a future reconnect re-sends a few already-seen
+        // chunks (harmless -- isSafeToAdopt/the DB poll already tolerate
+        // that), never that it skips content that never made it out.
+        if (turnId) turnReplayWatermark.set(watermarkKey(chatId, turnId), id);
+        if ((parsed as { type?: string })?.type === TURN_END_MARKER) {
+          if (turnId) turnReplayWatermark.delete(watermarkKey(chatId, turnId));
+          return;
+        }
         yield { chunk: parsed, turnId };
       }
     }
