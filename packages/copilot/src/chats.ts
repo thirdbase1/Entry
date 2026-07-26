@@ -116,6 +116,38 @@ export async function saveChatSnapshot(
   await jobQueue.add('copilot.embedding.chats', { userId, sessionId }).catch(() => {});
 }
 
+/**
+ * Self-heals any ALREADY-persisted duplicate message rows (owner report
+ * 2026-07-26: the first message of a chat repeating itself dozens of
+ * times) by collapsing to one entry per message `id` on every read --
+ * see apps/web/lib/direct-chat/persist-chat-events.ts's matching (and
+ * more detailed) 2026-07-26 comment for the write-side root cause. This
+ * is deliberately duplicated here rather than imported (packages/copilot
+ * must not depend on the apps/web app) -- same tiny, pure logic either
+ * side.
+ */
+function dedupeEventsById(events: unknown): unknown {
+  if (!Array.isArray(events)) return events;
+  const lastIndexById = new Map<string, number>();
+  events.forEach((ev, i) => {
+    const id = (ev as { id?: unknown } | null)?.id;
+    if (typeof id === 'string') lastIndexById.set(id, i);
+  });
+  const out: unknown[] = [];
+  const seen = new Set<string>();
+  events.forEach((ev, i) => {
+    const id = (ev as { id?: unknown } | null)?.id;
+    if (typeof id !== 'string') {
+      out.push(ev);
+      return;
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(i === lastIndexById.get(id) ? ev : (events as unknown[])[lastIndexById.get(id)!]);
+  });
+  return out;
+}
+
 export async function getChatSession(userId: string, sessionId: string): Promise<ChatSessionSnapshot | null> {
   const row = await prisma.eveChatSession.findFirst({
     where: { id: sessionId, userId },
@@ -130,7 +162,7 @@ export async function getChatSession(userId: string, sessionId: string): Promise
     requestedModel: row.requestedModel,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    events: row.events,
+    events: dedupeEventsById(row.events),
     cursor: row.cursor,
   };
 }

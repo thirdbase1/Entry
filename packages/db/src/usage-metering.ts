@@ -84,10 +84,27 @@ export async function getProviderSpendUsd(providerId: string): Promise<number> {
 }
 
 /**
- * Latest rate row effective at `at` whose modelPattern prefix-matches
- * `model` (either direction: "claude-sonnet-4-5" must hit a
- * "anthropic/claude-sonnet-4-5" pattern and vice versa -- comparison is
- * done on the segment after the last "/" so both spellings converge).
+ * Latest rate row effective at `at` whose modelPattern matches `model`.
+ * Comparison is done on the segment after the last "/" so
+ * "claude-sonnet-4-5" converges with an "anthropic/claude-sonnet-4-5"
+ * pattern either direction.
+ *
+ * FIXED (owner report 2026-07-26: claude-opus-4-6 billed at $32.07 for
+ * ~1.6M tokens -- roughly 3x what its own seeded rate could ever produce
+ * even in the worst case). Root cause: this used to do
+ * `bareModel === barePattern || bareModel.startsWith(barePattern)` inside
+ * a single `.find()` over candidates sorted ONLY by `effectiveFrom desc`
+ * -- meaning a SHORTER, unrelated pattern that merely happens to be a
+ * string-prefix of the real model id (e.g. a generic "claude-opus-4"
+ * fallback row is a prefix of "claude-opus-4-6") could win over the
+ * correct EXACT match, purely because it happened to have a more recent
+ * `effectiveFrom` timestamp and `.find()` stops at the first hit
+ * regardless of match quality. An exact match must always outrank a
+ * loose prefix match -- ordering by recency should only ever be a
+ * tiebreaker WITHIN the same match tier, never a way for a worse match
+ * to shadow a better one. Now: collect exact matches and prefix matches
+ * separately, always prefer the most recent EXACT match, and only fall
+ * back to the most recent prefix match if no exact match exists at all.
  */
 export async function findRateForModel(model: string, at: Date) {
   const bareModel = model.split('/').pop() ?? model;
@@ -95,10 +112,15 @@ export async function findRateForModel(model: string, at: Date) {
     where: { effectiveFrom: { lte: at } },
     orderBy: { effectiveFrom: 'desc' },
   });
+  const exact = candidates.find((rate: (typeof candidates)[number]) => {
+    const barePattern = rate.modelPattern.split('/').pop() ?? rate.modelPattern;
+    return bareModel === barePattern;
+  });
+  if (exact) return exact;
   return (
     candidates.find((rate: (typeof candidates)[number]) => {
       const barePattern = rate.modelPattern.split('/').pop() ?? rate.modelPattern;
-      return bareModel === barePattern || bareModel.startsWith(barePattern);
+      return bareModel.startsWith(barePattern);
     }) ?? null
   );
 }

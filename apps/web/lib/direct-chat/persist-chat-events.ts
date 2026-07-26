@@ -68,6 +68,52 @@
 import { prisma } from '@entry/db';
 
 /**
+ * BUG FIX (owner report 2026-07-26, screen recording: the FIRST message
+ * of a chat -- an old, already-finished assistant reply -- suddenly
+ * repeating itself dozens of times in a row, growing over ~30s, during a
+ * later tool-heavy turn ("delegate 20 sub agents"). Root cause: this
+ * file's own `runMergeTransaction` decides "did a concurrent writer add
+ * something newer?" purely by comparing ARRAY LENGTH
+ * (`currentEvents.length > baseMessages.length`) -- a heuristic that
+ * silently breaks the moment more than one thing can plausibly touch the
+ * same row's `events` column around the same top-level message count
+ * (a long multi-step agentic turn firing many onStepFinish saves in
+ * quick succession is exactly that scenario). When the heuristic
+ * mis-fires, `merged = [...currentEvents, ...delta]` can re-stitch
+ * ALREADY-PRESENT messages back onto the array a second (or twentieth)
+ * time. Rather than trying to make the length heuristic perfectly race-
+ * proof (fragile by construction), dedupe by message `id` right before
+ * every write -- and again on every read in chats.ts's getChatSession --
+ * as the actual structural guarantee: no matter what upstream race
+ * produced a duplicate, the persisted (and therefore rendered) array can
+ * never contain the same message id twice. Keeps the LAST occurrence of
+ * a given id (parts only ever grow across incremental saves of the same
+ * in-progress message, so the later copy is always the more complete
+ * one).
+ */
+export function dedupeMessagesById(events: unknown[]): unknown[] {
+  const lastIndexById = new Map<string, number>();
+  events.forEach((ev, i) => {
+    const id = (ev as { id?: unknown } | null)?.id;
+    if (typeof id === 'string') lastIndexById.set(id, i);
+  });
+  const out: unknown[] = [];
+  const seen = new Set<string>();
+  events.forEach((ev, i) => {
+    const id = (ev as { id?: unknown } | null)?.id;
+    if (typeof id !== 'string') {
+      out.push(ev);
+      return;
+    }
+    if (seen.has(id)) return; // an earlier occurrence of this id -- skip, the later one (kept below) wins
+    seen.add(id);
+    out.push(i === lastIndexById.get(id) ? ev : events[lastIndexById.get(id)!]);
+  });
+  return out;
+}
+
+
+/**
  * @param chatId       The chat session id.
  * @param userId       Owning user id (never trust a chatId alone).
  * @param baseMessages The message array THIS request started from (its
@@ -127,7 +173,8 @@ async function runMergeTransaction(
       // Something newer DID land (another turn committed while we were
       // running) -> the current row is the authoritative base now; append
       // only OUR delta on top of it instead of clobbering that newer state.
-      const merged = currentEvents.length > baseMessages.length ? [...currentEvents, ...delta] : newMessages;
+      const rawMerged = currentEvents.length > baseMessages.length ? [...currentEvents, ...delta] : newMessages;
+      const merged = dedupeMessagesById(rawMerged);
 
       await tx.eveChatSession.update({
         where: { id: chatId, userId },
