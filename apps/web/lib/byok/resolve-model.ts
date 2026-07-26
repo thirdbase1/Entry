@@ -73,12 +73,24 @@ export interface ResolvedByokModel {
   providerId: string;
   /** The UserModelProviderModel row id actually used -- may differ from the id passed in if resolveByokModel substituted a fallback (see route.ts's cooldown check). */
   byokModelId: string;
+  /** True for a platform-provided relay (see schema.prisma's UserModelProvider.isShared) -- costs the platform real money, unlike a normal BYOK row, and is subject to spendCapUsd. */
+  isShared: boolean;
+  /** USD cap on this specific provider row's cumulative spend, null = uncapped. Only meaningful when isShared. */
+  spendCapUsd: number | null;
 }
 
 /** Ownership-checked: a model row id alone is never sufficient — it must belong to userId. */
 export async function resolveByokModel(byokModelId: string, userId: string): Promise<ResolvedByokModel> {
   const modelRow = await prisma.userModelProviderModel.findFirst({
-    where: { id: byokModelId, isEnabled: true, provider: { userId } },
+    where: {
+      id: byokModelId,
+      isEnabled: true,
+      // A shared/platform-provided row (isShared=true) is visible to
+      // EVERY user, not just its nominal owner (see schema.prisma's
+      // UserModelProvider.isShared comment) -- a normal BYOK row still
+      // requires exact ownership.
+      provider: { OR: [{ userId }, { isShared: true }] },
+    },
     include: { provider: true },
   });
   if (!modelRow) {
@@ -142,6 +154,8 @@ export async function resolveByokModel(byokModelId: string, userId: string): Pro
         : null,
     providerId: provider.id,
     byokModelId: modelRow.id,
+    isShared: provider.isShared,
+    spendCapUsd: provider.spendCapUsd != null ? Number(provider.spendCapUsd) : null,
   };
 }
 

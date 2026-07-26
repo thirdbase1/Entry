@@ -58,6 +58,28 @@ function isByok(provider: string): boolean {
   return provider.startsWith('byok:');
 }
 
+/** True for a platform-provided ("shared") relay key -- unlike BYOK this
+ *  DOES cost the platform real money, so it's priced normally (never
+ *  zeroed) and is subject to its own per-provider spend cap. */
+function isShared(provider: string): boolean {
+  return provider.startsWith('shared:');
+}
+
+/**
+ * Cumulative real spend (USD) against ONE specific shared provider row,
+ * summed straight from the ledger -- never a separate running counter that
+ * could drift from the source of truth. Used as a pre-flight gate (see
+ * direct/chat/route.ts) so a capped shared provider can never be called
+ * again once its cap is hit; already-recorded spend is never revisited.
+ */
+export async function getProviderSpendUsd(providerId: string): Promise<number> {
+  const result = await prisma.usageEvent.aggregate({
+    where: { provider: `shared:${providerId}` },
+    _sum: { actualCostUsd: true },
+  });
+  return Number(result._sum.actualCostUsd ?? 0);
+}
+
 /**
  * Latest rate row effective at `at` whose modelPattern prefix-matches
  * `model` (either direction: "claude-sonnet-4-5" must hit a

@@ -16,6 +16,7 @@ import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
 import { AutoSaveField, Toggle, safeJson } from '@/components/settings/shared';
 import { IntegrationsSection } from '@/components/settings/integrations-section';
+import { UsageSection } from '@/components/settings/usage-section';
 import { parseByokConfigSnippet } from '@/lib/byok/parse-config-snippet';
 
 type Compatibility = 'OPENAI' | 'ANTHROPIC' | 'GOOGLE' | 'OPENAI_RESPONSES' | 'AI_GATEWAY';
@@ -997,7 +998,7 @@ function ModelProvidersSection() {
   );
 }
 
-type SettingsTab = 'providers' | 'integrations';
+type SettingsTab = 'providers' | 'integrations' | 'usage';
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<SettingsTab>('providers');
@@ -1030,11 +1031,20 @@ export default function SettingsPage() {
           >
             Integrations
           </button>
+          <button
+            onClick={() => setTab('usage')}
+            className={cn(
+              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
+              tab === 'usage' ? 'border-primary text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            Usage
+          </button>
         </div>
       </div>
 
-      <div className="max-w-2xl w-full mx-auto px-4 py-6 flex flex-col gap-4">
-        {tab === 'providers' ? <ModelProvidersSection /> : <IntegrationsSection />}
+      <div className={cn('w-full mx-auto px-4 py-6 flex flex-col gap-4', tab === 'usage' ? 'max-w-4xl' : 'max-w-2xl')}>
+        {tab === 'providers' ? <ModelProvidersSection /> : tab === 'integrations' ? <IntegrationsSection /> : <UsageSection />}
       </div>
     </div>
   );

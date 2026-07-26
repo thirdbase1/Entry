@@ -87,7 +87,7 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
 import { captureIncrementalSnapshot, captureTurnVersion } from '@entry/db/chat-versioning';
-import { recordUsageEvent } from '@entry/db/usage-metering';
+import { recordUsageEvent, getProviderSpendUsd } from '@entry/db/usage-metering';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel, pickFallbackByokModel } from '@/lib/byok/resolve-model';
 import { getProviderCooldown, markProviderCooldown } from '@/lib/byok/provider-cooldown';
@@ -340,6 +340,26 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     endTurn();
     throw err;
   }
+
+  // SHARED-PROVIDER SPEND CAP (2026-07-26, owner ask: a platform-provided
+  // relay key must never spend past its configured cap). Checked here --
+  // AFTER resolution/cooldown-fallback, BEFORE any streaming starts -- so
+  // a request that would push spend over the cap is rejected cleanly
+  // up front instead of after already burning tokens. The cap is read
+  // fresh from the ledger every turn (never a separate counter that could
+  // drift): see getProviderSpendUsd's own comment for why it's a live SUM
+  // over UsageEvent, not a cached running total.
+  if (isByokResolved(resolved) && resolved.isShared && resolved.spendCapUsd != null) {
+    const spentSoFar = await getProviderSpendUsd(resolved.providerId);
+    if (spentSoFar >= resolved.spendCapUsd) {
+      await preSave;
+      endTurn();
+      throw new Error(
+        `This model's shared budget is exhausted ($${spentSoFar.toFixed(2)} of $${resolved.spendCapUsd.toFixed(2)} spent) — pick a different model.`
+      );
+    }
+  }
+
   const { model, providerLabel, modelId } = resolved;
 
   // THINKING/REASONING WIRING (2026-07-25, confirmed live bug): the AI
@@ -1078,7 +1098,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           chatId,
           source: 'direct-chat',
           model: modelId,
-          provider: byokModelId ? `byok:${providerLabel}` : 'gateway',
+          provider: isByokResolved(resolved) && resolved.isShared
+            ? `shared:${resolved.providerId}`
+            : byokModelId
+              ? `byok:${providerLabel}`
+              : 'gateway',
           usage: {
             // inputTokens on LanguageModelUsage is the TOTAL (cached
             // included) -- price only the non-cached portion at the

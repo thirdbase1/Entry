@@ -467,6 +467,23 @@ model UserModelProvider {
   createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
 
+  // Added 2026-07-26 (owner ask: "add a platform-provided relay as another
+  // provider type, capped at $20 total"). A shared row is provisioned once
+  // (owned by an admin user for the required FK, but NOT a personal key) and
+  // shown to EVERY user in the model picker, not just its owner -- see
+  // resolve-model.ts's ownership check (`OR: [{ userId }, { isShared: true }]`).
+  // Unlike a real BYOK row, a shared row's calls cost the platform real money
+  // (it's OUR key), so usage-metering.ts records these as `shared:<providerId>`
+  // (priced normally) instead of `byok:<label>` (always $0) -- and every call
+  // through a capped shared provider is pre-flight-checked against
+  // spendCapUsd via getProviderSpendUsd() BEFORE the model is invoked, so the
+  // cap can never be exceeded by an in-flight turn that started under it.
+  isShared    Boolean  @default(false) @map("is_shared")
+  // Null = uncapped. Scoped to THIS provider row alone (this exact base URL +
+  // key), not a global/all-providers limit -- a second shared provider would
+  // carry its own independent cap.
+  spendCapUsd Decimal? @map("spend_cap_usd") @db.Decimal(10, 2)
+
   user   User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   models UserModelProviderModel[]
 
