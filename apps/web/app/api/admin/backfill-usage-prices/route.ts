@@ -34,8 +34,17 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  const body = await req.json().catch(() => ({}));
+  // `force: true` (added 2026-07-26 alongside the gemini-3.1-flash-lite
+  // rate fix): re-price rows that ALREADY have a priceRateId, because a
+  // corrected ModelPriceRate row doesn't retroactively touch history that
+  // was already priced against the old, wrong rate -- only genuinely
+  // unpriced (priceRateId null) rows get picked up by default. Still never
+  // touches `priceRateId === 'provider-reported'` rows -- those are
+  // authoritative vendor-reported costs, not our own rate-table math.
+  const force = body?.force === true;
   const rows = await prisma.usageEvent.findMany({
-    where: { priceRateId: null },
+    where: force ? { priceRateId: { not: 'provider-reported' } } : { priceRateId: null },
     select: {
       id: true,
       model: true,
