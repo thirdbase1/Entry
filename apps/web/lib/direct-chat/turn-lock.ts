@@ -43,6 +43,7 @@
  * the lock/mirror bookkeeping).
  */
 import { cache, getRawRedis } from '@entry/cache';
+import { REPLAY_KEEPALIVE_BLOCK_MS, makeHeartbeatChunk } from './timing';
 
 const LOCK_TTL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = Math.floor(LOCK_TTL_MS / 2);
@@ -155,7 +156,7 @@ export async function* readTurnStream(
     while (!signal.aborted) {
       let res: [string, [string, string[]][]][] | null = null;
       try {
-        res = (await redis.xread('COUNT', 500, 'BLOCK', 10_000, 'STREAMS', key, lastId)) as any;
+        res = (await redis.xread('COUNT', 500, 'BLOCK', REPLAY_KEEPALIVE_BLOCK_MS, 'STREAMS', key, lastId)) as any;
       } catch (err) {
         if (signal.aborted) return;
         console.error('[turn-stream] xread failed', chatId, err);
@@ -187,10 +188,7 @@ export async function* readTurnStream(
         // primary stream's own heartbeat uses (see route.ts) both closes
         // that gap and keeps exactly one keep-alive shape for the client
         // to ever have to silently ignore, instead of two.
-        yield {
-          chunk: { type: 'custom', kind: 'entry.heartbeat', providerMetadata: { entry: { pad: '0'.repeat(2048) } } },
-          turnId: '',
-        };
+        yield { chunk: makeHeartbeatChunk(), turnId: '' };
         continue;
       }
       const [, entries] = res[0];

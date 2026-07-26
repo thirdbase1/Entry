@@ -93,6 +93,7 @@ import { resolveByokModel, pickFallbackByokModel } from '@/lib/byok/resolve-mode
 import { getProviderCooldown, markProviderCooldown } from '@/lib/byok/provider-cooldown';
 import { PERMANENT_SIGNAL_PATTERN } from '@/lib/byok/gateway-retry-fetch';
 import { resolveGatewayModel } from '@/lib/direct-chat/resolve-gateway-model';
+import { WRITER_HEARTBEAT_MS, makeHeartbeatChunk } from '@/lib/direct-chat/timing';
 import { resolveModelIdForProvider } from '@entry/agent/lib/model-catalog';
 import { isGatewayModelReasoningCapable } from '@/lib/direct-chat/reasoning-capability';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
@@ -1523,7 +1524,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // known types, so an unrecognized `kind` here is silently ignored, not
   // an error) keeps real bytes flowing during any silent gap without
   // ever touching the actual model/tool content.
-  const HEARTBEAT_MS = 15_000;
+  const HEARTBEAT_MS = WRITER_HEARTBEAT_MS;
   // Safety valve for the CRITICAL-SAVE GATE above -- a real DB outage
   // should delay the client seeing "done" by at most this long, never
   // forever. 5s is generous headroom over the single-row conditional
@@ -1570,7 +1571,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
             // original comment above) but makes each heartbeat large enough
             // that buffering-by-size heuristics are far less likely to sit
             // on it.
-            controller.enqueue({ type: 'custom', kind: 'entry.heartbeat', providerMetadata: { entry: { pad: '0'.repeat(2048) } } });
+            controller.enqueue(makeHeartbeatChunk());
             continue;
           }
           const { value: chunk, done } = raced;

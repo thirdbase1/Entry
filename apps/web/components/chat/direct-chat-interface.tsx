@@ -41,7 +41,8 @@
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport, type UIMessage } from 'ai';
 import { fetchWithIdleTimeout } from '@/lib/chat/fetch-with-idle-timeout';
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { CLIENT_IDLE_TIMEOUT_MS } from '@/lib/direct-chat/timing';
+import { Suspense, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { MarkdownText } from '@/components/ui/markdown';
 import { CollapsibleUserText } from './collapsible-user-text';
@@ -110,6 +111,54 @@ function isSafeToAdopt(persisted: UIMessage[], current: UIMessage[]): boolean {
     // more text streamed in since the last save), never take away.
     return messageTextLength(match) >= messageTextLength(m) && (match.parts?.length ?? 0) >= (m.parts?.length ?? 0);
   });
+}
+
+// CONSOLIDATED (2026-07-26, "proper rework" pass on the reconnect system):
+// `pendingTurn` and `turnError` used to be two independent `useState`
+// calls, each with its OWN staleness-mirror ref (previously
+// `pendingTurnRef`/`turnErrorRef`) purely to solve the same problem
+// twice -- the recovery effect's closures below only get recreated on
+// [sessionId, chat.id, chat.status], so reading the plain state
+// variables inside an old closure could see an already-stale value.
+// Tracing every bug fixed in this file across the whole reconnect saga
+// (2026-07-11 through 2026-07-26) turned up the same root shape every
+// time: one of these loosely-coordinated flags not getting updated (or
+// read) in one specific branch. A single reducer with named actions
+// makes every valid transition visible in ONE place instead of scattered
+// ad-hoc `setPendingTurn()`/`setTurnError()` calls spread across 1000+
+// lines -- and one mirror ref replaces two.
+type TurnLifecycleState = { pendingTurn: boolean; turnError: string | null };
+type TurnLifecycleAction =
+  | { type: 'SET_PENDING'; value: boolean }
+  | { type: 'SET_ERROR'; message: string }
+  | { type: 'CLEAR_ERROR' }
+  // A reconnect poll found genuinely newer content: adopt both the busy
+  // state (still active or not) and clear any stale error atomically --
+  // splitting this into two dispatches would let a render land in
+  // between with one updated and the other not.
+  | { type: 'RECONNECT_PROGRESS'; stillActive: boolean }
+  // The recovery poll gave up for good (see its own comment: 8
+  // consecutive real 404s -- a chat that will never resolve). Always
+  // clears the busy lock; only overwrites the error message when one is
+  // actually provided (a silent give-up with content already showing
+  // shouldn't retroactively invent an error).
+  | { type: 'RECONNECT_GAVE_UP'; message?: string };
+
+function turnLifecycleReducer(state: TurnLifecycleState, action: TurnLifecycleAction): TurnLifecycleState {
+  switch (action.type) {
+    case 'SET_PENDING':
+      return state.pendingTurn === action.value ? state : { ...state, pendingTurn: action.value };
+    case 'SET_ERROR':
+      return { ...state, turnError: action.message };
+    case 'CLEAR_ERROR':
+      return state.turnError === null ? state : { ...state, turnError: null };
+    case 'RECONNECT_PROGRESS':
+      return { pendingTurn: action.stillActive, turnError: null };
+    case 'RECONNECT_GAVE_UP':
+      return { pendingTurn: false, turnError: action.message ?? state.turnError };
+    default:
+      return state;
+  }
 }
 
 import { claimIntegrationCallback, type IntegrationCallback } from './integration-callback-reader';
@@ -281,30 +330,21 @@ function DirectChatSession({
   // still inside a normal save gap no matter which cadence is active.
   const SETTLE_QUIET_MS = 4_500;
   const lastGrowthAtRef = useRef(Date.now());
-  const [pendingTurn, setPendingTurn] = useState(() => {
+  const [turnLifecycle, dispatchTurn] = useReducer(turnLifecycleReducer, undefined, () => {
     const last = initialMessages[initialMessages.length - 1];
-    return initialMessages.length > 0 && (!last || last.role === 'user');
+    const pendingTurn = initialMessages.length > 0 && (!last || last.role === 'user');
+    return { pendingTurn, turnError: null };
   });
+  const { pendingTurn, turnError } = turnLifecycle;
   const pollIdRef = useRef<number | undefined>(undefined);
-  const [turnError, setTurnError] = useState<string | null>(null);
-  // Always-fresh mirror of turnError for the recovery-poll effect below,
-  // whose `tryRecover` closures only get recreated when [sessionId,
-  // chat.id, chat.status] change -- turnError itself isn't in that
-  // dependency list, so reading the plain state variable inside an old
-  // closure could see a stale (already-cleared, or not-yet-set) value.
-  // A ref sidesteps that entirely: always reads whatever is truly current.
-  const turnErrorRef = useRef(turnError);
+  // Always-fresh mirror for the recovery-poll effect below, whose
+  // `tryRecover` closures only get recreated when [sessionId, chat.id,
+  // chat.status] change -- reading `turnLifecycle` directly inside an old
+  // closure could see an already-stale value otherwise.
+  const turnLifecycleRef = useRef(turnLifecycle);
   useEffect(() => {
-    turnErrorRef.current = turnError;
-  }, [turnError]);
-  // Same staleness problem turnErrorRef solves, for the same reason:
-  // scheduleNext()'s closure below (recreated only on [sessionId, chat.id,
-  // chat.status]) needs an always-fresh read of pendingTurn, not whatever
-  // it was when the effect last ran.
-  const pendingTurnRef = useRef(pendingTurn);
-  useEffect(() => {
-    pendingTurnRef.current = pendingTurn;
-  }, [pendingTurn]);
+    turnLifecycleRef.current = turnLifecycle;
+  }, [turnLifecycle]);
   // STALL DETECTION (2026-07-23, explicit user report: "anytime my screen
   // turn off the agent stop instantly... never stop even if it lose
   // internet connection"). Root cause: the recovery poll right below this
@@ -344,17 +384,22 @@ function DirectChatSession({
         // health-check-kill restarted the server -- the turn itself
         // survived and finished correctly server-side, but the open
         // fetch on THIS side never got a clean error, leaving the chat UI
-        // stuck instead of recovering. 20s matches STALL_MS below -- see
-        // fetch-with-idle-timeout.ts's file comment for the full story.
+        // stuck instead of recovering -- see fetch-with-idle-timeout.ts's
+        // file comment for the full story. NOTE: STALL_MS below is a
+        // separate, unrelated concept (client-side "did chat.messages
+        // actually change" detection, not a wire-level watchdog) -- don't
+        // assume the two need to match.
         // WIDENED (2026-07-26, part of the 'stops in 30s' investigation):
-        // was 20_000, only ~1.3x the server's 15s heartbeat interval -- a
-        // single slow/buffered heartbeat (Cloudflare sits in front of
-        // entry.pxxl.pro and is known to coalesce small chunks under some
-        // conditions) could trip this before a 2nd heartbeat had a chance
-        // to land. 45_000 gives 3 full heartbeat cycles of slack -- still
-        // fires fast on a genuinely dead connection, just no longer a hair
-        // trigger on ordinary heartbeat jitter.
-        fetch: fetchWithIdleTimeout(45_000),
+        // was a bare 20_000 literal, only ~1.3x the server's 15s heartbeat
+        // interval -- a single slow/buffered heartbeat (Cloudflare sits in
+        // front of entry.pxxl.pro and is known to coalesce small chunks
+        // under some conditions) could trip this before a 2nd heartbeat
+        // had a chance to land. Now sourced from the shared
+        // CLIENT_IDLE_TIMEOUT_MS constant (see timing.ts) instead of a
+        // bare literal here -- that file's own import-time assertion is
+        // what actually guarantees this stays ahead of the server's
+        // heartbeat cadence from now on, not just a comment saying so.
+        fetch: fetchWithIdleTimeout(CLIENT_IDLE_TIMEOUT_MS),
       }),
     [byokModelId, requestedModel]
   );
@@ -454,11 +499,11 @@ function DirectChatSession({
         }
         console.error('[direct chat turn error] resumeStream retries exhausted', lastResumeErr);
         reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
-        setTurnError(readableChatErrorMessage(error));
+        dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(error) });
       })();
     },
     async onFinish() {
-      setTurnError(null);
+      dispatchTurn({ type: 'CLEAR_ERROR' });
       // Safety net only now (2026-07-23): onSend already does this
       // eagerly the moment the message is sent, so createdRef.current is
       // normally already true by the time onFinish runs. Kept as a
@@ -649,10 +694,10 @@ function DirectChatSession({
             if (missedPollsRef.current >= 8) {
               gaveUpRef.current = true;
               window.clearTimeout(pollIdRef.current);
-              setPendingTurn(false);
-              if (looksIncomplete) {
-                setTurnError("Couldn't send that message -- check your connection and try again.");
-              }
+              dispatchTurn({
+                type: 'RECONNECT_GAVE_UP',
+                message: looksIncomplete ? "Couldn't send that message -- check your connection and try again." : undefined,
+              });
             }
             return;
           }
@@ -704,8 +749,8 @@ function DirectChatSession({
           const dbLastMsg = persisted[persisted.length - 1];
           const dbLooksComplete = dbLastMsg?.role === 'assistant' && messageTextLength(dbLastMsg) > 0;
           const activelyStreamingNow = chat.status === 'streaming' || chat.status === 'submitted';
-          if (dbLooksComplete && !activelyStreamingNow && turnErrorRef.current) {
-            setTurnError(null);
+          if (dbLooksComplete && !activelyStreamingNow && turnLifecycleRef.current.turnError) {
+            dispatchTurn({ type: 'CLEAR_ERROR' });
             chat.clearError();
           }
 
@@ -737,9 +782,8 @@ function DirectChatSession({
             //     itself says work is still active.
             const stillActivelyStreaming = chat.status === 'streaming' || chat.status === 'submitted';
             lastGrowthAtRef.current = Date.now();
-            setPendingTurn(stillActivelyStreaming);
             chat.setMessages(persisted);
-            setTurnError(null);
+            dispatchTurn({ type: 'RECONNECT_PROGRESS', stillActive: stillActivelyStreaming });
             chat.clearError();
             // Mirror onFinish's own first-turn navigation: if the client's
             // onFinish never got to run (the stream broke before it could
@@ -771,7 +815,7 @@ function DirectChatSession({
               const statusRes = await fetch(`/api/direct/chat/${activeId}/turn-status`);
               const stillActive = statusRes.ok && (await statusRes.json())?.active === true;
               if (stillActive) {
-                setPendingTurn(true);
+                dispatchTurn({ type: 'SET_PENDING', value: true });
                 // ACTIVELY REATTACH (2026-07-26, real user report: "if am
                 // online the stuff supposed to stream which is not
                 // doing"). Confirming the turn is still alive server-side
@@ -787,7 +831,7 @@ function DirectChatSession({
                   void chat.resumeStream();
                 }
               } else {
-                setPendingTurn(false);
+                dispatchTurn({ type: 'SET_PENDING', value: false });
               }
             } catch {
               // Network hiccup checking status -- don't falsely declare
@@ -848,7 +892,7 @@ function DirectChatSession({
       // whenever pendingTurn thinks a turn is active -- e.g. mid-tool-call
       // background work -- so catch-up snapshots read as a near-continuous
       // stream instead of one big 3s-later jump.
-      const stillCatchingUp = !last || last.role === 'user' || pendingTurnRef.current;
+      const stillCatchingUp = !last || last.role === 'user' || turnLifecycleRef.current.pendingTurn;
       pollIdRef.current = window.setTimeout(() => {
         tryRecover();
         scheduleNext();
@@ -1042,7 +1086,7 @@ function DirectChatSession({
     // Switching to a different model mid-chat is handled by the parent
     // (chat-interface.tsx remounts into the right path); here we only ever
     // send under the current byokModelId/requestedModel.
-    setTurnError(null);
+    dispatchTurn({ type: 'CLEAR_ERROR' });
 
     // INSTANT chat creation (2026-07-23, explicit user request: "the chat
     // should be created instantly I send message ... I need to reload the
@@ -1100,7 +1144,7 @@ function DirectChatSession({
     void sendWithRetry(() => chat.sendMessage({ text: input, files: files.length > 0 ? files : undefined }, { body: { disabledTools: opts?.disabledTools ?? [] } })).catch(err => {
       console.error('[direct chat send failed]', err);
       reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-send-failed', stack: err instanceof Error ? err.stack : undefined });
-      setTurnError(readableChatErrorMessage(err));
+      dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(err) });
     });
   };
 
