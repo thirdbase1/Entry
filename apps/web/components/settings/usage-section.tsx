@@ -100,12 +100,6 @@ function fmtDay(iso: string): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-const KIND_STYLE: Record<ModelRow['providerKind'], { label: string; className: string }> = {
-  gateway: { label: 'Entry', className: 'bg-primary/10 text-primary' },
-  byok: { label: 'Your key', className: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' },
-  shared: { label: 'Shared', className: 'bg-amber-500/10 text-amber-600 dark:text-amber-400' },
-};
-
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="border rounded-lg p-4 flex flex-col gap-1 bg-card min-w-0">
@@ -294,7 +288,6 @@ export function UsageSection() {
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
                     <th className="px-3 py-2 font-medium">Model</th>
-                    <th className="px-3 py-2 font-medium">Source</th>
                     <th className="px-3 py-2 font-medium text-right">Calls</th>
                     <th className="px-3 py-2 font-medium text-right">Input</th>
                     <th className="px-3 py-2 font-medium text-right">Output</th>
@@ -307,7 +300,6 @@ export function UsageSection() {
                 </thead>
                 <tbody>
                   {data.byModel.map(row => {
-                    const kind = KIND_STYLE[row.providerKind];
                     return (
                       <tr key={row.provider + row.model} className="border-b last:border-b-0 hover:bg-muted/30">
                         <td className="px-3 py-2">
@@ -317,11 +309,6 @@ export function UsageSection() {
                               {row.model}
                             </span>
                           </div>
-                        </td>
-                        <td className="px-3 py-2">
-                          <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', kind.className)}>
-                            {row.providerKind === 'byok' ? row.providerLabel : kind.label}
-                          </span>
                         </td>
                         <td className="px-3 py-2 text-right text-muted-foreground">
                           {row.calls}

@@ -57,7 +57,7 @@ export interface RecordUsageArgs {
 }
 
 /** True when the call ran on the user's own key -- costs us nothing. */
-function isByok(provider: string): boolean {
+export function isByok(provider: string): boolean {
   return provider.startsWith('byok:');
 }
 
@@ -104,7 +104,7 @@ export async function findRateForModel(model: string, at: Date) {
 }
 
 /** Per-million-token pricing applied to the four token buckets. */
-function priceUsage(
+export function priceUsage(
   usage: UsageTokens,
   rate: { inputPerMTok: unknown; outputPerMTok: unknown; cacheWritePerMTok: unknown; cacheReadPerMTok: unknown }
 ): number {
