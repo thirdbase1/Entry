@@ -39,7 +39,14 @@ const RATES: Array<{
   // cache-read rates not separately published for every SKU -- filled in
   // at Google's own observed ~10% of input ratio, same ratio every SKU
   // that DOES publish one (3.6 Flash, 3.5 Flash, 3.5 Flash-Lite) actually uses.
-  { modelPattern: 'gemini-3.1-flash-lite', inputPerMTok: 2, outputPerMTok: 12, cacheReadPerMTok: 0.2, source: 'ai.google.dev gemini-3 guide (<200k tok tier)' },
+  // FIXED (2026-07-26, owner report 'cost ain't accurate' + re-verified live against
+  // blog.google.com/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-lite
+  // and ai.google.dev/gemini-api/docs/pricing): this was WRONGLY seeded at $2/$12 --
+  // an ~8x overcharge. The real published rate is $0.25 input / $1.50 output; cache
+  // read follows Google's standard ~10% of input ratio for this tier (no separate
+  // rate published for 3.1 flash-lite specifically, same pattern as 3.5 flash-lite's
+  // confirmed $0.03 on a $0.30 base).
+  { modelPattern: 'gemini-3.1-flash-lite', inputPerMTok: 0.25, outputPerMTok: 1.5, cacheReadPerMTok: 0.025, source: 'blog.google + ai.google.dev gemini-api pricing (verified 2026-07-26, corrected from earlier wrong $2/$12 entry)' },
   { modelPattern: 'gemini-3.6-flash-thinking', inputPerMTok: 1.5, outputPerMTok: 7.5, cacheReadPerMTok: 0.15, source: "ai.google.dev pricing page (thinking tokens billed as output, Google's own doc)" },
   { modelPattern: 'gemini-3.6-flash', inputPerMTok: 1.5, outputPerMTok: 7.5, cacheReadPerMTok: 0.15, source: 'ai.google.dev pricing page' },
   { modelPattern: 'gemini-3.5-flash-lite', inputPerMTok: 0.3, outputPerMTok: 2.5, cacheReadPerMTok: 0.03, source: 'ai.google.dev pricing page' },
@@ -47,8 +54,12 @@ const RATES: Array<{
   { modelPattern: 'gemini-2.5-flash', inputPerMTok: 0.3, outputPerMTok: 2.5, cacheReadPerMTok: 0.03, source: 'ai.google.dev pricing page' },
 
   // OpenAI — developers.openai.com/api/docs/pricing (live 2026-07-26)
-  { modelPattern: 'gpt-5.6-sol', inputPerMTok: 5, outputPerMTok: 30, cacheReadPerMTok: 0.5, source: 'openai pricing page' },
-  { modelPattern: 'gpt-5.6-luna', inputPerMTok: 1, outputPerMTok: 6, cacheReadPerMTok: 0.1, source: 'openai pricing page' },
+  // Added cacheWritePerMTok (2026-07-26, was missing -- confirmed live against
+  // developers.openai.com/api/docs/pricing's short-context standard table, which
+  // publishes cache-write pricing for every gpt-5.6 SKU; base/cached-input/output
+  // here were already correct, only the write-cache column was absent before).
+  { modelPattern: 'gpt-5.6-sol', inputPerMTok: 5, outputPerMTok: 30, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'developers.openai.com/api/docs/pricing (short context, standard tier)' },
+  { modelPattern: 'gpt-5.6-luna', inputPerMTok: 1, outputPerMTok: 6, cacheWritePerMTok: 1.25, cacheReadPerMTok: 0.1, source: 'developers.openai.com/api/docs/pricing (short context, standard tier)' },
 
   // Explicitly $0 -- the ":free" suffix in this model's own id IS the
   // vendor's own pricing tag (an OpenRouter-style free-tier alias), not
