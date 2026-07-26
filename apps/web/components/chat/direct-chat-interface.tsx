@@ -165,6 +165,7 @@ import { claimIntegrationCallback, type IntegrationCallback } from './integratio
 import { useLiveTurnElapsedMs, TurnDurationLabel, LiveTurnDurationLabel } from './turn-timer';
 import { silentlyUpdateChatUrl } from './silent-url-update';
 import { ChatPageHeader } from './chat-page-header';
+import { toast } from '@/lib/toast';
 import { useLibraryStore } from '@/store/library';
 
 interface DirectChatInterfaceProps {
@@ -502,8 +503,17 @@ function DirectChatSession({
         dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(error) });
       })();
     },
-    async onFinish() {
+    async onFinish({ message }) {
       dispatchTurn({ type: 'CLEAR_ERROR' });
+      // SURFACED (2026-07-27, real report: "I selected a BYOK model but
+      // the chat used HCNSec deepseek instead") -- that wasn't the
+      // picker being ignored, it was route.ts's cooldown-fallback
+      // substitution firing silently (see its own comment). Now that the
+      // server actually attaches a `substitutionNotice` to this turn's
+      // metadata when that happens, show it so a swap is never mistaken
+      // for a broken model selector again.
+      const notice = (message?.metadata as { substitutionNotice?: string } | undefined)?.substitutionNotice;
+      if (notice) toast(notice);
       // Safety net only now (2026-07-23): onSend already does this
       // eagerly the moment the message is sent, so createdRef.current is
       // normally already true by the time onFinish runs. Kept as a

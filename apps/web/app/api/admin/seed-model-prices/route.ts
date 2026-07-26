@@ -46,8 +46,11 @@ const RATES: Array<{
   // correct $10/$50 rate; kept claude-opus-5 too in case that model is
   // ever actually used by a different relay/BYOK connection.
   { modelPattern: 'claude-fable-5', inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1, source: 'anthropic.com/news/claude-fable-5-mythos-5 + anthropic.com/claude/fable (verified 2026-07-27)' },
-  { modelPattern: 'claude-opus-5', inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'anthropic pricing page' },
+  { modelPattern: 'claude-opus-5', inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'anthropic pricing page (verified 2026-07-27)' },
+  { modelPattern: 'claude-opus-4-8', inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'anthropic.com/news/claude-opus-4-8 (verified 2026-07-27)' },
+  { modelPattern: 'claude-opus-4-7', inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'finout.io/cloudzero coverage of Opus 4.7, unchanged $5/$25 (verified 2026-07-27)' },
   { modelPattern: 'claude-opus-4-6', inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'anthropic pricing page' },
+  { modelPattern: 'claude-sonnet-4-6', inputPerMTok: 3, outputPerMTok: 15, cacheWritePerMTok: 3.75, cacheReadPerMTok: 0.3, source: 'anthropic.com/news/claude-sonnet-4-6 (verified 2026-07-27)' },
   // Sonnet 5 intro pricing runs through Aug 31 2026 (today is Jul 26 2026) -- standard $3/$15 takes over after.
   { modelPattern: 'claude-sonnet-5', inputPerMTok: 2, outputPerMTok: 10, cacheWritePerMTok: 2.5, cacheReadPerMTok: 0.2, source: 'anthropic pricing page (intro rate, thru 2026-08-31)' },
 

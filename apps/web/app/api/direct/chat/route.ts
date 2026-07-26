@@ -304,6 +304,15 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // (ResolvedGatewayModel has no providerId field at all, not even optional) --
   // an explicit type guard narrows cleanly instead.
   const isByokResolved = (r: typeof resolved): r is Awaited<ReturnType<typeof resolveByokModel>> => 'providerId' in r;
+  // SURFACED TO THE USER (2026-07-27, real report: "I selected a BYOK
+  // model but the chat used HCNSec deepseek instead" -- root cause was
+  // THIS exact cooldown-fallback substitution firing silently: a provider
+  // in cooldown gets swapped for a different one server-side with only a
+  // console.warn, nothing visible in the UI at all, so a substitution
+  // reads indistinguishable from "the picker is broken/ignored". Kept
+  // outside the try block so it survives into messageMetadata below
+  // regardless of which branch resolved things.
+  let substitutionNotice: string | null = null;
   try {
     resolved = byokModelId
       ? await resolveByokModel(byokModelId, userId)
@@ -325,13 +334,15 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       if (cooldownReason) {
         const fallbackId = await pickFallbackByokModel(userId, resolved.providerId);
         if (fallbackId && fallbackId !== resolved.byokModelId) {
+          const deadProviderLabel = resolved.providerLabel;
           console.warn('[direct chat] provider in cooldown, substituting fallback model', {
             chatId,
-            deadProvider: resolved.providerLabel,
+            deadProvider: deadProviderLabel,
             cooldownReason,
             fallbackByokModelId: fallbackId,
           });
           resolved = await resolveByokModel(fallbackId, userId);
+          substitutionNotice = `"${deadProviderLabel}" is temporarily unavailable (${cooldownReason.slice(0, 120)}) — used "${resolved.providerLabel}" for this reply instead.`;
         }
       }
     }
@@ -1349,7 +1360,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // the turn.
     messageMetadata({ part }) {
       if (part.type === 'finish' || part.type === 'error') {
-        return { durationMs: Date.now() - requestStartedAt };
+        return {
+          durationMs: Date.now() - requestStartedAt,
+          ...(substitutionNotice ? { substitutionNotice } : {}),
+        };
       }
     },
     onError(error) {
