@@ -47,7 +47,6 @@ import { cache, getRawRedis } from '@entry/cache';
 const LOCK_TTL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = Math.floor(LOCK_TTL_MS / 2);
 const STREAM_TTL_SECONDS = 600;
-const STREAM_MAXLEN = 20_000;
 
 function lockKey(chatId: string): string {
   return `entry:turn:lock:${chatId}`;
@@ -111,17 +110,21 @@ export function startTurnHeartbeat(chatId: string, turnId: string): () => void {
 
 export async function publishTurnChunk(chatId: string, turnId: string, chunk: unknown): Promise<void> {
   try {
-    await getRawRedis().xadd(
-      streamKey(chatId),
-      'MAXLEN',
-      '~',
-      String(STREAM_MAXLEN),
-      '*',
-      'turnId',
-      turnId,
-      'data',
-      JSON.stringify(chunk)
-    );
+    // NO MAXLEN TRIM (2026-07-26, real correctness gap found while
+    // auditing the reconnect path: this used to pass `MAXLEN ~
+    // STREAM_MAXLEN`, Redis's APPROXIMATE trim mode, on every single
+    // write DURING an active turn. A long, chatty turn (heavy tool use,
+    // lots of small text-deltas) approaching that count could have its
+    // OWN earliest chunks evicted before a from-scratch reconnect
+    // (readTurnStream starting at lastId='0') ever got to replay them --
+    // silent, undetectable data loss on the one path that exists
+    // specifically to make reconnects whole again. There's no unbounded-
+    // growth risk being traded away here to justify that: this stream is
+    // scoped to a single turn and already gets a hard TTL
+    // (STREAM_TTL_SECONDS) the moment the turn ends via publishTurnEnd
+    // below -- correctness during the live turn matters far more than
+    // trimming a stream that's about to be TTL'd away anyway.
+    await getRawRedis().xadd(streamKey(chatId), '*', 'turnId', turnId, 'data', JSON.stringify(chunk));
   } catch (err) {
     console.error('[turn-stream] publish failed', chatId, err);
   }
@@ -165,25 +168,29 @@ export async function* readTurnStream(
         // reach the server" banner on the reattached tab). Root cause:
         // XREAD's BLOCK window here (10s) can come back empty over and
         // over during a real, healthy silent gap -- a long-running tool
-        // call (bash, a build, anything) easily goes 20s+ with zero new
+        // call (bash, a build, anything) easily goes well past the
+        // client's idle watchdog (see fetchWithIdleTimeout) with zero new
         // stream chunks to mirror, since there's genuinely nothing new to
         // report yet. Previously this branch was a bare `continue`,
         // meaning literally zero bytes reached the client for the entire
-        // gap -- and the client's own `fetchWithIdleTimeout(20_000)` (see
-        // that file's comment) correctly, but WRONGLY in this specific
-        // case, treats "no bytes for 20s" as a dead connection and aborts,
-        // surfacing a scary false-alarm error banner for a turn that was
-        // never actually stuck at all. Yielding a real, spec-recognized,
-        // fully-inert chunk here every ~10s (comfortably under the
-        // client's 20s watchdog) keeps bytes flowing on the wire without
-        // ever touching the reconstructed message: confirmed directly
-        // against node_modules/ai's `processUIMessageStream` --
-        // `case "message-metadata"` calls `updateMessageMetadata(undefined)`,
-        // which no-ops entirely (`if (metadata != null)` guard) and never
-        // even triggers a re-render (the `write()` call there is also
-        // gated on `messageMetadata != null`). A true keep-alive: real
-        // wire bytes, zero visible or state-level side effects.
-        yield { chunk: { type: 'message-metadata' }, turnId: '' };
+        // gap, tripping the watchdog and surfacing a scary false-alarm
+        // error banner for a turn that was never actually stuck at all.
+        //
+        // PADDED (2026-07-26, same pass as the MAXLEN fix above): this
+        // used to yield a bare `{ type: 'message-metadata' }` -- a handful
+        // of bytes. That's the EXACT shape Cloudflare (confirmed fronting
+        // entry.pxxl.pro, see route.ts's own heartbeat comment) is known
+        // to coalesce/delay-flush rather than forward immediately, which
+        // would silently defeat this keep-alive's entire purpose on the
+        // reattach path specifically. Reusing the SAME already-proven,
+        // already-padded `type: 'custom'` / `entry.heartbeat` shape the
+        // primary stream's own heartbeat uses (see route.ts) both closes
+        // that gap and keeps exactly one keep-alive shape for the client
+        // to ever have to silently ignore, instead of two.
+        yield {
+          chunk: { type: 'custom', kind: 'entry.heartbeat', providerMetadata: { entry: { pad: '0'.repeat(2048) } } },
+          turnId: '',
+        };
         continue;
       }
       const [, entries] = res[0];
