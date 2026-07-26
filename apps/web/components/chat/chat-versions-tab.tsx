@@ -665,9 +665,35 @@ export function ChatVersionsTab({
       if (data.error) setError(data.error);
       else {
         setError(null);
-        setVersions(data.versions);
+        // MERGE, DON'T REPLACE, ON A SILENT (POLL) REFRESH (2026-07-26,
+        // real bug: this always did a flat `setVersions(data.versions)`,
+        // which is only page 1 of the list. A user who tapped "Load
+        // older" to pull in page 2+ had every one of those older
+        // versions silently wiped the next time the 2027-07-17 poll
+        // tick landed (up to POLL_INTERVAL_MS later) -- the list would
+        // just snap back down to page 1's worth of entries with zero
+        // warning while they were still reading it. A deliberate,
+        // non-silent refresh (initial mount, or the user changing the
+        // search/onlyReverts filter) is a real reset and should still
+        // fully replace -- it's a genuinely different query. Only the
+        // background poll needs to preserve whatever the user has
+        // already paged in: keep every previously-loaded version whose
+        // versionNumber isn't present in the fresh page (i.e. anything
+        // older than the fresh page's own tail), and let the fresh
+        // page's own rows win for any versionNumber both sides have
+        // (covers a rename/description edit landing between polls).
+        setVersions(prev => {
+          if (!opts.silent || !prev || prev.length === 0) return data.versions;
+          const freshNumbers = new Set(data.versions.map((v: VersionListItem) => v.versionNumber));
+          const preservedOlder = prev.filter(v => !freshNumbers.has(v.versionNumber));
+          return [...data.versions, ...preservedOlder].sort((a, b) => b.versionNumber - a.versionNumber);
+        });
         setCanRevertLive(Boolean(data.canRevertLive));
-        setHasMore(Boolean(data.hasMore));
+        // Same reasoning as above: a silent poll only ever looks at page
+        // 1, so its own `hasMore` only answers "is there more after page
+        // 1" -- meaningless once the user has already paged further in.
+        // Only a real (non-silent) refresh should overwrite `hasMore`.
+        if (!opts.silent) setHasMore(Boolean(data.hasMore));
         if (data.totals) setTotals(data.totals);
       }
     } catch {
