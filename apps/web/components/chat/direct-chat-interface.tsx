@@ -1327,7 +1327,29 @@ function DirectChatSession({
                 removal above), just the same visual "something is
                 happening" cue reused for a case that was silently missing
                 it entirely. */}
-            {(showThinkingIndicator || pendingTurn) && (!lastMessage || lastMessage.role !== 'assistant') && (
+            {/* WIDENED (2026-07-26, real dead-zone found while chasing the
+                same "looks dead, isn't" family of bugs): this used to
+                additionally require `!lastMessage || lastMessage.role !==
+                'assistant'` -- which silently excluded EXACTLY the most
+                common reattach shape: a reload/reconnect lands on a
+                partial assistant message that already has some real
+                content (text so far, or a finished earlier tool call)
+                and then goes quiet for a long-running silent tool call.
+                `pendingTurn` is confirmed true (server says the turn is
+                genuinely still alive) but neither this block's old guard
+                nor the inline `showThinkingIndicator` case (gated on the
+                assistant message having ZERO parts) ever fired -- so the
+                UI showed a static, non-growing assistant bubble with no
+                spinner, no label, nothing: precisely "looks like the chat
+                died" from the outside, for the one case (an already-
+                started reply that goes silent) most likely to actually
+                happen. Now: whenever `pendingTurn` is true and this tab
+                isn't itself the one actively receiving live tokens right
+                now (`chat.status !== 'streaming'` -- if it were, the
+                growing text/tool card IS the liveness cue), show the
+                spinner regardless of what the last message looks like. */}
+            {((pendingTurn && chat.status !== 'streaming') ||
+              (showThinkingIndicator && (!lastMessage || lastMessage.role !== 'assistant'))) && (
               <div className="flex justify-start flex-col items-start">
                 <ThinkingIndicator />
                 {liveTurnElapsedMs != null && <LiveTurnDurationLabel elapsedMs={liveTurnElapsedMs} />}
