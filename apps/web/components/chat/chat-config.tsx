@@ -86,8 +86,21 @@ export function useModelOptions() {
                   // OpenAI-compatible endpoint should still show the Meta logo.
                   const family = inferModelFamily(m.label || m.modelId);
                   const group: ModelOption['group'] = p.isShared ? 'Shared' : 'Your providers';
+                  // Shared relays (owner ask 2026-07-27: "make sure on the
+                  // hcnsec only show the model name in the model selector
+                  // don't show the hcnsec provider or stuff saying the
+                  // model is routing") show ONLY the bare model name --
+                  // no "<provider label> · " prefix, no routing/relay
+                  // wording. The "Shared" group header already tells the
+                  // user these are platform-provided; repeating the
+                  // provider's internal relay name (e.g. "HCNSec Relay")
+                  // next to every model added noise with zero value to a
+                  // user just trying to pick a model. Your-own-provider
+                  // rows keep the prefix since a user can have several
+                  // providers serving models with the same bare name.
+                  const label = p.isShared ? (m.label || m.modelId) : `${p.label} · ${m.label || m.modelId}`;
                   return {
-                    label: `${p.label} · ${m.label || m.modelId}`,
+                    label,
                     value: `byok:${m.id}`,
                     provider: family,
                     Icon: getProviderIcon(family),

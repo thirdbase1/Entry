@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@entry/db';
-import { findRateForModel, priceUsage, isByok } from '@entry/db/usage-metering';
+import { matchRateFromCandidates, priceUsage, isByok } from '@entry/db/usage-metering';
 import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { featureService } from '@entry/features';
@@ -23,6 +23,13 @@ import { featureService } from '@entry/features';
  *
  * Leaves provider-reported-cost rows (priceRateId === 'provider-reported')
  * alone -- those were never "unpriced" to begin with, they're authoritative.
+ *
+ * PERF (fixed 2026-07-26): originally called findRateForModel() per row,
+ * which re-queries the whole ModelPriceRate table on every call -- for 357
+ * rows that's ~714 sequential DB round-trips and routinely blew past
+ * Cloudflare's 120s proxy timeout (520 error) before finishing. Now fetches
+ * the rate table ONCE and matches in memory, and fires the per-row updates
+ * concurrently in bounded batches instead of one at a time.
  */
 export async function POST(req: NextRequest) {
   const bearerOk = isAdminBearerAuthorized(req);
@@ -57,9 +64,6 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  let repriced = 0;
-  let stillUnmatched = 0;
-  const unmatchedModels = new Set<string>();
   // Look up "the best rate known TODAY", not "the rate effective at the
   // historical call's own timestamp" -- almost every rate row just seeded
   // has an effectiveFrom of today, which is AFTER most of the history
@@ -69,32 +73,46 @@ export async function POST(req: NextRequest) {
   // "now" is the correct anchor -- ongoing recordUsageEvent() calls still
   // price strictly against the rate effective at THEIR own call time.
   const now = new Date();
+  const candidates = await prisma.modelPriceRate.findMany({
+    where: { effectiveFrom: { lte: now } },
+    orderBy: { effectiveFrom: 'desc' },
+  });
 
-  for (const row of rows) {
-    const rate = await findRateForModel(row.model, now);
-    if (!rate) {
-      stillUnmatched += 1;
-      unmatchedModels.add(row.model);
-      continue;
-    }
-    const faceValueUsd = priceUsage(
-      {
-        inputTokens: row.inputTokens,
-        outputTokens: row.outputTokens,
-        cacheCreationTokens: row.cacheCreationTokens,
-        cacheReadTokens: row.cacheReadTokens,
-      },
-      rate
+  let repriced = 0;
+  let stillUnmatched = 0;
+  const unmatchedModels = new Set<string>();
+
+  const BATCH_SIZE = 25;
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    await Promise.all(
+      batch.map(async row => {
+        const rate = matchRateFromCandidates(candidates, row.model);
+        if (!rate) {
+          stillUnmatched += 1;
+          unmatchedModels.add(row.model);
+          return;
+        }
+        const faceValueUsd = priceUsage(
+          {
+            inputTokens: row.inputTokens,
+            outputTokens: row.outputTokens,
+            cacheCreationTokens: row.cacheCreationTokens,
+            cacheReadTokens: row.cacheReadTokens,
+          },
+          rate
+        );
+        await prisma.usageEvent.update({
+          where: { id: row.id },
+          data: {
+            faceValueUsd,
+            actualCostUsd: isByok(row.provider) ? 0 : faceValueUsd,
+            priceRateId: rate.id,
+          },
+        });
+        repriced += 1;
+      })
     );
-    await prisma.usageEvent.update({
-      where: { id: row.id },
-      data: {
-        faceValueUsd,
-        actualCostUsd: isByok(row.provider) ? 0 : faceValueUsd,
-        priceRateId: rate.id,
-      },
-    });
-    repriced += 1;
   }
 
   return NextResponse.json({

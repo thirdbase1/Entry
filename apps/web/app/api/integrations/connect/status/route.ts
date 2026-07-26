@@ -3,6 +3,7 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { CONNECT_CONNECTORS, DIRECT_OAUTH_SERVICES, isConnectAuthorized } from '@entry/agent/lib/connect-service-tokens';
 import { getCredential } from '@entry/agent/lib/credential-vault';
+import { prisma } from '@entry/db';
 
 /**
  * GET /api/integrations/connect/status
@@ -36,5 +37,19 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
     })
   );
 
-  return NextResponse.json({ connected: Object.fromEntries(entries) });
+  // githubInstallationId (2026-07-27, owner ask: let a user "update
+  // repository our app has access to" without re-running the whole OAuth
+  // dance): exposed so the Integrations UI can link straight to GitHub's
+  // own installation "Configure" page, which is GitHub's real UI for
+  // adding/removing repos on an existing installation -- no need to
+  // route that through our own OAuth flow at all.
+  const dbUser = await prisma.user.findUnique({
+    where: { id: session.user.id },
+    select: { githubInstallationId: true },
+  });
+
+  return NextResponse.json({
+    connected: Object.fromEntries(entries),
+    githubInstallationId: dbUser?.githubInstallationId ?? null,
+  });
 });

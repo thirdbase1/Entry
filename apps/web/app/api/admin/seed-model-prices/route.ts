@@ -30,6 +30,22 @@ const RATES: Array<{
   source: string;
 }> = [
   // Anthropic — platform.claude.com/docs/en/about-claude/pricing (live 2026-07-26)
+  // REAL BUG FOUND (2026-07-27, owner: "recheck your Claude Fable 5
+  // calculation"): "Claude Fable 5" and "Claude Opus 5" are two entirely
+  // DIFFERENT Anthropic models, not the same model under two names --
+  // confirmed against Anthropic's own pricing page + the model's own
+  // announcement post. Opus 5 is $5/$25 per MTok; Fable 5 (Mythos-class,
+  // Anthropic's actual flagship above Opus) is $10/$50 per MTok. This
+  // relay's real model id for what this app calls "Fable 5" is literally
+  // `claude-fable-5` (see byok/resolve-model.ts, strip-reasoning-parts.ts,
+  // reasoning-detection.ts -- all reference it by that exact id) -- but
+  // this price table only ever had a `claude-opus-5` row, which that id
+  // never matches (no exact match, no prefix match either way). Every
+  // single claude-fable-5 call has therefore been priced as
+  // completely UNPRICED ($0.00) since day one. Added its own row at the
+  // correct $10/$50 rate; kept claude-opus-5 too in case that model is
+  // ever actually used by a different relay/BYOK connection.
+  { modelPattern: 'claude-fable-5', inputPerMTok: 10, outputPerMTok: 50, cacheWritePerMTok: 12.5, cacheReadPerMTok: 1, source: 'anthropic.com/news/claude-fable-5-mythos-5 + anthropic.com/claude/fable (verified 2026-07-27)' },
   { modelPattern: 'claude-opus-5', inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'anthropic pricing page' },
   { modelPattern: 'claude-opus-4-6', inputPerMTok: 5, outputPerMTok: 25, cacheWritePerMTok: 6.25, cacheReadPerMTok: 0.5, source: 'anthropic pricing page' },
   // Sonnet 5 intro pricing runs through Aug 31 2026 (today is Jul 26 2026) -- standard $3/$15 takes over after.

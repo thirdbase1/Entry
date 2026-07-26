@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'node:crypto';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getPublicOrigin } from '@/lib/public-origin';
+import { prisma } from '@entry/db';
 
 /** Only allow redirecting back to a chat session page — never an
  *  arbitrary path, so this can't be abused as an open redirect. */
@@ -68,14 +69,47 @@ export async function GET(req: NextRequest) {
   const state = randomBytes(24).toString('base64url');
   const returnTo = sanitizeReturnTo(req.nextUrl.searchParams.get('returnTo'));
 
-  // GitHub App install-and-authorize screen (see file comment above for
-  // why this replaced a bare login/oauth/authorize call). GitHub sends
-  // the user back to entry-github's configured "Setup URL" /
-  // "User authorization callback URL" -- that must be set, in the App's
-  // own settings on github.com, to this exact route
-  // (`${origin}/api/integrations/github-oauth/callback`) for the
-  // `code` + `installation_id` this callback expects to actually arrive.
-  const authorizeUrl = new URL('https://github.com/apps/entry-github/installations/new');
+  // RECONNECT BUG FIX (2026-07-27, owner report: "if someone already
+  // has our GitHub app installed on their GitHub but disconnected on our
+  // Integrations page ... clicking connect will not redirect the user
+  // back"). Root cause is a real GitHub Apps quirk, not our code: hitting
+  // `/apps/:slug/installations/new` for an account that ALREADY has the
+  // app installed does not show the install screen at all -- GitHub just
+  // drops the user straight onto the installation's "Configure" page on
+  // github.com itself, with no `code`/`state`, so our callback route
+  // never fires and the user is stranded with no way back to us. This
+  // only ever happens for accounts with an existing installation, i.e.
+  // exactly "disconnected but previously installed" users (disconnect
+  // only clears our vault credential -- it never clears
+  // `User.githubInstallationId`, since the GitHub-side installation
+  // itself isn't touched by our disconnect at all -- see
+  // connect/disconnect/route.ts).
+  //
+  // Fix: if we already know this user has an installation on file, skip
+  // `/installations/new` entirely and send them through the plain
+  // `login/oauth/authorize` screen instead -- entry-github supports
+  // standalone user-to-server OAuth (same client id/secret) precisely
+  // because "Request user authorization (OAuth) during installation" is
+  // enabled, and that endpoint ALWAYS completes with a real `code` +
+  // `state` back to our callback regardless of install state. It won't
+  // send a fresh `installation_id`, but the callback only overwrites
+  // `githubInstallationId` when one is actually present, so the existing
+  // value is left untouched (and remains valid, since the underlying
+  // GitHub-side installation was never removed). Only genuinely
+  // first-time users (no installationId on file) go through the real
+  // install-and-authorize screen, where the "new install" case works
+  // exactly as before.
+  const existingUser = await prisma.user.findUnique({
+    where: { id: session.user.id },
+    select: { githubInstallationId: true },
+  });
+
+  const authorizeUrl = existingUser?.githubInstallationId
+    ? new URL('https://github.com/login/oauth/authorize')
+    : new URL('https://github.com/apps/entry-github/installations/new');
+  if (existingUser?.githubInstallationId) {
+    authorizeUrl.searchParams.set('client_id', clientId);
+  }
   authorizeUrl.searchParams.set('state', state);
 
   const res = NextResponse.redirect(authorizeUrl.toString());

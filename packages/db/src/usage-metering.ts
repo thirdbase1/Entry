@@ -69,15 +69,26 @@ function isShared(provider: string): boolean {
 }
 
 /**
- * Cumulative real spend (USD) against ONE specific shared provider row,
- * summed straight from the ledger -- never a separate running counter that
- * could drift from the source of truth. Used as a pre-flight gate (see
- * direct/chat/route.ts) so a capped shared provider can never be called
- * again once its cap is hit; already-recorded spend is never revisited.
+ * Cumulative real spend (USD) against ONE specific shared provider row for
+ * the CURRENT CALENDAR MONTH, summed straight from the ledger -- never a
+ * separate running counter that could drift from the source of truth. Used
+ * as a pre-flight gate (see direct/chat/route.ts) so a capped shared
+ * provider can never be called again once its cap is hit for the month.
+ *
+ * SCOPED TO CALENDAR MONTH (2026-07-26, owner ask: "the $20 usage should
+ * reset every [month] on the 1st"): originally this summed ALL-TIME spend,
+ * so a shared relay (e.g. HCNSec) would stay permanently locked out once
+ * it ever crossed its cap, with no way to recover short of manually raising
+ * spendCapUsd. Anchoring the SUM to `created_date >= start of this month`
+ * means the gate naturally re-opens at 00:00 on the 1st of every month --
+ * no cron job or reset job needed, since it's still a live query over the
+ * ledger, just windowed.
  */
 export async function getProviderSpendUsd(providerId: string): Promise<number> {
+  const now = new Date();
+  const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
   const result = await prisma.usageEvent.aggregate({
-    where: { provider: `shared:${providerId}` },
+    where: { provider: `shared:${providerId}`, createdAt: { gte: startOfMonth } },
     _sum: { actualCostUsd: true },
   });
   return Number(result._sum.actualCostUsd ?? 0);
@@ -106,23 +117,39 @@ export async function getProviderSpendUsd(providerId: string): Promise<number> {
  * separately, always prefer the most recent EXACT match, and only fall
  * back to the most recent prefix match if no exact match exists at all.
  */
-export async function findRateForModel(model: string, at: Date) {
+/**
+ * Pure matcher, no DB access -- extracted (2026-07-26) so callers that need
+ * to price MANY rows in one request (e.g. the admin backfill route) can
+ * fetch the ModelPriceRate table ONCE and reuse it, instead of re-querying
+ * per row. findRateForModel() below re-queries every call, which is fine
+ * for single live pricing calls but was causing the backfill route to do
+ * ~714 sequential DB round-trips for 357 rows -- routinely blowing past
+ * Cloudflare's 120s proxy timeout (520 error) before finishing.
+ */
+export function matchRateFromCandidates<T extends { modelPattern: string }>(
+  candidates: T[],
+  model: string
+): T | null {
   const bareModel = model.split('/').pop() ?? model;
-  const candidates = await prisma.modelPriceRate.findMany({
-    where: { effectiveFrom: { lte: at } },
-    orderBy: { effectiveFrom: 'desc' },
-  });
-  const exact = candidates.find((rate: (typeof candidates)[number]) => {
+  const exact = candidates.find(rate => {
     const barePattern = rate.modelPattern.split('/').pop() ?? rate.modelPattern;
     return bareModel === barePattern;
   });
   if (exact) return exact;
   return (
-    candidates.find((rate: (typeof candidates)[number]) => {
+    candidates.find(rate => {
       const barePattern = rate.modelPattern.split('/').pop() ?? rate.modelPattern;
       return bareModel.startsWith(barePattern);
     }) ?? null
   );
+}
+
+export async function findRateForModel(model: string, at: Date) {
+  const candidates = await prisma.modelPriceRate.findMany({
+    where: { effectiveFrom: { lte: at } },
+    orderBy: { effectiveFrom: 'desc' },
+  });
+  return matchRateFromCandidates(candidates, model);
 }
 
 /** Per-million-token pricing applied to the four token buckets. */

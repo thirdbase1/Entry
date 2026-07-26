@@ -142,10 +142,12 @@ function OAuthIntegrationCard({
   def,
   connected,
   onChanged,
+  githubInstallationId,
 }: {
   def: KnownService;
   connected: boolean;
   onChanged: () => void;
+  githubInstallationId?: string | null;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -253,6 +255,23 @@ function OAuthIntegrationCard({
         >
           {busy ? 'Redirecting…' : `Connect ${def.name}`}
         </button>
+      )}
+
+      {/* "update repository our app has access to" (owner ask 2026-07-27):
+          this is GitHub's OWN installation "Configure" page, not something
+          our OAuth flow can do -- adding/removing repos on an existing
+          installation is managed entirely on github.com. Only shown once
+          we actually know the installation id (set the first time this
+          user ever completed the real install-and-authorize screen). */}
+      {def.service === 'github' && githubInstallationId && (
+        <a
+          href={`https://github.com/settings/installations/${encodeURIComponent(githubInstallationId)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="self-start text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+        >
+          Update repository access →
+        </a>
       )}
     </div>
   );
@@ -385,6 +404,7 @@ function AddCustomIntegrationForm({ onSaved }: { onSaved: (meta: CredentialMeta)
 export function IntegrationsSection() {
   const [credentials, setCredentials] = useState<CredentialMeta[] | null>(null);
   const [connectStatus, setConnectStatus] = useState<Record<string, boolean>>({});
+  const [githubInstallationId, setGithubInstallationId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const reload = useCallback(() => {
@@ -402,7 +422,10 @@ export function IntegrationsSection() {
     fetch('/api/integrations/connect/status')
       .then(async res => {
         const json = await safeJson(res);
-        if (res.ok) setConnectStatus(json.connected ?? {});
+        if (res.ok) {
+          setConnectStatus(json.connected ?? {});
+          setGithubInstallationId(json.githubInstallationId ?? null);
+        }
       })
       .catch(() => {
         // Non-fatal — OAuth cards just show "Not connected" until this loads.
@@ -445,6 +468,7 @@ export function IntegrationsSection() {
                 def={def}
                 connected={Boolean(connectStatus[def.service])}
                 onChanged={reload}
+                githubInstallationId={def.service === 'github' ? githubInstallationId : undefined}
               />
             ) : (
               <IntegrationCard
