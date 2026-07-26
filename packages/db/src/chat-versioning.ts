@@ -378,12 +378,63 @@ async function runGit(
  * user-visible failure on an otherwise-successful turn, same philosophy
  * as touchChatFileTree/trackChange elsewhere in this feature.
  */
-export function captureVersionFromSandboxDiff(
+function captureVersionFromSandboxDiff(
   chatId: string,
   sandbox: VersionCaptureSandbox,
   opts: { skipCard?: boolean } = {},
 ): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
   return withChatSerialized(chatId, () => captureVersionFromSandboxDiffInner(chatId, sandbox, opts));
+}
+
+// SPLIT INTO TWO NAMED FUNCTIONS (2026-07-26, "proper rework" pass, real
+// confirmed bug: multiple duplicate version cards/entries for a single
+// logical turn, live on BOTH the eve-default path (hooks/version-capture.ts)
+// and the channel-originated direct-chat path (direct-chat-core.ts) --
+// apps/web/app/api/direct/chat/route.ts's own web-UI direct-chat path was
+// the ONLY one of the three call sites that correctly remembered to pass
+// `skipCard: true` on its per-step incremental capture. The other two
+// omitted it, so every intermediate tool-call step created its own full,
+// hasCard:true ChatVersion -- multiplying cards in the Versions tab (and,
+// on the channel path, inline in the chat itself too, since
+// appendVersionCardMessage actually appends there for BYOK/direct chats).
+//
+// The previous single `captureVersionFromSandboxDiff(chatId, sandbox,
+// opts?)` signature made this an easy mistake: `opts.skipCard` defaults to
+// falsy, so simply forgetting to pass `{ skipCard: true }` silently does
+// the WRONG, card-creating thing rather than failing loudly. Two
+// distinctly-named exports remove that failure mode: there is no shared
+// default to forget, every call site's intent is explicit in its own
+// name, and grepping either name now shows every real call site for that
+// exact purpose in one search instead of having to also inspect each
+// call's opts object to know which behavior it actually gets.
+//
+// Kept as thin wrappers over the same serialized inner implementation --
+// this is a naming/API-shape fix, not a behavior change to the git-diff
+// logic itself.
+
+/** Per-step safety-net snapshot: advances the git baseline so a mid-turn
+ *  hard-kill only ever loses whatever happened after the last completed
+ *  step, never the whole turn. Never creates a user-visible card and
+ *  never appends into a chat's events -- see writeVersionRows'
+ *  `hasCard: !opts.skipCard`. Call this from every per-step/per-tool-call
+ *  hook; never from a genuine turn-end. */
+export function captureIncrementalSnapshot(
+  chatId: string,
+  sandbox: VersionCaptureSandbox,
+): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
+  return captureVersionFromSandboxDiff(chatId, sandbox, { skipCard: true });
+}
+
+/** The real, user-facing version for a turn that just ended: creates a
+ *  visible card (Versions tab always; inline in the chat too, for
+ *  BYOK/direct chats specifically -- see appendVersionCardMessage). Call
+ *  this EXACTLY ONCE per turn, only once the turn has genuinely finished
+ *  (onFinish / turn.completed) -- never from a per-step hook. */
+export function captureTurnVersion(
+  chatId: string,
+  sandbox: VersionCaptureSandbox,
+): Promise<{ versionNumber: number; summary: string; filesChanged: number; linesAdded: number; linesRemoved: number } | null> {
+  return captureVersionFromSandboxDiff(chatId, sandbox);
 }
 
 async function captureVersionFromSandboxDiffInner(
@@ -649,7 +700,19 @@ export function withPeriodicVersionCapture<T>(
   const timer: ReturnType<typeof setInterval> = setInterval(() => {
     if (inFlight) return;
     inFlight = true;
-    captureVersionFromSandboxDiff(chatId, sandbox)
+    // FIXED (2026-07-26, "proper rework" pass, confirmed real bug: this
+    // was far and away the biggest source of duplicate version cards --
+    // it used the plain (real-card-creating) capture call, meaning ANY
+    // single bash call running longer than intervalMs (10s -- routine
+    // for a build/install/deploy, which is most of what `bash` is used
+    // for in this codebase) fired off its own full, hasCard:true,
+    // events-appending version EVERY tick, all describing the exact same
+    // still-in-progress command. This is purely a background safety-net
+    // snapshot (see this function's own doc comment: the goal is never
+    // losing in-flight disk state to a hard-kill, not showing the user
+    // anything) -- captureIncrementalSnapshot is correct here, the same
+    // way it now is everywhere else this pattern was found.
+    captureIncrementalSnapshot(chatId, sandbox)
       .catch(err => console.error('[chat-versioning] periodic capture failed', chatId, err))
       .finally(() => {
         inFlight = false;

@@ -1,6 +1,6 @@
 import { defineHook } from 'eve/hooks';
 import type { HookContext } from 'eve/hooks';
-import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
+import { captureIncrementalSnapshot, captureTurnVersion } from '@entry/db/chat-versioning';
 
 /**
  * Universal, tool-agnostic version capture for the eve-default chat path.
@@ -29,8 +29,22 @@ import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
  * (e.g. a purely conversational turn, no tool calls) -- caught and
  * ignored below, exactly right: nothing to version.
  *
+ * FIXED (2026-07-26, "proper rework" pass, confirmed real bug: the
+ * Versions tab showed multiple separate entries for a single logical
+ * turn on any multi-step tool-call reply). Root cause: this hook fires
+ * on step.completed/step.failed TOO (see the broadened-events comment
+ * below) but used to call the exact same capture function for all three
+ * events with no `skipCard` -- every intermediate step created its OWN
+ * real, hasCard:true ChatVersion, not just a baseline-advancing safety
+ * net. `captureTurnVersion` (the real, user-facing one) now only ever
+ * runs from `turn.completed`; `step.completed`/`step.failed` use
+ * `captureIncrementalSnapshot` (always skipCard:true) purely to advance
+ * the git baseline for hard-kill protection, same as the comment below
+ * always intended.
+ *
  * This ONLY writes the ChatVersion/ChatVersionFile rows (durable, shows
- * up in the read-only Versions tab immediately either way). It does NOT
+ * up in the read-only Versions tab immediately either way, for the
+ * turn.completed case). It does NOT
  * try to inject a card into eve's own event log -- hooks are observe-only
  * by design and can't do that safely. The visible, INSTANT in-chat card
  * for eve-default chats is rendered purely client-side instead: this
@@ -41,10 +55,11 @@ import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
  * no polling delay, no page reload, works identically for every chat
  * whether it's eve-default or BYOK.
  */
-const capture = async (_event: unknown, ctx: HookContext) => {
+const runCapture = (isFinal: boolean) => async (_event: unknown, ctx: HookContext) => {
   try {
     const sandbox = await ctx.getSandbox();
-    await captureVersionFromSandboxDiff(ctx.session.id, sandbox);
+    if (isFinal) await captureTurnVersion(ctx.session.id, sandbox);
+    else await captureIncrementalSnapshot(ctx.session.id, sandbox);
   } catch (err) {
     // Most common case by far: this turn never used a sandbox at all
     // (pure conversation, no tool calls) -- getSandbox() throws, and
@@ -58,6 +73,13 @@ const capture = async (_event: unknown, ctx: HookContext) => {
     }
   }
 };
+// Two bound instances, not one function branching on the event name
+// internally -- the `events` map below is the single place that decides
+// which events are "final" (real card) vs "incremental" (safety-net
+// only), so that mapping stays fully visible at the registration site
+// instead of being reconstructed by reading a conditional inside the fn.
+const captureIncremental = runCapture(false);
+const captureFinal = runCapture(true);
 
 export default defineHook({
   events: {
@@ -84,8 +106,8 @@ export default defineHook({
     // is already a cheap, safe no-op when nothing actually changed on
     // disk, so firing it this much more often costs nothing extra when
     // there's no diff to record.
-    'step.completed': capture,
-    'step.failed': capture,
-    'turn.completed': capture,
+    'step.completed': captureIncremental,
+    'step.failed': captureIncremental,
+    'turn.completed': captureFinal,
   },
 });

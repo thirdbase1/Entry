@@ -79,7 +79,7 @@ import {
 } from 'ai';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
-import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
+import { captureIncrementalSnapshot, captureTurnVersion } from '@entry/db/chat-versioning';
 import { resolveByokModel } from './byok/resolve-model.js';
 import { resolveGatewayModel } from './direct-chat/resolve-gateway-model.js';
 import { getSandboxForChat } from './direct-chat/sandbox.js';
@@ -817,7 +817,17 @@ export async function runDirectChatTurn(
       // no real cost beyond that.
       if (sandboxPromise && toolCalls.length > 0) {
         const sandbox = await sandboxPromise;
-        await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
+        // FIXED (2026-07-26, "proper rework" pass, confirmed real bug:
+        // this channel-originated direct-chat path was the one call site
+        // that never got the skipCard fix route.ts already had -- every
+        // tool-call step created its OWN full, user-visible version
+        // card, both inline in the chat and in the Versions tab, for any
+        // multi-step WhatsApp/Telegram/Slack-originated direct-chat turn.
+        // captureIncrementalSnapshot is the explicitly-named safety-net
+        // variant -- see chat-versioning.ts's comment for why this is
+        // now impossible to get wrong by omission the way the old single
+        // function + easily-forgotten opts flag was.
+        await captureIncrementalSnapshot(chatId, sandbox).catch(err => {
           console.error('[direct chat] incremental step version capture failed', chatId, err);
         });
       }
@@ -971,7 +981,7 @@ export async function runDirectChatTurn(
       // above -- can never race each other.
       if (sandboxPromise) {
         const sandbox = await sandboxPromise;
-        await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
+        await captureTurnVersion(chatId, sandbox).catch(err => {
           console.error('[direct chat] version capture failed', chatId, err);
         });
       }

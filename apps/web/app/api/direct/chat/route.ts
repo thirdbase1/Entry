@@ -86,7 +86,7 @@ import {
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
-import { captureVersionFromSandboxDiff } from '@entry/db/chat-versioning';
+import { captureIncrementalSnapshot, captureTurnVersion } from '@entry/db/chat-versioning';
 import { recordUsageEvent } from '@entry/db/usage-metering';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel, pickFallbackByokModel } from '@/lib/byok/resolve-model';
@@ -1162,7 +1162,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           // sanitizedFinalMessages which has no card). The version rows
           // (ChatVersion/ChatVersionFile) are still written here for
           // incremental durability; only the UI card is deferred.
-          captureVersionFromSandboxDiff(chatId, sandbox, { skipCard: true })
+          captureIncrementalSnapshot(chatId, sandbox)
         ).catch(err => {
           console.error('[direct chat] incremental step version capture failed', chatId, err);
         });
@@ -1383,7 +1383,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // above -- can never race each other.
       if (sandboxPromise) {
         const sandbox = await sandboxPromise;
-        await captureVersionFromSandboxDiff(chatId, sandbox).catch(err => {
+        await captureTurnVersion(chatId, sandbox).catch(err => {
           console.error('[direct chat] version capture failed', chatId, err);
         });
       }
