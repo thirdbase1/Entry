@@ -1,6 +1,6 @@
 'use client';
 
-import { EditIcon, AllDocsIcon, FileIcon, SettingsIcon, LockIcon } from '@blocksuite/icons/rc';
+import { EditIcon, AllDocsIcon, FileIcon, SettingsIcon, LockIcon, ChartPanelIcon } from '@blocksuite/icons/rc';
 import { ChatIcon } from '@/components/icons/chat-icon';
 import { AnimatePresence, motion } from 'framer-motion';
 import Link from 'next/link';
@@ -102,6 +102,12 @@ function SidebarContent() {
           )}>
             <SettingsIcon className="w-5 h-5 text-muted-foreground" />
             <div className="text-sm">Settings</div>
+          </li>
+        </Link>
+        <Link href="/settings?tab=usage">
+          <li className="flex items-center gap-3 h-[30px] px-2 rounded hover:bg-accent transition-colors cursor-pointer">
+            <ChartPanelIcon className="w-5 h-5 text-muted-foreground" />
+            <div className="text-sm">Usage</div>
           </li>
         </Link>
         {isAdmin ? (

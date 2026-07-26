@@ -11,6 +11,7 @@
  * tool parity, nothing gated.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';
 import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
@@ -1001,7 +1002,21 @@ function ModelProvidersSection() {
 type SettingsTab = 'providers' | 'integrations' | 'usage';
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<SettingsTab>('providers');
+  const searchParams = useSearchParams();
+  const initialTab = (searchParams.get('tab') as SettingsTab | null) ?? 'providers';
+  const [tab, setTab] = useState<SettingsTab>(
+    initialTab === 'usage' || initialTab === 'integrations' ? initialTab : 'providers'
+  );
+
+  // Deep-link support (?tab=usage from the sidebar's Usage shortcut) --
+  // only re-syncs on navigations that change the query param, never
+  // fights the user's own in-page tab clicks afterwards.
+  useEffect(() => {
+    const requested = searchParams.get('tab');
+    if (requested === 'usage' || requested === 'integrations' || requested === 'providers') {
+      setTab(requested);
+    }
+  }, [searchParams]);
 
   return (
     <div className="flex-1 overflow-y-auto h-full flex flex-col">
