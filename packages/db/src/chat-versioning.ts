@@ -79,10 +79,39 @@ export function isFirstPendingChangeForChat(chatId: string): boolean {
   return !bucket || bucket.size === 0;
 }
 
+// PERFORMANCE/RELIABILITY (2026-07-26, "9x better overall" pass): a real
+// stall risk, not a hypothetical one -- this runs SYNCHRONOUSLY inside
+// captureTurnVersion, which is `await`ed at the true end of every turn
+// before the turn is considered finished (see route.ts's onFinish call
+// site). `Diff.diffLines` is a real LCS-style diff algorithm, not a cheap
+// line-count -- its cost scales with both input size AND how different
+// the two versions are, and there is no upper bound today on how big a
+// single file's content can be (a generated lockfile, a large data dump,
+// a big minified bundle the agent wrote this turn all qualify). A slow
+// diff here means a slow, stuck-feeling turn completion for the user,
+// with zero visible cause -- exactly the class of "why did that just
+// hang" report this whole project has spent so much effort chasing down
+// elsewhere (Redis turn-locking, heartbeats, stall-guard timeouts, etc.)
+// -- except this one would be self-inflicted by the versioning feature
+// itself. Past this size threshold, fall back to a cheap line-COUNT-based
+// estimate instead of a real diff: correct enough for the UI's "+N/-M"
+// display (which is already just a rough magnitude indicator, not a
+// byte-exact ledger anyone audits), and O(1) relative to input size
+// instead of O(n*m).
+const LARGE_FILE_DIFF_THRESHOLD_CHARS = 200_000;
+
 function diffStats(before: string | null, after: string | null): { linesAdded: number; linesRemoved: number } {
   if (before == null && after == null) return { linesAdded: 0, linesRemoved: 0 };
   if (before == null) return { linesAdded: (after ?? '').split('\n').length, linesRemoved: 0 };
   if (after == null) return { linesAdded: 0, linesRemoved: before.split('\n').length };
+
+  if (before.length + after.length > LARGE_FILE_DIFF_THRESHOLD_CHARS) {
+    const beforeLines = before.split('\n').length;
+    const afterLines = after.split('\n').length;
+    if (afterLines >= beforeLines) return { linesAdded: afterLines - beforeLines, linesRemoved: 0 };
+    return { linesAdded: 0, linesRemoved: beforeLines - afterLines };
+  }
+
   const parts = Diff.diffLines(before, after);
   let added = 0;
   let removed = 0;

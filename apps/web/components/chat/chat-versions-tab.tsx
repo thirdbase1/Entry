@@ -132,21 +132,60 @@ function previewText(p: RevertPreview): string {
   return `This will ${parts.join(' and ')}.`;
 }
 
+// RELIABILITY (2026-07-26, "9x better overall" pass): a real
+// tab-freeze risk, not a hypothetical one -- `Diff.diffLines` runs
+// synchronously ON RENDER with no size guard, and every resulting line
+// gets its own DOM node with no cap or virtualization. Expanding the
+// diff on one big generated file (a lockfile, a large data dump, a
+// minified bundle) would both run an expensive diff algorithm AND
+// mount thousands of divs on the main thread in one go -- exactly the
+// kind of self-inflicted UI hang this project has spent a lot of effort
+// hunting down elsewhere. Same char-count threshold as the server-side
+// diffStats fast-path in chat-versioning.ts, for the same reason: past
+// this size a real diff isn't worth what it costs to compute and render.
+const DIFF_VIEW_SIZE_THRESHOLD_CHARS = 200_000;
+const DIFF_VIEW_MAX_LINES = 2000;
+
 function DiffView({ before, after }: { before: string | null; after: string | null }) {
-  const parts: DiffPart[] = before == null && after == null ? [] : Diff.diffLines(before ?? '', after ?? '');
+  const beforeStr = before ?? '';
+  const afterStr = after ?? '';
+  const tooLarge = before == null && after == null ? false : beforeStr.length + afterStr.length > DIFF_VIEW_SIZE_THRESHOLD_CHARS;
+  const parts: DiffPart[] = tooLarge || (before == null && after == null) ? [] : Diff.diffLines(beforeStr, afterStr);
+
+  if (tooLarge) {
+    return (
+      <div className="mt-1.5 rounded-md bg-muted/40 border border-border px-2 py-2 text-[11px] text-muted-foreground">
+        This file is too large to diff inline. Download the version snapshot to view the full content.
+      </div>
+    );
+  }
+
+  let linesRendered = 0;
+  let truncated = false;
+
   return (
     <div className="mt-1.5 rounded-md bg-muted/40 border border-border overflow-auto max-h-64 font-mono text-[11px] leading-5">
       {parts.map((part, i) => {
+        if (truncated) return null;
         const lines = part.value.replace(/\n$/, '').split('\n');
         const bg = part.added ? 'bg-emerald-500/10' : part.removed ? 'bg-red-500/10' : '';
         const prefix = part.added ? '+' : part.removed ? '-' : ' ';
         const color = part.added ? 'text-emerald-700 dark:text-emerald-400' : part.removed ? 'text-red-700 dark:text-red-400' : 'text-muted-foreground';
-        return lines.map((line, j) => (
+        const remaining = DIFF_VIEW_MAX_LINES - linesRendered;
+        const slice = lines.slice(0, Math.max(remaining, 0));
+        if (lines.length > remaining) truncated = true;
+        linesRendered += slice.length;
+        return slice.map((line, j) => (
           <div key={`${i}-${j}`} className={`px-2 whitespace-pre ${bg} ${color}`}>
             {prefix} {line}
           </div>
         ));
       })}
+      {truncated && (
+        <div className="px-2 py-1 text-muted-foreground border-t border-border">
+          Diff truncated at {DIFF_VIEW_MAX_LINES} lines — download the version snapshot to view the rest.
+        </div>
+      )}
       {parts.length === 0 && <div className="px-2 py-1 text-muted-foreground">No content to diff.</div>}
     </div>
   );

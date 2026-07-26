@@ -951,6 +951,20 @@ model ChatVersion {
 
   @@unique([chatId, versionNumber])
   @@index([chatId, createdAt])
+  // PERFORMANCE (2026-07-26, "9x better overall" pass): the single
+  // hottest query in this whole feature -- the Versions tab list route,
+  // hit on every tab open AND every silent poll tick for every open
+  // chat -- filters WHERE chatId=X AND hasCard=true ORDER BY
+  // versionNumber DESC. Without hasCard in the index, Postgres can still
+  // use the (chatId, versionNumber) unique index to scan in the right
+  // order, but has to walk past every hidden per-step safety-net
+  // snapshot row (hasCard=false -- there are typically several of
+  // these per real turn, see hasCard's own comment) to collect a page
+  // of real ones. This index lets it jump straight to hasCard=true rows
+  // in versionNumber order with none of that wasted scanning, on a
+  // query pattern that only gets more expensive as any single chat's
+  // turn count grows over its lifetime.
+  @@index([chatId, hasCard, versionNumber])
   @@map("chat_versions")
 }
 
