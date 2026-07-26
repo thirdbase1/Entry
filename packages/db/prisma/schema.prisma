@@ -615,21 +615,6 @@ model EveChatSession {
   // `isPublic` boolean is what actually blocks reads while off.
   isPublic   Boolean  @default(false) @map("is_public")
   shareToken String?  @unique @map("share_token") @db.VarChar
-  // True while a Trigger.dev durable worker run (agent-chat-turn-orchestrator)
-  // is actively continuing THIS chat's turn in the background past the
-  // sync route's 300s ceiling -- see route.ts's soft-deadline handoff and
-  // agent-turn-orchestrator.ts's try/finally. The client's recovery poll
-  // (direct-chat-interface.tsx) keeps refetching while this is true instead
-  // of assuming the turn is done just because the initiating HTTP response
-  // already closed.
-  backgroundRunActive Boolean @default(false) @map("background_run_active")
-  // The Trigger.dev run ID of the currently-active background worker
-  // (agent-chat-turn-orchestrator), when backgroundRunActive is true.
-  // Used to mint a scoped, short-lived public access token so the
-  // frontend can subscribe to that specific run's realtime chunk
-  // stream (see /api/chats/[sessionId]/realtime-token) instead of
-  // relying solely on 3s DB polling for live updates.
-  backgroundRunId String? @map("background_run_id")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
 

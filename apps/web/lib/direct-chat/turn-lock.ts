@@ -109,6 +109,22 @@ export function startTurnHeartbeat(chatId: string, turnId: string): () => void {
   };
 }
 
+// SAFETY-NET TTL (2026-07-26, real leak found while auditing this exact
+// file's own "safety-net ceiling" philosophy -- see MAX_HEARTBEAT_MS
+// above -- and noticing it wasn't applied here too): before this, the
+// stream key got NO ttl at all until publishTurnEnd() ran and set one.
+// That's fine for every NORMAL exit path (route.ts's endTurn() funnels
+// everything there), but a truly abnormal one -- the Node process itself
+// dying mid-turn (OOM, SIGKILL, host-level restart) -- skips every JS
+// finally/catch in the process, so publishTurnEnd() never runs and the
+// stream key would sit in Redis with no expiry, forever, on THIS
+// persistent long-lived process, one leaked key per crashed turn for the
+// life of the deployment. Renewed on every chunk (self-heals during a
+// real long turn the same way the lock's own heartbeat does), generous
+// enough to never race a legitimate long turn, but bounded -- a crashed
+// turn's stream is now reclaimed within this window instead of never.
+const STREAM_SAFETY_NET_TTL_SECONDS = 30 * 60; // 30m, comfortably above MAX_HEARTBEAT_MS (25m)
+
 export async function publishTurnChunk(chatId: string, turnId: string, chunk: unknown): Promise<void> {
   try {
     // NO MAXLEN TRIM (2026-07-26, real correctness gap found while
@@ -125,7 +141,11 @@ export async function publishTurnChunk(chatId: string, turnId: string, chunk: un
     // (STREAM_TTL_SECONDS) the moment the turn ends via publishTurnEnd
     // below -- correctness during the live turn matters far more than
     // trimming a stream that's about to be TTL'd away anyway.
-    await getRawRedis().xadd(streamKey(chatId), '*', 'turnId', turnId, 'data', JSON.stringify(chunk));
+    const redis = getRawRedis();
+    await redis.xadd(streamKey(chatId), '*', 'turnId', turnId, 'data', JSON.stringify(chunk));
+    // Fire-and-forget: never let a slow/failed EXPIRE delay or break the
+    // actual chunk publish it's riding along with.
+    void redis.expire(streamKey(chatId), STREAM_SAFETY_NET_TTL_SECONDS).catch(() => {});
   } catch (err) {
     console.error('[turn-stream] publish failed', chatId, err);
   }

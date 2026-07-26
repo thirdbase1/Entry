@@ -39,8 +39,6 @@ export const GET = withApiErrorHandling(async (req: Request) => {
         requestedModel: true,
         createdAt: true,
         updatedAt: true,
-        backgroundRunActive: true,
-        backgroundRunId: true,
         events: true,
       },
     });
@@ -56,8 +54,6 @@ export const GET = withApiErrorHandling(async (req: Request) => {
       requestedModel: row.requestedModel,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
-      backgroundRunActive: row.backgroundRunActive,
-      backgroundRunId: row.backgroundRunId,
       eventCount: events.length,
       lastEventPreview: events.length ? JSON.stringify(events[events.length - 1]).slice(0, 800) : null,
       tail: tailN ? events.slice(-tailN).map((e: any) => ({

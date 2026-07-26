@@ -50,7 +50,47 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+// LEAK FIX (2026-07-26, real gap: this process is persistent/long-lived
+// on Pxxl by design -- same property the file comment above already
+// leans on to justify NOT persisting this to the DB -- which cuts both
+// ways: nothing here ever removed an entry except a lazy check on a
+// re-lookup of that EXACT SAME key (model+systemText+toolSchemasJson).
+// Any key that's genuinely one-off (a chat whose system prompt/working-
+// memory content never recurs byte-for-byte, or simply never gets a
+// second Gemini turn) piles up forever with no eviction, for the entire
+// life of the deployment -- a slow, real memory leak, not hypothetical,
+// on the exact kind of long-uptime process this whole "long task
+// handling" pass is about. Bounded two ways: a hard entry-count cap
+// (evict oldest-inserted on overflow -- Map preserves insertion order,
+// so this is a cheap O(1) amortized policy, not a real LRU, which is
+// fine here since being wrong just means an extra cache-miss/recreate,
+// never a correctness issue) and a periodic sweep of anything already
+// past its real TTL regardless of whether it's ever looked up again.
 const cacheStore = new Map<string, CacheEntry>();
+const MAX_CACHE_ENTRIES = 500;
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5m
+
+function sweepExpiredEntries(): void {
+  const now = Date.now();
+  for (const [key, entry] of cacheStore.entries()) {
+    if (now >= entry.expiresAt) cacheStore.delete(key);
+  }
+}
+
+// Not held open forever by accident: `unref()` so this timer alone never
+// keeps the Node process alive (matches how every other background
+// interval in this codebase -- e.g. turn-lock.ts's heartbeat -- is
+// already scoped to real work, not a bare fire-and-forget global timer).
+const sweepTimer = setInterval(sweepExpiredEntries, SWEEP_INTERVAL_MS);
+sweepTimer.unref?.();
+
+function setCacheEntry(key: string, entry: CacheEntry): void {
+  if (cacheStore.size >= MAX_CACHE_ENTRIES && !cacheStore.has(key)) {
+    const oldestKey = cacheStore.keys().next().value;
+    if (oldestKey !== undefined) cacheStore.delete(oldestKey);
+  }
+  cacheStore.set(key, entry);
+}
 
 function hashKey(parts: string[]): string {
   return createHash('sha256').update(parts.join('\u0000')).digest('hex');
@@ -131,7 +171,7 @@ export async function prepareGoogleCache(args: PrepareGoogleCacheArgs): Promise<
     const data = (await res.json()) as { name?: string };
     if (!data.name) return null;
 
-    cacheStore.set(key, { name: data.name, expiresAt: now + CACHE_TTL_SECONDS * 1000 });
+    setCacheEntry(key, { name: data.name, expiresAt: now + CACHE_TTL_SECONDS * 1000 });
     return data.name;
   } catch (err) {
     console.warn('[google-context-cache] creation failed, continuing uncached', { modelId, userId, err: err instanceof Error ? err.message : String(err) });
