@@ -116,7 +116,7 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
       const [provider, model] = key.split('\u0000');
       const kind = providerKind(provider);
       const agg = sum(rows);
-      const unpricedCalls = rows.filter(r => r.priceRateId == null && kind !== 'byok').length;
+      const unpricedCalls = rows.filter(r => r.priceRateId == null).length;
       const lastUsedAt = rows.reduce((max, r) => (r.createdAt > max ? r.createdAt : max), rows[0].createdAt);
       const failedCalls = rows.filter(r => !r.success).length;
       const sharedMeta = kind === 'shared' ? sharedProviderMeta.get(provider.slice('shared:'.length)) : null;

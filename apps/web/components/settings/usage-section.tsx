@@ -318,19 +318,20 @@ export function UsageSection() {
                         </td>
                         <td className="px-3 py-2 text-right text-foreground font-medium">{fmtTokens(row.totalTokens)}</td>
                         <td className="px-3 py-2 text-right text-foreground">
-                          {row.providerKind === 'byok' ? (
-                            <span className="text-muted-foreground">free (your key)</span>
-                          ) : row.unpricedCalls > 0 ? (
+                          {row.unpricedCalls > 0 ? (
                             <span className="text-amber-600 dark:text-amber-400" title={`${row.unpricedCalls} call(s) had no matching price rate`}>
                               {fmtUsd(row.costUsd)} + unpriced
                             </span>
                           ) : (
                             fmtUsd(row.costUsd)
                           )}
+                          {row.providerKind === 'byok' && (
+                            <div className="text-[10px] text-muted-foreground leading-none mt-0.5" title="Real market rate for this model — your own key, so Entry never actually billed you for it">
+                              market rate · not billed
+                            </div>
+                          )}
                         </td>
-                        <td className="px-3 py-2 text-right text-muted-foreground text-xs">
-                          {row.providerKind === 'byok' ? '—' : fmtUsd(row.avgCostPerCallUsd)}
-                        </td>
+                        <td className="px-3 py-2 text-right text-muted-foreground text-xs">{fmtUsd(row.avgCostPerCallUsd)}</td>
                         <td className="px-3 py-2 text-right text-muted-foreground text-xs">{fmtRelative(row.lastUsedAt)}</td>
                       </tr>
                     );
@@ -372,7 +373,8 @@ export function UsageSection() {
 
       <span className="text-xs text-muted-foreground">
         Token counts are captured verbatim from each provider's own response — never estimated. Costs use the official
-        rate effective at the time of each call. "Your key" rows never cost Entry anything and always show as free.
+        rate effective at the time of each call. "Your key" rows show the model's real market rate for reference — Entry
+        never actually bills you for them.
       </span>
     </div>
   );

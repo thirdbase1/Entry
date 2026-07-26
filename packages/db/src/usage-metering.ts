@@ -17,9 +17,12 @@
  * - NEVER throws. Metering must not be able to take down a chat turn --
  *   failures log and return null. (Same philosophy as safeExecute on
  *   tool calls: instrumentation is not allowed to become the outage.)
- * - BYOK calls (user's own key) are recorded with both cost fields 0 --
- *   they cost us nothing and will never burn credits, but they still show
- *   in per-user usage analytics ("nothing left out").
+ * - BYOK calls (user's own key) always get actualCostUsd 0 -- they cost
+ *   us nothing and will never burn credits -- but faceValueUsd is STILL
+ *   priced against the rate table like any other call, purely
+ *   informational ("what would this have cost"), so per-user usage
+ *   analytics show a real $ figure instead of a hardcoded free/$0
+ *   ("nothing left out").
  */
 import { prisma } from './db';
 
@@ -125,10 +128,14 @@ export async function recordUsageEvent(args: RecordUsageArgs): Promise<string | 
     const byok = isByok(args.provider);
     const reported = args.providerReportedCostUsd;
     const hasReportedCost = typeof reported === 'number' && Number.isFinite(reported) && reported >= 0;
-    // BYOK: user's own key, costs us $0 -- skip the rate lookup entirely.
-    // Provider-reported cost (e.g. Gateway's own metadata.cost): use it
-    // verbatim, it's what we're actually billed -- rate table not needed.
-    const rate = byok || hasReportedCost ? null : await findRateForModel(args.model, now);
+    // BYOK: user's own key, costs US ($0 -- actualCostUsd below stays 0
+    // regardless) -- but we STILL look up a market rate for faceValueUsd
+    // (owner ask 2026-07-26: "why don't you show the price" -- BYOK usage
+    // should still show what the call would have cost at the model's real
+    // published rate, purely informational, even though Entry pays $0 for
+    // it). Provider-reported cost (e.g. Gateway's own metadata.cost) is
+    // still authoritative when present -- skips the rate table either way.
+    const rate = hasReportedCost ? null : await findRateForModel(args.model, now);
     const faceValueUsd = hasReportedCost ? reported : rate ? priceUsage(args.usage, rate) : 0;
     const row = await prisma.usageEvent.create({
       data: {
