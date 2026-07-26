@@ -169,7 +169,12 @@ export function UsageSection() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/user/usage/summary', { cache: 'no-store' });
+      // Pass the viewer's own tz offset so "today"/"this month" boundaries
+      // (and the daily trend chart) bucket by THEIR local calendar day, not
+      // the server's (owner bug report 2026-07-26: "daily usage is not
+      // correct" -- see summary/route.ts's tzOffsetMinutes handling).
+      const tzOffsetMinutes = new Date().getTimezoneOffset();
+      const res = await fetch(`/api/user/usage/summary?tzOffsetMinutes=${tzOffsetMinutes}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const json = (await res.json()) as UsageSummary;
       setData(json);
@@ -183,8 +188,19 @@ export function UsageSection() {
 
   useEffect(() => {
     load();
-    const interval = setInterval(load, 30_000);
-    return () => clearInterval(interval);
+    // 3s poll (down from 30s, owner ask 2026-07-26: "make sure that page
+    // usage updates instantly") -- plus an immediate refetch the moment the
+    // tab regains focus/visibility, so switching back to it after a chat
+    // turn never shows stale numbers waiting on the next tick.
+    const interval = setInterval(load, 3_000);
+    const onVisible = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
   }, [load]);
 
   const modelCount = useMemo(() => data?.byModel.length ?? 0, [data]);

@@ -39,8 +39,23 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
   const userId = session.user.id;
 
   const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  // "Today"/"this month" boundaries in the VIEWER's own timezone, not the
+  // server's (owner bug report 2026-07-26: "daily usage is not correct" --
+  // this route used `new Date(now.getFullYear(), ...)`, which resolves
+  // against the Pxxl container's local tz (UTC), so anyone not in UTC saw
+  // "today" cut off at the wrong wall-clock hour. The client passes its own
+  // `Date.prototype.getTimezoneOffset()` value (minutes to ADD to local
+  // time to get UTC) as `tzOffsetMinutes`; defaults to 0 (UTC) if absent so
+  // this endpoint degrades gracefully for any caller that doesn't send it.
+  const tzOffsetMinutes = Number(req.nextUrl.searchParams.get('tzOffsetMinutes')) || 0;
+  const viewerLocalNow = new Date(now.getTime() - tzOffsetMinutes * 60_000);
+  const startOfToday = new Date(
+    Date.UTC(viewerLocalNow.getUTCFullYear(), viewerLocalNow.getUTCMonth(), viewerLocalNow.getUTCDate()) + tzOffsetMinutes * 60_000
+  );
+  const startOfMonth = new Date(
+    Date.UTC(viewerLocalNow.getUTCFullYear(), viewerLocalNow.getUTCMonth(), 1) + tzOffsetMinutes * 60_000
+  );
 
   // One query, sliced three ways in JS below — the table is per-user and
   // per-account volume here is small (chat usage, not a data warehouse),
@@ -159,7 +174,15 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
   // client-side. Days with zero events still get an explicit zero row
   // (never skipped) so the chart's x-axis stays evenly spaced.
   const trendDays = 14;
-  const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  // Bucket by the VIEWER's local calendar day, not the server container's
+  // (same 2026-07-26 timezone bug as startOfToday/startOfMonth above --
+  // this previously used `d.getFullYear()/getMonth()/getDate()`, which
+  // resolves against the server's own tz regardless of who's looking at
+  // the chart).
+  const dayKey = (d: Date) => {
+    const local = new Date(d.getTime() - tzOffsetMinutes * 60_000);
+    return `${local.getUTCFullYear()}-${String(local.getUTCMonth() + 1).padStart(2, '0')}-${String(local.getUTCDate()).padStart(2, '0')}`;
+  };
   const byDay = new Map<string, Row[]>();
   for (const e of events) {
     const key = dayKey(e.createdAt);
@@ -168,8 +191,10 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
     byDay.set(key, arr);
   }
   const dailyTrend = Array.from({ length: trendDays }, (_, i) => {
-    const d = new Date(startOfToday);
-    d.setDate(d.getDate() - (trendDays - 1 - i));
+    // Pure millisecond arithmetic (24h per day) off the already-viewer-
+    // local-midnight `startOfToday` instant -- avoids relying on the
+    // server container's own tz/DST behavior for date-only math.
+    const d = new Date(startOfToday.getTime() - (trendDays - 1 - i) * 86_400_000);
     const key = dayKey(d);
     const rows = byDay.get(key) ?? [];
     return { date: key, ...sum(rows) };

@@ -7,15 +7,23 @@ import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
 
 /**
  * GET /api/user/byok/providers
- * List the current user's BYOK provider connections, each with its models.
- * API keys are never returned — only whether one is set.
+ * List the current user's own BYOK provider connections PLUS every
+ * `isShared: true` provider (platform-paid relay keys like "HCNSec
+ * Relay", visible to every signed-in user, spend-capped) -- owner bug
+ * report 2026-07-26: "why is hcnsec model not showing in the model
+ * selector" traced to this route only ever querying `userId:
+ * session.user.id`, so a shared provider owned by the admin account
+ * could never appear for anyone else. Shared rows are tagged
+ * `isShared: true` in the response so the picker (chat-config.tsx) can
+ * label them distinctly from a user's own connections. API keys are
+ * never returned — only whether one is set.
  */
 export const GET = withApiErrorHandling(async (req: NextRequest) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const providers = await prisma.userModelProvider.findMany({
-    where: { userId: session.user.id },
+    where: { OR: [{ userId: session.user.id }, { isShared: true }] },
     orderBy: { createdAt: 'asc' },
     include: { models: { orderBy: { modelId: 'asc' } } },
   });
@@ -27,6 +35,7 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
       compatibility: p.compatibility,
       baseUrl: p.baseUrl,
       hasApiKey: !!p.encryptedApiKey,
+      isShared: p.isShared,
       lastFetchedAt: p.lastFetchedAt,
       lastError: p.lastError,
       models: p.models.map(m => ({

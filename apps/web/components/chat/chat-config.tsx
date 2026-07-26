@@ -1,19 +1,23 @@
 'use client';
 
 /**
- * Model selector — now genuinely dynamic on two axes:
+ * Model selector — sourced entirely from real, individually-priced BYOK
+ * connections (owner ask 2026-07-26: "remove those gateway fallback
+ * totally... I mean the actual AI gateway, the model selector"). The
+ * Vercel AI Gateway catalog tier (`/api/server/models`, a hardcoded
+ * fallback list once live fetching was paused earlier the same day) is
+ * gone from this picker entirely — every model shown here is either:
  *
- * 1. AI Gateway catalog (fetched from /api/server/models) — every model
- *    Vercel's Gateway exposes, routed at request time via apps/agent's
- *    `run_model` tool (see instructions.ts <model_routing>). No longer
- *    limited to 3 hardcoded subagents.
- * 2. The user's own BYOK provider models (fetched from
- *    /api/user/byok/providers) — only ones toggled ON in Settings show up
- *    here. Selecting one sends `{byokModelId}` instead of `{requestedModel}`.
+ * 1. The user's own BYOK provider models (fetched from
+ *    /api/user/byok/providers) — only ones toggled ON in Settings show up.
+ * 2. Shared platform-paid relays (e.g. "HCNSec Relay") — same endpoint,
+ *    now also returns `isShared: true` rows visible to every user, spend-
+ *    capped server-side. Grouped separately in the UI so it's obvious
+ *    which models are free-to-you vs. your own key.
  *
- * Both resolve through the same run_model tool server-side with full tool
- * parity — this menu is just a picker over "which model slug/BYOK id to
- * send".
+ * Selecting either sends `{byokModelId}` — never `{requestedModel}` /
+ * `gateway:` anymore, that whole code path stays only for backward compat
+ * with a model value a user might already have saved as their default.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { FloatingPanel } from './floating-panel';
@@ -24,10 +28,10 @@ import { looksLikeReasoningModel } from '@/lib/reasoning-detection';
 
 export interface ModelOption {
   label: string;
-  value: string; // "gateway:<slug>" or "byok:<providerModelRowId>"
+  value: string; // "byok:<providerModelRowId>"
   provider: string;
   Icon: React.FC<React.SVGProps<SVGSVGElement>>;
-  group: 'Gateway' | 'Your providers';
+  group: 'Shared' | 'Your providers';
 }
 
 export const configurableTools = [
@@ -68,34 +72,11 @@ export function useModelOptions() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [gatewayRes, byokRes] = await Promise.allSettled([
-        fetch('/api/server/models').then(r => r.json()),
-        fetch('/api/user/byok/providers').then(r => r.json()),
-      ]);
-
-      const gatewayModels: ModelOption[] =
-        gatewayRes.status === 'fulfilled' && Array.isArray(gatewayRes.value?.models)
-          ? gatewayRes.value.models.map((m: any) => ({
-              label: m.name,
-              value: `gateway:${m.id}`,
-              provider: m.provider,
-              Icon: getProviderIcon(m.provider),
-              group: 'Gateway' as const,
-            }))
-          : [];
-
-      // Fingerprint source for BYOK reasoning detection below — every
-      // Gateway model id already confirmed reasoning-capable via the
-      // catalog's real tags (see /api/server/models). Zero extra request:
-      // this is the same response already fetched for gatewayModels above.
-      const gatewayReasoningIds: string[] =
-        gatewayRes.status === 'fulfilled' && Array.isArray(gatewayRes.value?.models)
-          ? gatewayRes.value.models.filter((m: any) => m.reasoning).map((m: any) => m.id as string)
-          : [];
+      const byokRes = await fetch('/api/user/byok/providers').then(r => r.json()).catch(() => null);
 
       const byokModels: ModelOption[] =
-        byokRes.status === 'fulfilled' && Array.isArray(byokRes.value?.providers)
-          ? byokRes.value.providers.flatMap((p: any) =>
+        byokRes && Array.isArray(byokRes.providers)
+          ? byokRes.providers.flatMap((p: any) =>
               (p.models ?? [])
                 .filter((m: any) => m.isEnabled)
                 .map((m: any) => {
@@ -104,18 +85,19 @@ export function useModelOptions() {
                   // transport/compatibility mode — a Llama model served over an
                   // OpenAI-compatible endpoint should still show the Meta logo.
                   const family = inferModelFamily(m.label || m.modelId);
+                  const group: ModelOption['group'] = p.isShared ? 'Shared' : 'Your providers';
                   return {
                     label: `${p.label} · ${m.label || m.modelId}`,
                     value: `byok:${m.id}`,
                     provider: family,
                     Icon: getProviderIcon(family),
-                    group: 'Your providers' as const,
+                    group,
                   };
                 })
             )
           : [];
 
-      if (!cancelled) setOptions([...byokModels, ...gatewayModels]);
+      if (!cancelled) setOptions(byokModels);
     })();
     return () => { cancelled = true; };
   }, []);
@@ -128,6 +110,10 @@ export function useModelOptions() {
  * or "byok:5b1e...") into the structured payload buildConfigContext sends.
  */
 function parseModelValue(value: string): { requestedModel?: string; byokModelId?: string } {
+  // 'gateway:' prefix kept parseable for backward compat only -- a user
+  // who already had a Gateway model saved as their default before the
+  // picker dropped that tier keeps working exactly as before, it just
+  // can't be picked again from this menu.
   if (value.startsWith('gateway:')) return { requestedModel: value.slice('gateway:'.length) };
   if (value.startsWith('byok:')) return { byokModelId: value.slice('byok:'.length) };
   return {};
@@ -165,8 +151,8 @@ export function ModelPickerMenu({
 
   const grouped = useMemo(() => {
     const byok = filtered.filter(o => o.group === 'Your providers');
-    const gateway = filtered.filter(o => o.group === 'Gateway');
-    return { byok, gateway };
+    const shared = filtered.filter(o => o.group === 'Shared');
+    return { byok, shared };
   }, [filtered]);
 
   const anchorRef = useRef<HTMLDivElement>(null);
@@ -215,10 +201,10 @@ export function ModelPickerMenu({
                 </button>
               ))}
 
-              {grouped.gateway.length > 0 && (
-                <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-2 pt-2 pb-0.5">Gateway</div>
+              {grouped.shared.length > 0 && (
+                <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-2 pt-2 pb-0.5">Shared (free to you)</div>
               )}
-              {grouped.gateway.map(m => (
+              {grouped.shared.map(m => (
                 <button
                   key={m.value}
                   onClick={() => { setModel(m.value); setOpen(false); }}
@@ -269,8 +255,8 @@ export function ChatConfigMenu({
 
   const grouped = useMemo(() => {
     const byok = filtered.filter(o => o.group === 'Your providers');
-    const gateway = filtered.filter(o => o.group === 'Gateway');
-    return { byok, gateway };
+    const shared = filtered.filter(o => o.group === 'Shared');
+    return { byok, shared };
   }, [filtered]);
 
   const toggle = (value: string) => {
@@ -354,10 +340,10 @@ export function ChatConfigMenu({
                     </button>
                   ))}
 
-                  {grouped.gateway.length > 0 && (
-                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-2 pt-2 pb-0.5">Gateway</div>
+                  {grouped.shared.length > 0 && (
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-2 pt-2 pb-0.5">Shared (free to you)</div>
                   )}
-                  {grouped.gateway.map(m => (
+                  {grouped.shared.map(m => (
                     <button
                       key={m.value}
                       onClick={() => { setModel(m.value); setShowModelSub(false); }}

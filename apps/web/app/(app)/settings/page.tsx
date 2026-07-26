@@ -56,6 +56,9 @@ interface Provider {
   compatibility: Compatibility;
   baseUrl: string;
   hasApiKey: boolean;
+  /** Platform-paid relay (e.g. HCNSec Relay) visible to every user but
+   *  only editable by its owner -- filtered out of THIS management list. */
+  isShared?: boolean;
   lastFetchedAt?: string | null;
   lastError?: string | null;
   models: ProviderModel[];
@@ -934,7 +937,14 @@ function ModelProvidersSection() {
       .then(async res => {
         const json = await safeJson(res);
         if (!res.ok) throw new Error(json.error?.message ?? json.error ?? `Failed to load providers (status ${res.status}).`);
-        setProviders(json.providers ?? []);
+        // Settings' "Model providers" management list is for editing YOUR
+        // OWN connections only -- `isShared` rows (e.g. HCNSec Relay) now
+        // also come back from this same endpoint so the chat model picker
+        // can show them, but they don't belong in a management list where
+        // every action (edit/delete/reveal key) 404s for a non-owner
+        // anyway. Filtered out here, not at the API layer, since the
+        // picker still needs them.
+        setProviders((json.providers ?? []).filter((p: Provider) => !p.isShared));
       })
       .catch(e => {
         setLoadError(e.message ?? 'Failed to load providers.');
