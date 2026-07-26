@@ -14,7 +14,7 @@
  */
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getChatSession } from '@entry/copilot';
-import { planRevertSingleFile, flushPendingVersion, recordFileChange } from '@entry/db/chat-versioning';
+import { planRevertSingleFile, flushPendingVersion, recordFileChange, syncGitBaselineAfterManualChange } from '@entry/db/chat-versioning';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 
 export async function POST(req: Request, { params }: { params: Promise<{ sessionId: string; versionNumber: string }> }) {
@@ -70,6 +70,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ session
   if (!result) {
     return Response.json({ error: 'Revert produced no changes to record.' }, { status: 500 });
   }
+
+  // Real bug fix (2026-07-26): same shadow-git-baseline sync as the
+  // full revert route -- see syncGitBaselineAfterManualChange's comment.
+  await syncGitBaselineAfterManualChange(sessionId, sandbox);
 
   return Response.json({
     versionNumber: result.versionNumber,

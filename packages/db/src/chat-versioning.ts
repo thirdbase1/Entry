@@ -208,6 +208,37 @@ async function writeVersionRows(
  * was nothing to record. Only used by the revert route now -- see file
  * comment.
  */
+/**
+ * FIX (2026-07-26, real bug found in a full versioning audit): revert
+ * and revert-file write directly to the sandbox and record the result
+ * through the MANUAL buffer (flushPendingVersion/recordFileChange) --
+ * they never touch the shadow git repo that captureVersionFromSandboxDiff
+ * uses as its diff baseline for every NORMAL turn. Left alone, that
+ * baseline goes stale the instant a revert runs: the next real agent
+ * turn's `git add -A` / `git diff --cached` compares against the
+ * PRE-revert state, so every file the revert touched gets re-detected as
+ * "changed" all over again and gets wrongly folded into that next,
+ * completely unrelated turn's version card -- a real duplication/
+ * misattribution bug, not a hypothetical one.
+ *
+ * Fix: after a revert successfully writes to the sandbox, re-sync the
+ * shadow repo's baseline to the new (post-revert) disk state right away.
+ * If the shadow repo doesn't exist yet (sandbox was recreated since the
+ * last real capture), there's nothing to sync -- the next real turn's
+ * own init step commits a baseline from whatever's on disk AT THAT POINT,
+ * which already includes this revert's writes, so it's correct with no
+ * action needed here.
+ */
+export async function syncGitBaselineAfterManualChange(chatId: string, sandbox: VersionCaptureSandbox): Promise<void> {
+  try {
+    const initCheck = await runGit(sandbox, 'git rev-parse --is-inside-work-tree 2>/dev/null || echo NO_REPO');
+    if (initCheck.stdout.trim() !== 'true') return;
+    await runGit(sandbox, 'git add -A && git commit -q -m "sync baseline after manual revert" --allow-empty');
+  } catch (err) {
+    console.error('[chat-versioning] syncGitBaselineAfterManualChange failed', chatId, err);
+  }
+}
+
 export async function flushPendingVersion(
   chatId: string,
   opts: { revertedFromVersionNumber?: number; summaryOverride?: string } = {},

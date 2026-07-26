@@ -26,7 +26,7 @@
  */
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getChatSession } from '@entry/copilot';
-import { planRevert, flushPendingVersion, recordFileChange } from '@entry/db/chat-versioning';
+import { planRevert, flushPendingVersion, recordFileChange, syncGitBaselineAfterManualChange } from '@entry/db/chat-versioning';
 import { getSandboxForChat } from '@/lib/direct-chat/sandbox';
 
 export async function GET(req: Request, { params }: { params: Promise<{ sessionId: string; versionNumber: string }> }) {
@@ -93,6 +93,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ session
   if (!result) {
     return Response.json({ error: 'Revert produced no changes to record.' }, { status: 500 });
   }
+
+  // Real bug fix (2026-07-26): keep the shadow git diff-baseline in sync
+  // with what the revert just wrote, so the NEXT normal turn doesn't
+  // re-detect these same files as changed again -- see
+  // syncGitBaselineAfterManualChange's own comment for the full story.
+  await syncGitBaselineAfterManualChange(sessionId, sandbox);
 
   return Response.json({
     versionNumber: result.versionNumber,
