@@ -22,7 +22,19 @@ import { getReasoningCapableGatewaySlugs } from '@/lib/direct-chat/reasoning-cap
  * (or worse, confusing a user into thinking a plain non-reasoning model is
  * "thinking" when it isn't).
  */
+// DISABLED (owner ask, 2026-07-26): "disable vercel AI gateway model
+// fetching for now" -- short-circuits the live gateway.getAvailableModels()
+// call below and always serves the curated FALLBACK_MODELS list instead.
+// Flip this back to false to resume live catalog fetching; nothing else
+// in this file needs to change either way, the try/catch below already
+// falls back to the same list on any Gateway error.
+const GATEWAY_FETCHING_DISABLED = true;
+
 export async function GET(_req: NextRequest) {
+  if (GATEWAY_FETCHING_DISABLED) {
+    return NextResponse.json({ models: FALLBACK_MODELS });
+  }
+
   try {
     const [{ models }, reasoningSlugs] = await Promise.all([
       gateway.getAvailableModels(),
@@ -48,13 +60,14 @@ export async function GET(_req: NextRequest) {
     // Gateway alias slugs (provider-prefixed, not dated vendor ids) —
     // matches the standing "AI Gateway aliases only" rule. Only used if the
     // live catalog call above fails (no network / no Gateway key).
-    const fallback = [
-      { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', provider: 'anthropic', description: null, reasoning: true },
-      { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', description: null, reasoning: true },
-      { id: 'openai/gpt-5.1', name: 'GPT-5.1', provider: 'openai', description: null, reasoning: true },
-      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', description: null, reasoning: true },
-      { id: 'openai/gpt-5.1-mini', name: 'GPT-5.1 Mini', provider: 'openai', description: null, reasoning: true },
-    ];
-    return NextResponse.json({ models: fallback });
+    return NextResponse.json({ models: FALLBACK_MODELS });
   }
 }
+
+const FALLBACK_MODELS = [
+  { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', provider: 'anthropic', description: null, reasoning: true },
+  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro', provider: 'google', description: null, reasoning: true },
+  { id: 'openai/gpt-5.1', name: 'GPT-5.1', provider: 'openai', description: null, reasoning: true },
+  { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash', provider: 'google', description: null, reasoning: true },
+  { id: 'openai/gpt-5.1-mini', name: 'GPT-5.1 Mini', provider: 'openai', description: null, reasoning: true },
+];

@@ -4,7 +4,6 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { normalizeBaseUrl } from '@/lib/byok/normalize-base-url';
 import { autoTestReasoningInBackground } from '@/lib/byok/test-reasoning';
-import { createGateway } from '@ai-sdk/gateway';
 
 /**
  * POST /api/user/byok/providers/:providerId/fetch-models
@@ -30,10 +29,17 @@ async function discoverModels(
   // whatever the live catalog currently has, same mechanism
   // /api/server/models already uses for the app's own shared catalog.
   if (compatibility === 'AI_GATEWAY') {
-    const { models } = await createGateway({ apiKey }).getAvailableModels();
-    return models
-      .filter(m => m.modelType === 'language' || !m.modelType)
-      .map(m => ({ modelId: m.id, label: m.name || undefined }));
+    // DISABLED (owner ask, 2026-07-26): "disable vercel AI gateway model
+    // fetching for now" -- keep the AI_GATEWAY compatibility mode itself
+    // intact (existing connections/models a user already fetched keep
+    // working at chat time, nothing here touches that path), just stop
+    // this discovery call from hitting Vercel's Gateway API. Surfaces as
+    // a normal fetchError/lastError on the provider row via the catch
+    // block below the caller -- same UX as any other discovery failure,
+    // not a crash.
+    throw new Error(
+      'AI Gateway model fetching is temporarily disabled. Add model IDs manually for this connection for now.'
+    );
   }
 
   const controller = new AbortController();
