@@ -822,12 +822,25 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // step past the first only exists because the previous step made a
       // real tool call) -- stop immediately instead of trusting the
       // relay's own claimed finish reason.
+      // IMPROVED (2026-07-27, "model stop working everytime without
+      // completing a task"): the original guard stopped the turn if two
+      // consecutive steps had zero tool calls. But a legitimate multi-step
+      // turn CAN have two consecutive no-tool-call steps — e.g. the model
+      // produces text in step N (finishReason 'tool-calls' due to a relay
+      // lie, or the SDK re-entering for another reason), then produces more
+      // text in step N+1. That's the model WORKING, not spinning. The real
+      // failure mode this guard targets is a relay lying about
+      // finishReason 'tool-calls' while producing the SAME trivial output
+      // repeatedly — zero tool calls AND zero meaningful text. So: only
+      // stop if BOTH consecutive steps have no tool calls AND no text
+      // output. A step with real text (even short) is doing real work.
       ({ steps }) => {
         if (steps.length < 2) return false;
         const last = steps[steps.length - 1];
         const prev = steps[steps.length - 2];
         const noToolCalls = (s: { toolCalls?: unknown[] }) => !s.toolCalls || s.toolCalls.length === 0;
-        return noToolCalls(last) && noToolCalls(prev);
+        const noText = (s: { text?: string }) => !s.text || s.text.trim().length === 0;
+        return noToolCalls(last) && noToolCalls(prev) && noText(last) && noText(prev);
       },
     ],
     // FIXED (2026-07-19, confirmed live from production logs): a 'Free'
@@ -914,7 +927,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // actually supports extended reasoning at all (confirmed in this same
     // file's earlier investigation), so no per-model capability check is
     // needed here anymore either.
-    reasoning: reasoningRequested ? 'medium' : 'provider-default',
+    reasoning: reasoningRequested ? 'low' : 'provider-default',
     // BROAD-COMPATIBILITY REASONING PASSTHROUGH (2026-07-25, real ask:
     // "make the reasoning enable buttons work 100%") -- see
     // direct-chat-core.ts's identical 2026-07-25 comment (this route's
@@ -1296,7 +1309,17 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // 3s vs the SDK default's 5s) against a genuine perceived-smoothness
     // win -- a steady word-by-word reveal reads as faster to a human
     // than the same total duration delivered in bursts.
-    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 6 }),
+    // CLIENT-SIDE SMOOTHING (2026-07-27, "no matter how fast or slow
+    // the model is, streaming is always smooth"): the server no longer
+    // adds artificial per-word delay — `delayInMs: 0` means words are
+    // re-chunked (still decouples from the provider's raw byte
+    // boundaries) but flushed immediately. The CLIENT now handles
+    // smoothness via `SmoothStreamingText` (requestAnimationFrame-based
+    // text reveal at 60fps), which adapts to both fast and slow models
+    // and both good and bad internet — see smooth-streaming-text.tsx.
+    // Removing the server delay also eliminates the 3-5 seconds of
+    // artificial latency that `delayInMs: 3-10` added to every reply.
+    experimental_transform: smoothStream({ chunking: 'word', delayInMs: 0 }),
   });
 
   // Make sure the durability write has actually landed before the
@@ -1656,7 +1679,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
             // original comment above) but makes each heartbeat large enough
             // that buffering-by-size heuristics are far less likely to sit
             // on it.
-            controller.enqueue(makeHeartbeatChunk());
+            // CLIENT-DISCONNECT SAFETY: if the client has disconnected,
+            // controller.enqueue throws. Don't let that kill the turn —
+            // the model is still running via consumeStream(), and the
+            // Redis mirror is still publishing so reconnects can reattach.
+            try { controller.enqueue(makeHeartbeatChunk()); } catch {}
             continue;
           }
           const { value: chunk, done } = raced;
@@ -1678,7 +1705,8 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
               new Promise<void>(resolve => setTimeout(resolve, CRITICAL_SAVE_TIMEOUT_MS)),
             ]);
           }
-          controller.enqueue(chunk);
+          // CLIENT-DISCONNECT SAFETY: same as heartbeat above.
+          try { controller.enqueue(chunk); } catch {}
           // MIRROR (2026-07-25) -- see turn-lock.ts's file comment. Fire-
           // and-forget: this must never gate the actual chunk reaching
           // the live client on a Redis round-trip, and a dropped mirror
@@ -1688,7 +1716,7 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         }
       } catch (err) {
         endTurn();
-        controller.error(err);
+        try { controller.error(err); } catch {}
         return;
       }
       if (!sawRealContent) {
@@ -1700,12 +1728,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           { type: 'text-end', id },
         ];
         for (const fc of fallbackChunks) {
-          controller.enqueue(fc);
+          try { controller.enqueue(fc); } catch {}
           void publishTurnChunk(chatId, turnId, fc);
         }
       }
       endTurn();
-      controller.close();
+      try { controller.close(); } catch {}
     },
   });
 

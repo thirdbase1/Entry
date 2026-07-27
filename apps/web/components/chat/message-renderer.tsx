@@ -4,6 +4,7 @@ import type { EveDynamicToolPart, EveMessage, EveMessagePart } from 'eve/react';
 import { memo } from 'react';
 import { cn } from '@/lib/utils';
 import { MarkdownText } from '@/components/ui/markdown';
+import { SmoothStreamingText } from './smooth-streaming-text';
 import { GenericToolCard } from './renderers/generic-tool-card';
 import { CodeArtifactResult } from './renderers/code-artifact-result';
 import { WebSearchResult } from './renderers/web-search-result';
@@ -187,8 +188,13 @@ export const MessageRenderer = memo(function MessageRenderer({
         {message.parts.map((part, idx) => {
           const isLastPart = isStreaming && idx === message.parts.length - 1;
           if (part.type === 'text') {
+            const isStreamingText = isLastPart && part.state === 'streaming';
             return part.text ? (
-              <MarkdownText key={idx} text={part.text} loading={isLastPart && part.state === 'streaming'} />
+              isStreamingText ? (
+                <SmoothStreamingText key={idx} text={part.text} loading={true} />
+              ) : (
+                <MarkdownText key={idx} text={part.text} loading={false} />
+              )
             ) : null;
           }
           if (part.type === 'reasoning') {

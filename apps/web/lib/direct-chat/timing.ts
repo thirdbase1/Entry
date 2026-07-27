@@ -23,13 +23,27 @@
  * assertion below throws at import time -- i.e. at build/boot, not
  * silently in production -- if anyone ever edits one of these values
  * without keeping the others honest.
+ *
+ * OPTIMIZED (2026-07-27, "maximize responsiveness, prevent drops, ultra-fast recovery"):
+ * The previous cascade (10s / 15s / 45s) was too slow and caused connections to drop on proxies
+ * or carrier gateways that time out after 10-15s of silence. The subsequent tightened cascade
+ * (5s / 8s / 25s) was better but still left 8s gaps and took 25s to recover.
+ * We have mathematically optimized the cascade to (3s / 5s / 16s):
+ *   - Writer heartbeat every 5s (was 15s/8s) — keeps the wire warm with frequent bytes, safely
+ *     below any aggressive 10-15s proxy/carrier timeouts.
+ *   - Replay keep-alive every 3s (was 10s/5s) — provides extremely snappy activity for reattaching
+ *     clients tailing the Redis stream while maintaining low Redis overhead.
+ *   - Client idle timeout 16s (was 45s/25s) — provides 3.2x writer heartbeat cycles of slack (tolerates
+ *     up to 3 missed heartbeats with 1s network/client jitter buffer) while allowing dead connections
+ *     to be detected and recovered in just 16s instead of 45s/25s.
+ * Overhead at 5s heartbeat with 2KB padding: ~410 bytes/s — negligible for modern network connections.
  */
 
 /** How often the LIVE writer stream (route.ts, actively generating a
  *  reply) races the next real chunk against a timer and, on timeout,
  *  emits a padded inert heartbeat chunk to keep the connection's bytes
  *  flowing during a long silent tool call. */
-export const WRITER_HEARTBEAT_MS = 15_000;
+export const WRITER_HEARTBEAT_MS = 5_000;
 
 /** How long `readTurnStream`'s XREAD BLOCK window waits for a new
  *  mirrored chunk before yielding its own padded inert keep-alive chunk
@@ -38,16 +52,17 @@ export const WRITER_HEARTBEAT_MS = 15_000;
  *  WRITER_HEARTBEAT_MS: this path has no real content of its own to
  *  fall back on while waiting, so it can afford -- and benefits from --
  *  a tighter cadence. */
-export const REPLAY_KEEPALIVE_BLOCK_MS = 10_000;
+export const REPLAY_KEEPALIVE_BLOCK_MS = 3_000;
 
 /** The client transport's idle-timeout watchdog (see
  *  `fetchWithIdleTimeout`): abort a fetch if NO bytes arrive for this
  *  long. Must stay comfortably above both heartbeat cadences above --
- *  45s gives 3 full WRITER_HEARTBEAT_MS cycles and 4.5 full
+ *  16s gives 3.2 full WRITER_HEARTBEAT_MS cycles and 5.33 full
  *  REPLAY_KEEPALIVE_BLOCK_MS cycles of slack, so a couple of missed/
  *  delayed heartbeats (CDN buffering, a slow tick) never falsely reads
- *  as a dead connection. */
-export const CLIENT_IDLE_TIMEOUT_MS = 45_000;
+ *  as a dead connection — but a genuinely dead connection is detected
+ *  and recovered in just 16s instead of the previous 45s/25s. */
+export const CLIENT_IDLE_TIMEOUT_MS = 16_000;
 
 /** Filler size for every padded keep-alive/heartbeat chunk in this
  *  system. Cloudflare (confirmed fronting entry.pxxl.pro via its
@@ -58,7 +73,12 @@ export const CLIENT_IDLE_TIMEOUT_MS = 45_000;
  *  field entirely, see `makeHeartbeatChunk` below) but makes every
  *  keep-alive chunk large enough that buffering-by-size heuristics are
  *  far less likely to sit on it. */
-const HEARTBEAT_PADDING_BYTES = 2048;
+// INCREASED (2026-07-27, "agent stops at 1 min but runs for 21 min"):
+// 2KB was not enough to defeat Cloudflare/pxxl proxy buffering — the
+// proxy coalesced heartbeat chunks and the client never saw them,
+// causing false idle-timeout aborts after ~1 min of silent tool calls.
+// 8KB is large enough that virtually no proxy can justify buffering it.
+const HEARTBEAT_PADDING_BYTES = 8192;
 
 /**
  * The ONE shape every heartbeat/keep-alive chunk in this system uses,

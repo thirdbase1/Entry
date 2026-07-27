@@ -87,10 +87,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ chatId: 
         }
       } catch (err) {
         console.error('[direct chat stream] reattach failed', chatId, err);
-        controller.error(err);
+        try { controller.error(err); } catch {}
         return;
       }
-      controller.close();
+      try { controller.close(); } catch {}
     },
   });
 

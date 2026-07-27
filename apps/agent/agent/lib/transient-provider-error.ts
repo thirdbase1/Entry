@@ -30,7 +30,7 @@ export function sleep(ms: number): Promise<void> {
  */
 export async function withTransientRetry<T>(fn: () => Promise<T>, opts?: { retries?: number; baseDelayMs?: number }): Promise<T> {
   const retries = opts?.retries ?? 2;
-  const baseDelayMs = opts?.baseDelayMs ?? 1500;
+  const baseDelayMs = opts?.baseDelayMs ?? 800;
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {

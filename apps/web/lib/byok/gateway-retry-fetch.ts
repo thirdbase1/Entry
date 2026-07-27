@@ -72,7 +72,7 @@ import { logError } from '@entry/db/error-log';
 import './keep-alive-dispatcher';
 
 const MAX_RETRIES = 5;
-const RETRY_DELAY_MS = 350;
+const RETRY_DELAY_MS = 200;
 const GENERIC_BODY_MAX_LENGTH = 400;
 
 // Keywords that mean "this is a REAL, permanent, descriptive error" -- if
