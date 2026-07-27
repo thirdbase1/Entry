@@ -1,6 +1,5 @@
 import type { NextRequest } from 'next/server';
-import { NextResponse } from 'next/server';
-import { getPublicOrigin } from './public-origin';
+import type { NextResponse } from 'next/server';
 
 /**
  * FIXED (2026-07-27, owner report: "GitHub doesn't even go to GitHub, it
@@ -29,9 +28,39 @@ import { getPublicOrigin } from './public-origin';
  * (the normal case) so the caller proceeds as before.
  */
 export function redirectToCanonicalOriginIfNeeded(req: NextRequest): NextResponse | null {
-  const canonical = getPublicOrigin(req);
-  const actual = req.nextUrl.origin;
-  if (actual === canonical) return null;
-  const target = new URL(req.nextUrl.pathname + req.nextUrl.search, canonical);
-  return NextResponse.redirect(target.toString(), 307);
+  // DISABLED (2026-07-27, real bug, user-recorded video + explicit
+  // report: "GitHub doesn't even go to GitHub, it just automatically
+  // reloads back to the integration page" -- STILL happening after the
+  // fix above). Root cause of the ACTUAL symptom: this comparison itself
+  // never succeeds on Pxxl. `req.nextUrl.origin` is derived from
+  // whatever Host Next.js's own server process sees the request as
+  // having -- and on Pxxl (same underlying class of bug this file's own
+  // header already documents for Render's 0.0.0.0 bind address) that is
+  // NOT the public `https://entry.pxxl.pro` the browser actually hit, no
+  // matter what `NEXT_PUBLIC_APP_URL` is correctly set to. So `actual`
+  // and `canonical` never match, this 307-redirects to the exact same
+  // path+query on the canonical origin EVERY time, which -- since the
+  // browser is already ON the canonical origin -- lands right back on
+  // this exact same route, hits this exact same mismatch again, and
+  // redirects again: a genuine, 100%-reproducible infinite redirect loop
+  // (confirmed directly: `curl -L` on this route hits curl's own
+  // `--max-redirs` ceiling without ever completing). That's the actual
+  // "automatically reloads back to the integration page" the user saw --
+  // not a silent bounce-after-cookie-mismatch as originally diagnosed,
+  // an outright redirect loop the browser gives up on.
+  //
+  // The cross-domain cookie problem this was originally written to solve
+  // (state/PKCE cookies set on one domain, redirect_uri built for a
+  // different one) only exists if traffic is genuinely split across two
+  // different live domains. It no longer is: Pxxl (entry.pxxl.pro) is
+  // now the one and only production target (see pxxl-deployment.md) --
+  // there is no second domain in play for this to protect against, so
+  // disabling this pre-redirect trades a real, currently-impossible edge
+  // case for actually letting the OAuth flow complete at all. Every
+  // caller already uses `getPublicOrigin()` directly (env-var-driven, not
+  // derived from this same unreliable `req.nextUrl.origin`) for the
+  // pieces that actually matter -- `redirect_uri` and the callback
+  // landing page -- so removing just this comparison-based pre-redirect
+  // doesn't reintroduce the original redirect_uri-mismatch bug either.
+  return null;
 }

@@ -207,6 +207,47 @@ function watermarkKey(chatId: string, turnId: string): string {
   return `${chatId}:${turnId}`;
 }
 
+// TERMINAL-REPLAY FIX (2026-07-27, real user report + video, FOURTH time
+// this exact symptom was reported despite the watermark fix directly
+// above -- confirmed by re-reading that fix's own logic end to end: it
+// DELETES the watermark the moment TURN_END_MARKER is seen. That's the
+// remaining hole. The outer GET /stream route's ONLY gate on whether to
+// call this generator at all is `getActiveTurnId(chatId) !== null` (the
+// Redis turn-LOCK) -- and that lock can keep reading "active" for a
+// while after the turn has already fully finished and its
+// TURN_END_MARKER already been delivered once (lock TTL is 30s and only
+// self-heals on its own schedule; it does not get released early just
+// because a reconnect happened to observe the end marker). Any reconnect
+// that lands in that stale-but-still-locked window -- the periodic
+// recovery poll firing every couple seconds while `active` still reads
+// true is exactly this shape -- finds the watermark GONE (already
+// deleted the first time the marker was seen) and falls back to
+// `lastId = '0'`, i.e. replays the turn's ENTIRE content from scratch
+// AGAIN before hitting the end marker a second time. Every such stale
+// reconnect reproduces one full duplicate copy of the whole reply --
+// exactly the repeating-duplicate-bubble pattern, recurring for as long
+// as the lock stays stale (which is unbounded if something also keeps
+// the lock from ever being released -- see turn-status's own DB-wins
+// fallback on the client for the matching defense-in-depth half of this
+// same bug).
+//
+// FIX: once a turn's end marker has genuinely been delivered to ANY
+// caller, remember that permanently (module-level Set, same "persistent
+// long-lived Pxxl process" pattern already used everywhere else in this
+// file) instead of just deleting the watermark. Any FURTHER call for
+// that exact turnId short-circuits to "nothing left, ever" -- zero
+// re-reads of the stream, zero duplicate content -- no matter how many
+// more times a stale lock lets a reconnect through. Cleared naturally
+// with the rest of this process's memory on redeploy/restart; unbounded
+// growth isn't a real risk here since finished turns stop accumulating
+// once their chatId's next NEW turn starts (a fresh turnId), and a
+// single process only ever holds as many entries as turns it has
+// personally finished serving.
+const finishedTurnIds = new Set<string>();
+export function hasTurnStreamEnded(chatId: string, turnId: string): boolean {
+  return finishedTurnIds.has(watermarkKey(chatId, turnId));
+}
+
 export async function* readTurnStream(
   chatId: string,
   signal: AbortSignal
@@ -220,6 +261,12 @@ export async function* readTurnStream(
   // safe fallback (equivalent to today's always-full-replay behavior for
   // that edge case only).
   const activeTurnId = await getActiveTurnId(chatId);
+  // Short-circuit BEFORE ever touching Redis's xread: if this exact turn
+  // already delivered its end marker to a prior caller, there is
+  // permanently nothing left to replay for it, full stop -- see
+  // `finishedTurnIds`'s own comment above for why the watermark alone
+  // isn't enough to guarantee this on every path.
+  if (activeTurnId && hasTurnStreamEnded(chatId, activeTurnId)) return;
   let lastId = (activeTurnId && turnReplayWatermark.get(watermarkKey(chatId, activeTurnId))) || '0';
   const onAbort = () => {
     redis.disconnect();
@@ -286,7 +333,10 @@ export async function* readTurnStream(
         // that), never that it skips content that never made it out.
         if (turnId) turnReplayWatermark.set(watermarkKey(chatId, turnId), id);
         if ((parsed as { type?: string })?.type === TURN_END_MARKER) {
-          if (turnId) turnReplayWatermark.delete(watermarkKey(chatId, turnId));
+          if (turnId) {
+            finishedTurnIds.add(watermarkKey(chatId, turnId));
+            turnReplayWatermark.delete(watermarkKey(chatId, turnId));
+          }
           return;
         }
         yield { chunk: parsed, turnId };

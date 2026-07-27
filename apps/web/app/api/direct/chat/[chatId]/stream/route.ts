@@ -26,7 +26,7 @@
 import { createUIMessageStreamResponse, type UIMessageChunk } from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
-import { getActiveTurnId, readTurnStream } from '@/lib/direct-chat/turn-lock';
+import { getActiveTurnId, readTurnStream, hasTurnStreamEnded } from '@/lib/direct-chat/turn-lock';
 
 export async function GET(req: Request, { params }: { params: Promise<{ chatId: string }> }) {
   const { session } = await getUserSessionFromRequest(req);
@@ -38,6 +38,17 @@ export async function GET(req: Request, { params }: { params: Promise<{ chatId: 
   if (!chat) return Response.json({ error: 'Not found' }, { status: 404 });
 
   const activeTurnId = await getActiveTurnId(chatId);
+  // TERMINAL-REPLAY FIX (2026-07-27) -- see hasTurnStreamEnded's own
+  // comment in turn-lock.ts. A stale-but-not-yet-expired lock can still
+  // report `activeTurnId` truthy well after this exact turn already
+  // delivered its end marker once; without this check we'd still open a
+  // stream below and let readTurnStream's own internal guard handle it,
+  // which is safe but wasteful (a full extra round trip and Redis
+  // connection for something already known to be over) -- short-circuit
+  // to the same clean 204 contract here instead, right at the door.
+  if (activeTurnId && hasTurnStreamEnded(chatId, activeTurnId)) {
+    return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+  }
   if (!activeTurnId) {
     // Matches reconnectToStream's own documented contract: 204 means
     // "nothing to resume", and the SDK treats that as a clean no-op.
