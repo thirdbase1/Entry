@@ -138,14 +138,39 @@ export const POST = withApiErrorHandling(async (req: NextRequest, { params }: { 
       throw new Error('The endpoint returned an empty model list — check the base URL and API key.');
     }
 
+    // LABEL-STOMP FIX (2026-07-27, real bug -- owner report: "look the
+    // model selector you will see the model that you added something
+    // extra to there name, e.g. DeepSeek v4 pro routing to nemotron 3
+    // ultra" + "I told you the name should be clean"). Root cause: this
+    // upsert unconditionally overwrote `label` from the LIVE provider's
+    // own `/models` response on every re-fetch, no exceptions -- and a
+    // relay like HCNSec's `api.hcnsec.cn` genuinely returns
+    // `display_name: "DeepSeek-V4-Pro (routes to Nemotron 3 Ultra)"` for
+    // that alias (it's honest about the mislabeling in its OWN metadata,
+    // see seed-shared-provider/route.ts's pricing-methodology comment).
+    // seed-shared-provider.ts deliberately writes a clean curated label
+    // ("DeepSeek-V4-Pro", no routing text) for exactly this reason -- but
+    // since the shared provider row's `userId` is the admin account, it
+    // shows up in that account's OWN "Your providers" list too, and one
+    // "Fetch models" click there (a perfectly normal, expected action) 
+    // re-synced every label straight from the live API and clobbered the
+    // clean ones right back to the ugly upstream text. Fix: only ever set
+    // `label` from live discovery on a genuinely NEW model row (`create`)
+    // -- an already-existing row (curated or previously discovered) keeps
+    // whatever label it has; discovery only fills in a label for models
+    // that don't have one yet, never overwrites one that does.
+    const existingRows = await prisma.userModelProviderModel.findMany({
+      where: { providerId },
+      select: { modelId: true, label: true },
+    });
+    const existingLabelByModelId = new Map(existingRows.map(r => [r.modelId, r.label]));
+
     await prisma.$transaction([
       ...discovered.map(m =>
         prisma.userModelProviderModel.upsert({
           where: { providerId_modelId: { providerId, modelId: m.modelId } },
           create: { providerId, modelId: m.modelId, label: m.label },
-          // Only refresh the label on re-fetch — never touch isEnabled, so
-          // the user's toggle choices survive repeated fetches.
-          update: { label: m.label },
+          update: existingLabelByModelId.get(m.modelId) ? {} : { label: m.label },
         })
       ),
       prisma.userModelProvider.update({ where: { id: providerId }, data: { lastFetchedAt: new Date(), lastError: null } }),
