@@ -62,9 +62,9 @@ export async function GET(req: NextRequest) {
     return u.toString();
   };
 
-  const { session } = await getUserSessionFromRequest(req);
-  if (!session) return NextResponse.redirect(new URL('/sign-in', origin));
-
+  // Extract params early — the update flow needs them before the session
+  // check (GitHub's Setup URL redirect has no OAuth state, just
+  // installation_id + setup_action).
   const code = req.nextUrl.searchParams.get('code');
   const state = req.nextUrl.searchParams.get('state');
   const installationId = req.nextUrl.searchParams.get('installation_id');
@@ -96,25 +96,42 @@ export async function GET(req: NextRequest) {
   // EXISTING installation from github.com itself to add/remove repos --
   // that visit never went through our /start route at all, so there is
   // no `github_oauth_state` cookie, no `code`, and no `state` param; it's
-  // just `installation_id` + `setup_action=update`. The old code treated
-  // any missing code/state as a hard "invalid_state" error and bounced
-  // the user to a dead end, even though nothing was actually wrong --
-  // no NEW OAuth grant is needed here (the user already has a valid
-  // token in the vault from their original connect), only the
-  // (possibly changed) installation_id needs persisting. Handle this as
-  // its own case, before the OAuth-state check, and only fall through to
-  // requiring a real code+state when this ISN'T a plain update visit.
+  // just `installation_id` + `setup_action=update`.
+  //
+  // IMPORTANT (2026-07-27 fix #2): This check MUST run before the session
+  // check below. The user's session cookie may have expired while they
+  // were on github.com managing repos — bouncing them to /sign-in
+  // instead of back to Settings looks exactly like "it didn't
+  // redirect." We persist the installation_id only if a session exists
+  // (best-effort — the installation_id rarely changes during an update
+  // anyway), but ALWAYS redirect to the result URL so the user lands
+  // back on the app, not stranded on github.com.
+  //
+  // NOTE: This flow requires the GitHub App's Setup URL to be set to
+  //   https://entry.oneshotsx.cv/api/integrations/github-oauth/callback
+  // AND "Redirect on update" enabled in the App's settings on
+  // github.com/apps/entry-github. Without both, GitHub does NOT
+  // redirect here at all after an update — it just leaves the user on
+  // the installation configure page.
   if (setupAction === 'update' && installationId && !code) {
-    if (session) {
+    // Session may not be available yet — fetch it here since we moved
+    // this check before the main session guard.
+    const { session: updateSession } = await getUserSessionFromRequest(req);
+    if (updateSession) {
       await prisma.user
-        .update({ where: { id: session.user.id }, data: { githubInstallationId: installationId } })
-        .catch(err => console.error('[github-oauth callback] failed to persist installationId on update', session.user.id, err));
+        .update({ where: { id: updateSession.user.id }, data: { githubInstallationId: installationId } })
+        .catch(err => console.error('[github-oauth callback] failed to persist installationId on update', updateSession.user.id, err));
     }
     return clearCookies(NextResponse.redirect(resultUrl('connected')));
   }
 
+  // Session is required for the OAuth code-exchange flow (not for the
+  // update flow above, which already returned).
+  const { session } = await getUserSessionFromRequest(req);
+  if (!session) return NextResponse.redirect(new URL('/sign-in', origin));
+
   if (!code || !state || !cookieState || state !== cookieState) {
-    return clearCookies(NextResponse.redirect(resultUrl('error', 'invalid_state')));
+    return clearCookiesAndRedirect(resultUrl('error', 'invalid_state'));
   }
 
   const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
