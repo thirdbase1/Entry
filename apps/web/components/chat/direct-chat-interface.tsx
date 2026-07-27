@@ -835,7 +835,27 @@ function DirectChatSession({
             try {
               const statusRes = await fetch(`/api/direct/chat/${activeId}/turn-status`);
               const stillActive = statusRes.ok && (await statusRes.json())?.active === true;
-              if (stillActive) {
+              // DB-WINS CIRCUIT BREAKER (2026-07-27, real user-recorded bug:
+              // a provider that errors out on every attempt produced a
+              // NEW "No response came back this turn" bubble every ~2.6s,
+              // seemingly forever). Root cause: this branch trusted the
+              // server's turn-lock `active` flag alone to decide whether to
+              // call `resumeStream()` again -- but a lock can keep reading
+              // `active: true` for a stretch after the turn has already
+              // written its final (even if it's an error-fallback) message
+              // to the DB, and every extra `resumeStream()` call re-pulls
+              // that same already-rendered terminal content, which
+              // `useChat`'s reconnect handling has no way to recognize as
+              // "already shown" -- so it renders as a brand new message
+              // each time, forever, as long as the stale lock keeps
+              // reporting active. The DB is ground truth (same principle
+              // the `dbLooksComplete` check just above this already
+              // applies for clearing turnError): if the last persisted
+              // message is already a real, non-empty assistant reply and
+              // we're not actively mid-stream right now, the turn is done
+              // no matter what the lock says -- never call `resumeStream()`
+              // again for it.
+              if (stillActive && !(dbLooksComplete && !activelyStreamingNow)) {
                 dispatchTurn({ type: 'SET_PENDING', value: true });
                 // ACTIVELY REATTACH (2026-07-26, real user report: "if am
                 // online the stuff supposed to stream which is not
