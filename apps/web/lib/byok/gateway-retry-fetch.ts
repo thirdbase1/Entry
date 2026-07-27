@@ -78,7 +78,18 @@ const GENERIC_BODY_MAX_LENGTH = 400;
 // Keywords that mean "this is a REAL, permanent, descriptive error" -- if
 // any of these show up in an otherwise-generic-looking 5xx body, it's
 // NOT the relay glitch, don't retry it away.
-export const PERMANENT_SIGNAL_PATTERN = /invalid[_ ]?api[_ ]?key|unauthorized|authentication|insufficient[_ ]?quota|insufficient[_ ]?balance|rate[_ ]?limit|model[_ ]?not[_ ]?found|does not exist|permission|forbidden/i;
+// FIXED (2026-07-27, real bug, user report: "on slow internet it's slow
+// for the model to connect and run" -- confirmed live via error_logs: a
+// monthly-usage-cap response from Opencode Zen, e.g. "Monthly usage
+// limit reached. Resets in 18hr 59min...", matched NONE of the existing
+// permanent-signal keywords (no literal "quota", "balance", or "rate
+// limit" in that exact phrasing) and a 500 status with a short body, so
+// it fell straight into the generic-short-5xx-body "retry it" bucket --
+// 6 full attempts with growing backoff delay, EVERY message, for a
+// condition that cannot possibly succeed until the cap resets hours
+// later. Adding this keyword makes it fail on the first attempt instead
+// of wasting several real seconds retrying something permanent-for-now.
+export const PERMANENT_SIGNAL_PATTERN = /invalid[_ ]?api[_ ]?key|unauthorized|authentication|insufficient[_ ]?quota|insufficient[_ ]?balance|rate[_ ]?limit|usage[_ ]?limit|monthly[_ ]?limit|model[_ ]?not[_ ]?found|does not exist|permission|forbidden/i;
 
 // FIXED (2026-07-25, confirmed live: Claude Opus 5 via freemodel.dev,
 // real BYOK turn genuinely mid-work): the exact body
