@@ -334,15 +334,24 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       if (cooldownReason) {
         const fallbackId = await pickFallbackByokModel(userId, resolved.providerId);
         if (fallbackId && fallbackId !== resolved.byokModelId) {
+          // MODEL NAME ONLY (2026-07-27, owner ask: "only show the model
+          // name, remove that word route/routing, don't show the
+          // provider") -- this notice used to name the internal relay
+          // ("HCNSec Relay", "freemodel.dev") on both sides of the swap,
+          // exactly the provider-label leak the owner asked to remove
+          // from the model picker. Uses each side's bare model id
+          // instead, same as the picker itself does for shared rows.
+          const deadModelLabel = resolved.modelId;
           const deadProviderLabel = resolved.providerLabel;
           console.warn('[direct chat] provider in cooldown, substituting fallback model', {
             chatId,
             deadProvider: deadProviderLabel,
+            deadModel: deadModelLabel,
             cooldownReason,
             fallbackByokModelId: fallbackId,
           });
           resolved = await resolveByokModel(fallbackId, userId);
-          substitutionNotice = `"${deadProviderLabel}" is temporarily unavailable (${cooldownReason.slice(0, 120)}) — used "${resolved.providerLabel}" for this reply instead.`;
+          substitutionNotice = `"${deadModelLabel}" is temporarily unavailable — used "${resolved.modelId}" for this reply instead.`;
         }
       }
     }

@@ -44,6 +44,14 @@ export async function GET(req: NextRequest) {
     const path = returnTo && /^\/chats\/[a-zA-Z0-9_-]+$/.test(returnTo) ? returnTo : '/settings';
     const u = new URL(path, origin);
     if (path === '/settings') {
+      // LANDED-ON-WRONG-TAB FIX (2026-07-27, owner report: "how come I
+      // click connect, it's taking me to the byok page" -- Settings'
+      // page.tsx defaults to the 'providers' (BYOK) tab whenever no
+      // `?tab=` param is present at all, and this redirect never set one
+      // -- so a successful connect silently dumped the user back onto
+      // BYOK instead of the Integrations tab they just came from, making
+      // it look like the click did nothing / went to the wrong place).
+      u.searchParams.set('tab', 'integrations');
       u.searchParams.set('connected', status === 'connected' ? 'github' : '');
       if (message) u.searchParams.set('github_error', message);
     } else {

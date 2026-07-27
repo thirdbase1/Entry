@@ -344,13 +344,7 @@ export function UsageSection() {
                         </td>
                         <td className="px-3 py-2 text-right text-foreground font-medium">{fmtTokens(row.totalTokens)}</td>
                         <td className="px-3 py-2 text-right text-foreground">
-                          {row.unpricedCalls > 0 ? (
-                            <span className="text-amber-600 dark:text-amber-400" title={`${row.unpricedCalls} call(s) had no matching price rate`}>
-                              {fmtUsd(row.costUsd)} + unpriced
-                            </span>
-                          ) : (
-                            fmtUsd(row.costUsd)
-                          )}
+                          {fmtUsd(row.costUsd)}
                           {row.providerKind === 'byok' && (
                             <div className="text-[10px] text-muted-foreground leading-none mt-0.5" title="Real market rate for this model — your own key, so Entry never actually billed you for it">
                               market rate · not billed
