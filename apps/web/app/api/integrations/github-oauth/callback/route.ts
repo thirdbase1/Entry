@@ -76,6 +76,19 @@ export async function GET(req: NextRequest) {
     res.cookies.set('github_oauth_return', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
     return res;
   };
+  const clearCookiesAndRedirect = (url: string) => clearCookies(NextResponse.redirect(url));
+
+  // SURFACE REAL ERRORS (2026-07-27): GitHub's own authorize endpoint
+  // redirects straight back here with `error`/`error_description` on
+  // things like access_denied or a redirect_uri it doesn't recognize --
+  // previously these fell through to the generic "invalid_state" bucket
+  // below (code/state genuinely are absent on this path too), hiding the
+  // real reason from both the user and anyone debugging it later.
+  const providerError = req.nextUrl.searchParams.get('error');
+  const providerErrorDescription = req.nextUrl.searchParams.get('error_description');
+  if (providerError) {
+    return clearCookiesAndRedirect(resultUrl('error', providerErrorDescription || providerError));
+  }
 
   // "UPDATE INSTALLATION" REDIRECT FIX (2026-07-27, owner report: "when
   // I updated it didn't redirect back"). GitHub sends a user straight to

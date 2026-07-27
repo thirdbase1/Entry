@@ -14,6 +14,7 @@
  * server-to-server automation, so that's all this needs.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { PlusIcon, DeleteIcon } from '@blocksuite/icons/rc';
 import { AutoSaveField, safeJson } from './shared';
 
@@ -407,6 +408,41 @@ export function IntegrationsSection() {
   const [githubInstallationId, setGithubInstallationId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // OAUTH RESULT BANNER (2026-07-27, real bug: connect failures were
+  // 100% silent -- the github/vercel OAuth callback routes always
+  // redirected back here with `connected=<service>` on success or
+  // `github_error=...` / `vercel_error=...` on failure, but nothing on
+  // this page ever read those params, so a failed connect looked
+  // exactly like "nothing happened" with zero explanation. Surface
+  // whichever one is present, then strip it from the URL so a refresh
+  // doesn't keep re-showing a stale banner.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [oauthBanner, setOauthBanner] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    const connected = searchParams.get('connected');
+    const githubError = searchParams.get('github_error');
+    const vercelError = searchParams.get('vercel_error');
+    const err = githubError || vercelError;
+    if (!connected && !err) return;
+
+    if (err) {
+      const service = githubError ? 'GitHub' : 'Vercel';
+      setOauthBanner({ kind: 'error', text: `${service} connection failed: ${err}` });
+    } else if (connected) {
+      const label = connected === 'github' ? 'GitHub' : connected === 'vercel' ? 'Vercel' : connected;
+      setOauthBanner({ kind: 'success', text: `${label} connected.` });
+    }
+
+    const url = new URL(window.location.href);
+    url.searchParams.delete('connected');
+    url.searchParams.delete('github_error');
+    url.searchParams.delete('vercel_error');
+    router.replace(url.pathname + url.search, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   const reload = useCallback(() => {
     fetch('/api/user/integrations')
       .then(async res => {
@@ -436,6 +472,12 @@ export function IntegrationsSection() {
     reload();
   }, [reload]);
 
+  // Re-check connect status right after a successful OAuth round trip
+  // (banner above already strips the query params on the same tick).
+  useEffect(() => {
+    if (oauthBanner?.kind === 'success') reload();
+  }, [oauthBanner, reload]);
+
   const findMeta = (service: string) => credentials?.find(c => c.service === service && c.label === 'default');
   const knownServiceNames = new Set(KNOWN_SERVICES.map(s => s.service));
   const customCreds = (credentials ?? []).filter(c => !knownServiceNames.has(c.service));
@@ -454,6 +496,18 @@ export function IntegrationsSection() {
       {loadError && (
         <div className="text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
           {loadError}
+        </div>
+      )}
+
+      {oauthBanner && (
+        <div
+          className={
+            oauthBanner.kind === 'error'
+              ? 'text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2'
+              : 'text-sm text-primary bg-primary/10 border border-primary/30 rounded-md px-3 py-2'
+          }
+        >
+          {oauthBanner.text}
         </div>
       )}
 

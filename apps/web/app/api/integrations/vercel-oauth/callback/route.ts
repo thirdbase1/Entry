@@ -65,6 +65,19 @@ export async function GET(req: NextRequest) {
     return res;
   };
 
+  // SURFACE REAL ERRORS (2026-07-27, same root cause as the GitHub
+  // callback): Vercel's own authorize endpoint redirects straight back
+  // here with `error`/`error_description` for things like a redirect_uri
+  // it doesn't recognize (see
+  // https://vercel.com/docs/sign-in-with-vercel/troubleshooting) --
+  // these used to fall into the generic "invalid_state" bucket below,
+  // hiding the real reason.
+  const providerError = req.nextUrl.searchParams.get('error');
+  const providerErrorDescription = req.nextUrl.searchParams.get('error_description');
+  if (providerError) {
+    return clearCookies(NextResponse.redirect(resultUrl('error', providerErrorDescription || providerError)));
+  }
+
   if (!code || !state || !cookieState || state !== cookieState || !verifier) {
     return clearCookies(NextResponse.redirect(resultUrl('error', 'invalid_state')));
   }

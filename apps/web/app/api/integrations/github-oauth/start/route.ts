@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'node:crypto';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getPublicOrigin } from '@/lib/public-origin';
+import { redirectToCanonicalOriginIfNeeded } from '@/lib/oauth-canonical-redirect';
 import { prisma } from '@entry/db';
 
 /** Only allow redirecting back to a chat session page — never an
@@ -57,6 +58,10 @@ function sanitizeReturnTo(value: string | null): string | null {
  * whatever it was doing without the user retyping anything.
  */
 export async function GET(req: NextRequest) {
+  // MUST run before any cookie is set -- see oauth-canonical-redirect.ts.
+  const canonicalRedirect = redirectToCanonicalOriginIfNeeded(req);
+  if (canonicalRedirect) return canonicalRedirect;
+
   const origin = getPublicOrigin(req);
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.redirect(new URL('/sign-in', origin));
@@ -111,6 +116,7 @@ export async function GET(req: NextRequest) {
     authorizeUrl.searchParams.set('client_id', clientId);
   }
   authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('redirect_uri', `${origin}/api/integrations/github-oauth/callback`);
 
   const res = NextResponse.redirect(authorizeUrl.toString());
   res.cookies.set('github_oauth_state', state, {

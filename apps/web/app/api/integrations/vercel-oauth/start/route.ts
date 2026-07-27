@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes, createHash } from 'node:crypto';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getPublicOrigin } from '@/lib/public-origin';
+import { redirectToCanonicalOriginIfNeeded } from '@/lib/oauth-canonical-redirect';
 
 /** Only allow redirecting back to a chat session page — never an
  *  arbitrary path, so this can't be abused as an open redirect. */
@@ -41,6 +42,10 @@ function pkceChallenge(verifier: string): string {
  * -- code_verifier lives in an httpOnly cookie until the callback.
  */
 export async function GET(req: NextRequest) {
+  // MUST run before any cookie is set -- see oauth-canonical-redirect.ts.
+  const canonicalRedirect = redirectToCanonicalOriginIfNeeded(req);
+  if (canonicalRedirect) return canonicalRedirect;
+
   const origin = getPublicOrigin(req);
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.redirect(new URL('/sign-in', origin));

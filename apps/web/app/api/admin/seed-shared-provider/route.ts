@@ -54,13 +54,13 @@ const MODELS: Array<{
   cacheReadPerMTok?: number;
   priced: boolean;
 }> = [
-  { alias: 'DeepSeek-V4-Pro', displayLabel: 'DeepSeek-V4-Pro (routes to Nemotron 3 Ultra)', inputPerMTok: 0.8, outputPerMTok: 2.6, priced: true },
+  { alias: 'DeepSeek-V4-Pro', displayLabel: 'DeepSeek-V4-Pro', inputPerMTok: 0.8, outputPerMTok: 2.6, priced: true },
   { alias: 'DeepSeek-V4-Flash', displayLabel: 'DeepSeek-V4-Flash', inputPerMTok: 0.14, cacheReadPerMTok: 0.0028, outputPerMTok: 0.28, priced: true },
-  { alias: 'Kimi-K2.6', displayLabel: 'Kimi-K2.6 (routes to Inkling)', inputPerMTok: 3.74, cacheReadPerMTok: 0.748, outputPerMTok: 9.36, priced: true },
+  { alias: 'Kimi-K2.6', displayLabel: 'Kimi-K2.6', inputPerMTok: 3.74, cacheReadPerMTok: 0.748, outputPerMTok: 9.36, priced: true },
   { alias: 'MiniMax-M2.7', displayLabel: 'MiniMax-M2.7', inputPerMTok: 0.3, outputPerMTok: 1.2, priced: true },
   { alias: 'MiniMax-M3', displayLabel: 'MiniMax-M3', inputPerMTok: 0.45, outputPerMTok: 1.8, priced: true },
   { alias: 'Qwen3.6-35B-A3B', displayLabel: 'Qwen3.6-35B-A3B', inputPerMTok: 0.248, outputPerMTok: 1.485, priced: true },
-  { alias: 'sensenova-6.7-flash-lite', displayLabel: 'SenseNova 6.7 Flash-Lite (no public price found — unpriced)', inputPerMTok: 0, outputPerMTok: 0, priced: false },
+  { alias: 'sensenova-6.7-flash-lite', displayLabel: 'SenseNova 6.7 Flash-Lite', inputPerMTok: 0, outputPerMTok: 0, priced: false },
   { alias: 'step-3.7-flash', displayLabel: 'Step 3.7 Flash', inputPerMTok: 0.2, cacheReadPerMTok: 0.04, outputPerMTok: 1.15, priced: true },
 ];
 
