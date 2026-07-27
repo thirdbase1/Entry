@@ -488,7 +488,17 @@ function DirectChatSession({
       // surfacing a scary error for what the user correctly expects to
       // just keep working.
       if (error instanceof Error && error.message.includes('turn_in_progress')) {
-        void chat.resumeStream();
+        // Keep the UI locked and show "Reconnecting…" — the turn is
+        // still running server-side, we just need to reattach.
+        dispatchTurn({ type: 'SET_PENDING', value: true });
+        dispatchTurn({ type: 'SET_RECONNECTING', value: true });
+        if (!resumingRef.current) {
+          resumingRef.current = true;
+          void (async () => {
+            try { await chat.resumeStream(); } catch {}
+            finally { resumingRef.current = false; dispatchTurn({ type: 'SET_RECONNECTING', value: false }); }
+          })();
+        }
         return;
       }
       // RECONNECT-FIRST (2026-07-26, real user report: "it stops in 30s
@@ -1138,7 +1148,17 @@ function DirectChatSession({
       dispatchTurn({ type: 'SET_PENDING', value: true });
       dispatchTurn({ type: 'CLEAR_ERROR' });
       void sendWithRetry(() => chat.sendMessage({ text: initialMessage })).catch(err => {
-        if (err instanceof Error && err.message.includes('turn_in_progress')) return;
+        if (err instanceof Error && err.message.includes('turn_in_progress')) {
+          dispatchTurn({ type: 'SET_PENDING', value: true });
+          if (!resumingRef.current) {
+            resumingRef.current = true;
+            void (async () => {
+              try { await chat.resumeStream(); } catch {}
+              finally { resumingRef.current = false; dispatchTurn({ type: 'SET_RECONNECTING', value: false }); }
+            })();
+          }
+          return;
+        }
         console.error('[direct chat initial send failed]', err);
         reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-initial-send-failed', stack: err instanceof Error ? err.stack : undefined });
         dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(err) });
@@ -1167,7 +1187,17 @@ function DirectChatSession({
     dispatchTurn({ type: 'SET_PENDING', value: true });
     dispatchTurn({ type: 'CLEAR_ERROR' });
     void sendWithRetry(() => chat.sendMessage({ text })).catch(err => {
-      if (err instanceof Error && err.message.includes('turn_in_progress')) return;
+      if (err instanceof Error && err.message.includes('turn_in_progress')) {
+        dispatchTurn({ type: 'SET_PENDING', value: true });
+        if (!resumingRef.current) {
+          resumingRef.current = true;
+          void (async () => {
+            try { await chat.resumeStream(); } catch {}
+            finally { resumingRef.current = false; dispatchTurn({ type: 'SET_RECONNECTING', value: false }); }
+          })();
+        }
+        return;
+      }
       console.error('[integration callback send failed]', err);
       reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-integration-callback-failed', stack: err instanceof Error ? err.stack : undefined });
       dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(err) });
@@ -1303,12 +1333,36 @@ function DirectChatSession({
     // server-side change needed for that part.
     const files = (opts?.images ?? []).map(img => ({ type: 'file' as const, mediaType: img.mediaType, url: img.url, filename: img.filename }));
     void sendWithRetry(() => chat.sendMessage({ text: input, files: files.length > 0 ? files : undefined }, { body: { disabledTools: opts?.disabledTools ?? [] } })).catch(err => {
-      // Skip SET_ERROR for turn_in_progress — the server's turn-lock
-      // rejected this as a duplicate, which onError already handles by
-      // calling resumeStream(). Dispatching SET_ERROR here would clear
-      // pendingTurn (the reducer does that) and show a false error banner
-      // even though the turn is still running fine.
-      if (err instanceof Error && err.message.includes('turn_in_progress')) return;
+      // TURN_IN_PROGRESS HANDLING (2026-07-27, "I believe there is a big
+      // bug there" — the user was right): when the user clicks send while
+      // a previous turn's lock is still held (UI looks idle but server is
+      // still working), the 409 was silently swallowed — the user clicked
+      // send and NOTHING happened: no feedback, no reattachment, no error.
+      // Now: re-lock the send button (pendingTurn = true), show
+      // "Reconnecting…" so the user knows something is happening, and
+      // try to reattach to the still-running turn's stream. This is NOT
+      // a duplicate send — the server already rejected it.
+      if (err instanceof Error && err.message.includes('turn_in_progress')) {
+        dispatchTurn({ type: 'SET_PENDING', value: true });
+        dispatchTurn({ type: 'SET_RECONNECTING', value: true });
+        // Try to reattach to the live turn — idempotent (204 if already
+        // done), safe to call even if we just reattached.
+        if (!resumingRef.current) {
+          resumingRef.current = true;
+          void (async () => {
+            try {
+              await chat.resumeStream();
+            } catch {
+              // resumeStream failed — the recovery poll (800ms) will
+              // catch up via DB snapshots. Don't clear pendingTurn.
+            } finally {
+              resumingRef.current = false;
+              dispatchTurn({ type: 'SET_RECONNECTING', value: false });
+            }
+          })();
+        }
+        return;
+      }
       console.error('[direct chat send failed]', err);
       reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-send-failed', stack: err instanceof Error ? err.stack : undefined });
       dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(err) });
