@@ -127,7 +127,16 @@ function isSafeToAdopt(persisted: UIMessage[], current: UIMessage[]): boolean {
 // makes every valid transition visible in ONE place instead of scattered
 // ad-hoc `setPendingTurn()`/`setTurnError()` calls spread across 1000+
 // lines -- and one mirror ref replaces two.
-type TurnLifecycleState = { pendingTurn: boolean; turnError: string | null; isReconnecting: boolean };
+// `lastResumeAttemptMs` is a mutable throttle bookkeeping field bolted
+// onto the ref's *current* object directly (not through the reducer --
+// it's not user-visible state, just an internal timestamp guarding
+// resume-attempt spam), so it's declared as optional here instead of a
+// reducer action. FIXED (2026-07-27, PR review): this field was being
+// read/written both with and without `as any` casts inconsistently,
+// which only happened to typecheck at the call sites that used the
+// cast -- declaring it for real here makes every access, cast or not,
+// type-check correctly.
+type TurnLifecycleState = { pendingTurn: boolean; turnError: string | null; isReconnecting: boolean; lastResumeAttemptMs?: number };
 type TurnLifecycleAction =
   | { type: 'SET_PENDING'; value: boolean }
   | { type: 'SET_ERROR'; message: string }
@@ -369,7 +378,7 @@ function DirectChatSession({
   // Track when resumeStream was last attempted to avoid a failure cycle
   // (see recovery poll's 30s cooldown comment).
   if (!('lastResumeAttemptMs' in turnLifecycleRef.current)) {
-    (turnLifecycleRef as any).current.lastResumeAttemptMs = 0;
+    turnLifecycleRef.current.lastResumeAttemptMs = 0;
   }
   useEffect(() => {
     turnLifecycleRef.current = turnLifecycle;
@@ -530,7 +539,7 @@ function DirectChatSession({
       if (resumingRef.current) return;
       resumingRef.current = true;
       dispatchTurn({ type: 'SET_RECONNECTING', value: true });
-      (turnLifecycleRef as any).current.lastResumeAttemptMs = Date.now();
+      turnLifecycleRef.current.lastResumeAttemptMs = Date.now();
       void (async () => {
         // RETRY WITH BACKOFF (2026-07-26, continuation of the same
         // reconnect-first fix): a single resumeStream() attempt can
