@@ -26,8 +26,23 @@ import type { NextRequest } from 'next/server';
  * unset, so local dev (`http://localhost:3000`) keeps working with zero
  * extra setup.
  */
+const PRODUCTION_ORIGIN = 'https://entry.oneshotsx.cv';
+
 export function getPublicOrigin(req: NextRequest): string {
   const configured = process.env.NEXT_PUBLIC_APP_URL?.trim();
   if (configured) return configured.replace(/\/+$/, '');
-  return req.nextUrl.origin;
+  // FIXED (2026-07-27): falling back to req.nextUrl.origin is unreliable
+  // on Pxxl (same class of bug as Render's 0.0.0.0:10000 bind address —
+  // see the long header comment above). The internal Host Next.js's own
+  // server process sees is NOT the public-facing domain the browser hit,
+  // so any OAuth redirect_uri built from it gets rejected by the provider
+  // ("redirect_uri MUST match the registered callback URL"). Default to
+  // the known production origin instead. Local dev (localhost:3000) is
+  // still detected via the Host header and used as-is, so `next dev`
+  // keeps working with zero extra setup.
+  const host = req.headers.get('host') || '';
+  if (host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.startsWith('0.0.0.0')) {
+    return req.nextUrl.origin;
+  }
+  return PRODUCTION_ORIGIN;
 }
