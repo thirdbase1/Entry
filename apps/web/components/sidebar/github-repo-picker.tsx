@@ -89,7 +89,9 @@ export function GitHubRepoPicker({ open, onClose, installationId }: Props) {
 
   const handleSelect = (repo: Repo) => {
     setSelected(repo.full_name);
-    const msg = `Clone my repo ${repo.full_name} (branch: ${repo.default_branch}) and set up the project so I can start working on it.`;
+    const msg = repo.private
+      ? `Clone my private repo ${repo.full_name} (branch: ${repo.default_branch}). Use inject_credential to get the GitHub token for auth, then git clone. After cloning, set up the project so I can start working on it.`
+      : `Clone my repo ${repo.full_name} (branch: ${repo.default_branch}) and set up the project so I can start working on it.`;
     onClose();
     router.push(`/chats?msg=${encodeURIComponent(msg)}`);
   };
