@@ -72,6 +72,7 @@ export async function GET(req: NextRequest) {
   const cookieState = req.cookies.get('github_oauth_state')?.value;
 
   const clearCookies = (res: NextResponse) => {
+    res.headers.set('Cache-Control', 'no-store, must-revalidate');
     res.cookies.set('github_oauth_state', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
     res.cookies.set('github_oauth_return', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
     return res;

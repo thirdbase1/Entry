@@ -4,6 +4,45 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { getPublicOrigin } from '@/lib/public-origin';
 import { redirectToCanonicalOriginIfNeeded } from '@/lib/oauth-canonical-redirect';
 import { prisma } from '@entry/db';
+import { getCredential } from '@entry/agent/lib/credential-vault';
+
+/**
+ * REAL-VALIDITY CHECK (2026-07-27, owner report: "uninstalled the app on
+ * GitHub, Integrations page still showed connected, disconnect + connect
+ * does nothing, doesn't even take me to GitHub"). Root cause: the
+ * existingUser.githubInstallationId branch below only ever checked OUR
+ * OWN stale DB column -- which disconnect never clears (see the long
+ * comment on that branch) and which GitHub-side uninstalls don't touch
+ * either, since that's an action on github.com we're never told about
+ * unless we ask. A user who genuinely removed the installation on
+ * GitHub's side still has a truthy `githubInstallationId` in our DB
+ * forever, so they always got routed to `login/oauth/authorize` (a bare
+ * re-auth screen, NOT a fresh install) -- and if GitHub also revoked the
+ * underlying OAuth grant when the installation was removed (which it
+ * does), that authorize hit fails/free-falls with no valid session for
+ * GitHub to re-approve, landing back here with no clean code/state at
+ * all, which reads exactly like "doesn't even take me to GitHub."
+ *
+ * Fix: actually ask GitHub whether the installation is still real via
+ * the user's own already-stored token (GET /user/installations,
+ * INSTALLATION lookup) before trusting our own column. If it's gone,
+ * clear our stale value and fall through to the real
+ * `/installations/new` flow instead of the dead-end re-auth screen.
+ */
+async function installationStillActive(userId: string, installationId: string): Promise<boolean> {
+  const token = await getCredential(userId, 'github').catch(() => null);
+  if (!token) return false;
+  try {
+    const res = await fetch('https://api.github.com/user/installations', {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) return false;
+    const json = (await res.json()) as { installations?: Array<{ id: number }> };
+    return (json.installations ?? []).some(i => String(i.id) === String(installationId));
+  } catch {
+    return false;
+  }
+}
 
 /** Only allow redirecting back to a chat session page — never an
  *  arbitrary path, so this can't be abused as an open redirect. */
@@ -109,16 +148,34 @@ export async function GET(req: NextRequest) {
     select: { githubInstallationId: true },
   });
 
-  const authorizeUrl = existingUser?.githubInstallationId
+  let hasRealInstallation = false;
+  if (existingUser?.githubInstallationId) {
+    hasRealInstallation = await installationStillActive(session.user.id, existingUser.githubInstallationId);
+    if (!hasRealInstallation) {
+      // Stale -- GitHub-side install is gone even though our DB still
+      // remembered it. Clear it so every other "does this user have a
+      // real installation" check downstream sees the truth too.
+      await prisma.user
+        .update({ where: { id: session.user.id }, data: { githubInstallationId: null } })
+        .catch(err => console.error('[github-oauth start] failed to clear stale installationId', session.user.id, err));
+    }
+  }
+
+  const authorizeUrl = hasRealInstallation
     ? new URL('https://github.com/login/oauth/authorize')
     : new URL('https://github.com/apps/entry-github/installations/new');
-  if (existingUser?.githubInstallationId) {
+  if (hasRealInstallation) {
     authorizeUrl.searchParams.set('client_id', clientId);
   }
   authorizeUrl.searchParams.set('state', state);
   authorizeUrl.searchParams.set('redirect_uri', `${origin}/api/integrations/github-oauth/callback`);
 
   const res = NextResponse.redirect(authorizeUrl.toString());
+  // NEVER let any CDN/edge cache this -- it embeds a one-time state
+  // token and sets session-scoped cookies; a cached copy served on a
+  // repeat click would carry a stale state that can never match a fresh
+  // cookie, which is indistinguishable from "invalid_state" to the user.
+  res.headers.set('Cache-Control', 'no-store, must-revalidate');
   res.cookies.set('github_oauth_state', state, {
     httpOnly: true,
     secure: true,
