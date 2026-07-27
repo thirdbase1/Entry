@@ -98,8 +98,15 @@ export async function resolveUserCustomProviderModel(
   providerLabel: string,
   modelId?: string
 ): Promise<ResolvedCustomProviderModel | null> {
+  // ALSO matches platform-wide SHARED providers (HCNSec, freemodel.dev, ...)
+  // by label regardless of userId (owner ask 2026-07-27: "make sure the
+  // free model and the hncsec act as one" + sub-agent should be able to
+  // call them by name same as any BYOK provider) -- these are visible/
+  // usable by every user already in the chat model-picker, so the
+  // delegate tool should resolve them the same way, not just this user's
+  // own rows.
   const provider = await prisma.userModelProvider.findFirst({
-    where: { userId, label: { equals: providerLabel, mode: 'insensitive' } },
+    where: { label: { equals: providerLabel, mode: 'insensitive' }, OR: [{ userId }, { isShared: true }] },
   });
   if (!provider) return null;
 
@@ -128,8 +135,46 @@ export async function resolveUserCustomProviderModel(
   return { model, providerLabel: provider.label, modelId: modelRow.modelId };
 }
 
-/** Every custom provider label this user has saved -- for error messages guiding a bad guess toward real options. */
+/** Every custom provider label this user has saved, PLUS every platform-wide shared provider label (HCNSec, freemodel.dev, ...) -- for error messages guiding a bad guess toward real options. */
 export async function listUserCustomProviderLabels(userId: string): Promise<string[]> {
-  const rows = await prisma.userModelProvider.findMany({ where: { userId }, select: { label: true } });
+  const rows = await prisma.userModelProvider.findMany({ where: { OR: [{ userId }, { isShared: true }] }, select: { label: true } });
   return rows.map(r => r.label);
+}
+
+/**
+ * DEFAULT SUB-AGENT MODEL (owner ask 2026-07-27: "free model and hncsec
+ * should be the default sub agent... model should only call another
+ * provider if user specifically ask"): resolves to the first enabled
+ * model on ANY shared (isShared: true) provider -- prefers the
+ * freemodel.dev Claude-compatibility rows if present (better reasoning
+ * for planning/delegation-style subtasks), falling back to whichever
+ * shared provider exists otherwise (e.g. HCNSec). Returns null if no
+ * shared provider is configured at all, so the caller can fall back to
+ * "delegate to a copy of yourself" exactly like before this existed.
+ */
+export async function resolveDefaultSharedModel(): Promise<ResolvedCustomProviderModel | null> {
+  const providers = await prisma.userModelProvider.findMany({ where: { isShared: true } });
+  if (providers.length === 0) return null;
+
+  const preferred = providers.find(p => /freemodel/i.test(p.label)) ?? providers[0];
+
+  const modelRow = await prisma.userModelProviderModel.findFirst({
+    where: { providerId: preferred.id, isEnabled: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!modelRow) return null;
+
+  let apiKey: string | undefined;
+  if (preferred.encryptedApiKey) {
+    try {
+      apiKey = decryptApiKey(preferred.encryptedApiKey);
+    } catch {
+      return null; // same non-fatal "just fall back" contract as a missing row
+    }
+  }
+  const model = await buildCustomModelClient(
+    { label: preferred.label, compatibility: preferred.compatibility, baseUrl: preferred.baseUrl, apiKey },
+    modelRow.modelId
+  );
+  return { model, providerLabel: preferred.label, modelId: modelRow.modelId };
 }

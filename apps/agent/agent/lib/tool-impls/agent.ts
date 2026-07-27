@@ -2,7 +2,7 @@ import { generateText, tool, stepCountIs, type LanguageModel } from 'ai';
 import { gateway } from '@ai-sdk/gateway';
 import { z } from 'zod';
 import { resolveModelIdForProvider, getCatalogMenu } from '../model-catalog.js';
-import { resolveUserCustomProviderModel, listUserCustomProviderLabels } from '../custom-model-provider.js';
+import { resolveUserCustomProviderModel, listUserCustomProviderLabels, resolveDefaultSharedModel } from '../custom-model-provider.js';
 import { webSearch } from './web_search.js';
 import { webCrawl } from './web_crawl.js';
 import { bash } from './bash.js';
@@ -124,7 +124,7 @@ const AgentDelegateInputSchema = z.object({
         "automatically picks that provider's strongest currently-available model; for a user's own custom provider given without " +
         "`model`, automatically picks the first model they enabled under it. Pick a Gateway family deliberately for the task: e.g. " +
         '"google" for deep research / large-context reading, "anthropic" for careful planning or precise reasoning, "openai" for ' +
-        'rewriting tone/style. Omit both `provider` and `model` to delegate to a copy of yourself (same model as this turn).'
+        'rewriting tone/style. Omit both `provider` and `model` to default to the shared free model (HCNSec/freemodel.dev) — only pick a specific Gateway provider or custom provider when the task genuinely calls for it or the user explicitly asked for a specific model/provider.'
     ),
   model: z
     .string()
@@ -734,8 +734,32 @@ export const agentDelegate = {
           `Pass a full id like "anthropic/claude-opus-4.8", or add "provider".`
       );
     } else {
-      // No explicit ask -- delegate to a copy of the root's own model
-      // family, matching eve's built-in `agent` tool default behavior.
+      // DEFAULT SUB-AGENT MODEL (owner ask 2026-07-27: "free model and
+      // hncsec should be the default sub agent... model should only call
+      // another provider if user specifically ask"): no explicit
+      // provider/model was given, so try a shared free model FIRST --
+      // this is a real API call/cost difference from the old default
+      // (a paid Gateway "anthropic" call on every no-ask delegate), not
+      // just a label change. Only falls back to the Gateway anthropic
+      // family (the pre-existing "copy of the root's own model family"
+      // behavior) when no shared provider is configured at all.
+      const shared = await resolveDefaultSharedModel().catch(() => null);
+      if (shared) {
+        const { text, steps, artifacts, progressLog, isolatedSandboxId } = await runDelegatedTask(shared.model, message, budget, ctx, explicitTimeoutMs, delegateOptions);
+        const truncated = isTruncatedFinish(steps, budget);
+        return {
+          result: text,
+          modelUsed: `${shared.providerLabel}/${shared.modelId}`,
+          stepsTaken: steps.length,
+          truncated,
+          note: truncated
+            ? `Ran out of its ${budget}-step budget before finishing on its own — treat "result" as partial progress, not a final answer.`
+            : undefined,
+          artifacts: artifacts.length > 0 ? artifacts : undefined,
+          progressLog: progressLog.length > 0 ? progressLog : undefined,
+          isolatedSandboxId,
+        };
+      }
       modelId = await resolveModelIdForProvider('anthropic');
     }
 

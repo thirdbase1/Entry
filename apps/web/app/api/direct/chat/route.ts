@@ -797,7 +797,33 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // bursts more real chances to clear before the turn gives up and
     // surfaces an error to the user at all.
     maxRetries: 5,
-    stopWhen: stepCountIs(400), // generous ceiling so a long agentic turn is bounded by the SOFT_DEADLINE_MS time budget, not an arbitrary low step count
+    stopWhen: [
+      stepCountIs(400), // generous ceiling so a long agentic turn is bounded by the SOFT_DEADLINE_MS time budget, not an arbitrary low step count
+      // FIXED (2026-07-27, real bug from a user-recorded video: a shared
+      // relay-routed model -- e.g. an alias that "routes to" a different
+      // underlying model at the relay -- kept regenerating the same
+      // trivial greeting ("What's good, how can I help?") dozens of times
+      // in a row, ~4s apart, never stopping on its own. Root cause: the AI
+      // SDK's tool-loop only stops naturally when a step's finishReason is
+      // something OTHER than "tool-calls" (or a stop condition matches) --
+      // this specific relay was lying, reporting finishReason "tool-calls"
+      // on every step while never actually emitting any tool call at all,
+      // so the SDK correctly-per-spec kept feeding it another step forever
+      // (up to the 400-step/55-minute ceiling above, which is far too long
+      // a leash for something this clearly broken). Defensive guard: if
+      // the two most recent steps BOTH made zero tool calls, that's not a
+      // state a genuine multi-step turn can ever legitimately reach (every
+      // step past the first only exists because the previous step made a
+      // real tool call) -- stop immediately instead of trusting the
+      // relay's own claimed finish reason.
+      ({ steps }) => {
+        if (steps.length < 2) return false;
+        const last = steps[steps.length - 1];
+        const prev = steps[steps.length - 2];
+        const noToolCalls = (s: { toolCalls?: unknown[] }) => !s.toolCalls || s.toolCalls.length === 0;
+        return noToolCalls(last) && noToolCalls(prev);
+      },
+    ],
     // FIXED (2026-07-19, confirmed live from production logs): a 'Free'
     // BYOK relay (model id "claude-fable-5") hung completely on a turn --
     // zero chunks, zero onStepFinish, nothing -- for the FULL 300s
