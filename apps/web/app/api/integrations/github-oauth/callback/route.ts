@@ -3,6 +3,7 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { getPublicOrigin } from '@/lib/public-origin';
 import { saveCredential } from '@entry/agent/lib/credential-vault';
 import { prisma } from '@entry/db';
+import { logError } from '@entry/db/error-log';
 
 /**
  * GET /api/integrations/github-oauth/callback
@@ -138,6 +139,26 @@ export async function GET(req: NextRequest) {
   if (!session) return NextResponse.redirect(new URL('/sign-in', origin));
 
   if (!code || !state || !cookieState || state !== cookieState) {
+    // DIAGNOSTIC (2026-07-27, real bug, ongoing owner report: still
+    // getting "invalid_state" after the stale-installationId fix). This
+    // was previously a silent redirect with zero durable trace of WHICH
+    // piece was actually missing/mismatched -- logging booleans only
+    // (never the actual state/cookie values, those are still
+    // security-sensitive) so the next occurrence is diagnosable from
+    // error_logs instead of guessed at blind.
+    logError({
+      source: 'github-oauth-invalid-state',
+      error: new Error('GitHub OAuth callback invalid_state'),
+      userId: session.user.id,
+      context: {
+        host: req.headers.get('x-forwarded-host') || req.headers.get('host'),
+        hasCode: !!code,
+        hasState: !!state,
+        hasCookieState: !!cookieState,
+        stateMatches: !!state && !!cookieState && state === cookieState,
+        referer: req.headers.get('referer'),
+      },
+    });
     return clearCookiesAndRedirect(resultUrl('error', 'invalid_state'));
   }
 
