@@ -40,8 +40,8 @@ export async function GET(req: NextRequest) {
   const origin = getPublicOrigin(req);
   const returnTo = req.cookies.get('github_oauth_return')?.value;
 
-  const resultUrl = (status: 'connected' | 'error', message?: string) => {
-    const path = returnTo && /^\/chats\/[a-zA-Z0-9_-]+$/.test(returnTo) ? returnTo : '/settings';
+  const resultUrl = (status: 'connected' | 'error', message?: string, pathOverride?: string) => {
+    const path = pathOverride ?? (returnTo && /^\/chats\/[a-zA-Z0-9_-]+$/.test(returnTo) ? returnTo : '/settings');
     const u = new URL(path, origin);
     if (path === '/settings') {
       // LANDED-ON-WRONG-TAB FIX (2026-07-27, owner report: "how come I
@@ -122,7 +122,13 @@ export async function GET(req: NextRequest) {
         .update({ where: { id: updateSession.user.id }, data: { githubInstallationId: installationId } })
         .catch(err => console.error('[github-oauth callback] failed to persist installationId on update', updateSession.user.id, err));
     }
-    return clearCookies(NextResponse.redirect(resultUrl('connected')));
+    // Redirect to /chats?github_picker=1 so the repo picker modal
+    // auto-reopens — the user just updated their repo access and should
+    // land right back in the picker to select a newly-added repo.
+    const pickerUrl = new URL('/chats', origin);
+    pickerUrl.searchParams.set('github_picker', '1');
+    pickerUrl.searchParams.set('integration_status', 'connected');
+    return clearCookies(NextResponse.redirect(pickerUrl.toString()));
   }
 
   // Session is required for the OAuth code-exchange flow (not for the
