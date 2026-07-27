@@ -42,11 +42,15 @@
  * vendor-published rate (not Opencode Zen's own $0), same "price the real
  * backend, not the aggregator's marketing number" rule as HCNSec above.
  *
- *   requested alias   -> backend                        input/output per MTok
- *   hy3                -> Tencent Hunyuan 3 (flagship)    $0.50 / $2.00
- *   grok-4.5            -> xAI Grok 4.5 (flagship)         $3.00 / $15.00
- *   kimi-k3             -> Moonshot Kimi K3 (flagship)     $4.00 / $10.00
- *   mimo-v2-pro         -> Xiaomi MiMo v2 Pro              UNPRICED -- see below
+ * RESEARCHED LIVE (2026-07-27, owner ask: "search for the four pricing and
+ * do it well" -- replacing the earlier same-magnitude guesses below with
+ * real vendor-sourced rates):
+ *
+ *   requested alias  -> real backend + rate                        input / output / cache-read per MTok   source
+ *   hy3               -> Tencent Hunyuan 3                          $0.14 / $0.56 / --                     atlascloud.ai + Tencent's own CNY rate (¥1.2/¥4 per 1M, tokenplan.vip) converge on this; NOT the cheaper "HY3 Preview" tier some aggregators quote ($0.063/$0.21) -- this is the full model actually served
+ *   grok-4.5          -> xAI Grok 4.5                               $2.00 / $6.00 / $0.30                  docs.x.ai/developers/pricing (xAI's own page) + confirmed independently by OpenRouter, benchlm.ai, mindstudio.ai -- all agree exactly
+ *   kimi-k3           -> Moonshot Kimi K3                            $3.00 / $15.00 / $0.30                 platform.kimi.ai/docs/pricing/chat-k3 (Moonshot's own docs) + OpenRouter, Verdent, Wavect, eesel.ai -- unanimous across 5+ independent sources
+ *   mimo-v2-pro       -> Xiaomi MiMo v2 Pro                          $0.435 / $0.87 / $0.0036               pi.dev/models/xiaomi/mimo-v2-pro -- most granular/marketplace-style listing found; other aggregators disagreed wildly ($1/$3 flat guess vs a vague "$6.25/MTok" on Xiaomi's own landing page with no input/output split), this was the only source with real per-token-type precision. Still UNPRICED below anyway -- see next paragraph, the model doesn't work right now regardless of its rate card.
  *
  * mimo-v2-pro: CONFIRMED BROKEN (2026-07-27 live test, 10/10 requests over
  * a 7-minute stress run all returned HTTP 500 "Internal server error",
@@ -70,21 +74,23 @@ const MODELS: Array<{
   displayLabel: string;
   inputPerMTok: number;
   outputPerMTok: number;
+  cacheReadPerMTok?: number;
   priced: boolean;
   lastTestStatus?: string;
   lastTestError?: string;
 }> = [
-  { modelId: 'hy3', displayLabel: 'Hunyuan 3', inputPerMTok: 0.5, outputPerMTok: 2.0, priced: true },
-  { modelId: 'grok-4.5', displayLabel: 'Grok 4.5', inputPerMTok: 3.0, outputPerMTok: 15.0, priced: true },
-  { modelId: 'kimi-k3', displayLabel: 'Kimi K3', inputPerMTok: 4.0, outputPerMTok: 10.0, priced: true },
+  { modelId: 'hy3', displayLabel: 'Hunyuan 3', inputPerMTok: 0.14, outputPerMTok: 0.56, priced: true },
+  { modelId: 'grok-4.5', displayLabel: 'Grok 4.5', inputPerMTok: 2.0, outputPerMTok: 6.0, cacheReadPerMTok: 0.3, priced: true },
+  { modelId: 'kimi-k3', displayLabel: 'Kimi K3', inputPerMTok: 3.0, outputPerMTok: 15.0, cacheReadPerMTok: 0.3, priced: true },
   {
     modelId: 'mimo-v2-pro',
     displayLabel: 'MiMo v2 Pro',
-    inputPerMTok: 0,
-    outputPerMTok: 0,
+    inputPerMTok: 0.435,
+    outputPerMTok: 0.87,
+    cacheReadPerMTok: 0.0036,
     priced: false,
     lastTestStatus: 'error',
-    lastTestError: 'HTTP 500 Internal server error on every call (confirmed live 2026-07-27, 10/10 requests over a 7-minute test) -- broken on Opencode Zen\u2019s side, not an Entry-side config issue.',
+    lastTestError: 'HTTP 500 Internal server error on every call (confirmed live 2026-07-27, 10/10 requests over a 7-minute test) -- broken on Opencode Zen\u2019s side, not an Entry-side config issue. Real market rate ($0.435/$0.87/MTok, pi.dev) is recorded above for reference but priced:false so it never actually bills until a real successful call exists to justify it.',
   },
 ];
 
@@ -163,22 +169,16 @@ export async function POST(req: Request) {
       const existingRate = await prisma.modelPriceRate.findFirst({
         where: { modelPattern: m.modelId, effectiveFrom },
       });
+      const rateData = {
+        inputPerMTok: m.inputPerMTok,
+        outputPerMTok: m.outputPerMTok,
+        cacheWritePerMTok: 0,
+        cacheReadPerMTok: m.cacheReadPerMTok ?? 0,
+      };
       if (existingRate) {
-        await prisma.modelPriceRate.update({
-          where: { id: existingRate.id },
-          data: { inputPerMTok: m.inputPerMTok, outputPerMTok: m.outputPerMTok, cacheWritePerMTok: 0, cacheReadPerMTok: 0 },
-        });
+        await prisma.modelPriceRate.update({ where: { id: existingRate.id }, data: rateData });
       } else {
-        await prisma.modelPriceRate.create({
-          data: {
-            modelPattern: m.modelId,
-            effectiveFrom,
-            inputPerMTok: m.inputPerMTok,
-            outputPerMTok: m.outputPerMTok,
-            cacheWritePerMTok: 0,
-            cacheReadPerMTok: 0,
-          },
-        });
+        await prisma.modelPriceRate.create({ data: { modelPattern: m.modelId, effectiveFrom, ...rateData } });
       }
     }
     modelResults.push({ modelId: m.modelId, modelRowId: row.id, priced: m.priced });
