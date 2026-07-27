@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { withApiErrorHandling } from '@/lib/api-error';
+import { getAllSharedSpendUsd, SHARED_MONTHLY_CAP_USD } from '@entry/db/usage-metering';
 
 export const dynamic = 'force-dynamic';
 
@@ -154,20 +155,34 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
     })
     .sort((a, b) => b.totalTokens - a.totalTokens);
 
+  // Per-provider breakdown is still useful detail ("which shared model did
+  // MY usage come from"), scoped to this user's own events like the rest
+  // of this page -- but it is no longer what gates or headlines the cap.
   const sharedProviders = sharedProviderRows.map(p => {
     const spentUsd = byModel
       .filter(m => m.providerKind === 'shared' && m.provider === `shared:${p.id}`)
       .reduce((a, m) => a + m.costUsd, 0);
-    const capUsd = p.spendCapUsd != null ? Number(p.spendCapUsd) : null;
-    return {
-      providerId: p.id,
-      label: p.label,
-      capUsd,
-      spentUsd,
-      remainingUsd: capUsd != null ? Math.max(0, capUsd - spentUsd) : null,
-      percentUsed: capUsd != null && capUsd > 0 ? Math.min(100, (spentUsd / capUsd) * 100) : null,
-    };
+    return { providerId: p.id, label: p.label, spentUsd };
   });
+
+  // ONE COMBINED "MONTHLY USAGE" POOL (owner ask 2026-07-27: rename from
+  // a provider-specific "$20 hnsec" label, apply the SAME cap to every
+  // shared/free model together, decrease to $10). PLATFORM-WIDE, not
+  // scoped to this one user -- matches exactly what actually gates
+  // requests in direct/chat/route.ts (getAllSharedSpendUsd has no
+  // per-user filter, since the whole point is protecting the platform's
+  // own relay budget) -- showing only "my own slice" here would make the
+  // bar look artificially empty for one user while the shared pool is
+  // actually near/at the real cap from everyone else's usage combined.
+  const monthlySpentUsd = sharedProviderRows.length ? await getAllSharedSpendUsd() : 0;
+  const monthlyUsage = {
+    label: 'Monthly usage',
+    capUsd: SHARED_MONTHLY_CAP_USD,
+    spentUsd: monthlySpentUsd,
+    remainingUsd: Math.max(0, SHARED_MONTHLY_CAP_USD - monthlySpentUsd),
+    percentUsed: Math.min(100, (monthlySpentUsd / SHARED_MONTHLY_CAP_USD) * 100),
+    appliesTo: sharedProviders.map(p => p.label),
+  };
 
   // 14-day daily trend -- cost + tokens per calendar day, oldest first, so
   // the UI can render a simple bar chart without doing any date math
@@ -220,6 +235,7 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
       : 0;
 
   return NextResponse.json({
+    monthlyUsage,
     today: sum(todayRows),
     month: sum(monthRows),
     allTime: allTimeTotals,

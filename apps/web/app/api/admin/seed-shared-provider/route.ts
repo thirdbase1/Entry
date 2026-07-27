@@ -40,7 +40,7 @@ import { encryptApiKey } from '@entry/db';
 import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
 const PROVIDER_LABEL = 'HCNSec Relay';
-const SPEND_CAP_USD = 20;
+const SPEND_CAP_USD = 10; // legacy/informational only (2026-07-27): real enforcement now uses the combined SHARED_MONTHLY_CAP_USD in usage-metering.ts, not this per-row field
 
 // modelPattern here is the ALIAS (what the model picker/chat actually
 // sends as `model`), but the per-1M rates are the REAL backend model's

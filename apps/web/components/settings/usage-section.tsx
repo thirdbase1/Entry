@@ -47,16 +47,27 @@ interface TrendDay extends Totals {
   date: string;
 }
 
-interface SharedProviderCap {
+interface SharedProviderSpend {
   providerId: string;
   label: string;
-  capUsd: number | null;
   spentUsd: number;
-  remainingUsd: number | null;
-  percentUsed: number | null;
+}
+
+/** Single combined pool across every shared/free model (2026-07-27:
+ *  renamed from a provider-specific "$20 hnsec" cap to one "Monthly
+ *  usage" budget shared by HCNSec, freemodel.dev, and any future
+ *  platform relay together). */
+interface MonthlyUsage {
+  label: string;
+  capUsd: number;
+  spentUsd: number;
+  remainingUsd: number;
+  percentUsed: number;
+  appliesTo: string[];
 }
 
 interface UsageSummary {
+  monthlyUsage: MonthlyUsage;
   today: Totals;
   month: Totals;
   allTime: Totals;
@@ -64,7 +75,7 @@ interface UsageSummary {
   byModel: ModelRow[];
   bySource: SourceRow[];
   dailyTrend: TrendDay[];
-  sharedProviders: SharedProviderCap[];
+  sharedProviders: SharedProviderSpend[];
   generatedAt: string;
 }
 
@@ -235,7 +246,7 @@ export function UsageSection() {
         <StatCard
           label="All time tokens"
           value={fmtTokens(data.allTime.totalTokens)}
-          sub={`${fmtTokens(data.allTime.inputTokens)} in · ${fmtTokens(data.allTime.outputTokens)} out · ${fmtTokens(data.allTime.cacheCreationTokens + data.allTime.cacheReadTokens)} cached`}
+          sub={`${fmtTokens(data.allTime.inputTokens)} in · ${fmtTokens(data.allTime.outputTokens)} out · ${fmtTokens(data.allTime.cacheCreationTokens)} cache write · ${fmtTokens(data.allTime.cacheReadTokens)} cache read`}
         />
       </div>
 
@@ -252,30 +263,36 @@ export function UsageSection() {
 
       <TrendChart days={data.dailyTrend} />
 
-      {data.sharedProviders.length > 0 && (
+      {data.monthlyUsage && (
         <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium text-foreground">Shared provider budgets</span>
-          {data.sharedProviders.map(p => (
-            <div key={p.providerId} className="border rounded-lg p-4 bg-card flex flex-col gap-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-medium text-foreground">{p.label}</span>
-                <span className="text-muted-foreground">
-                  {fmtUsd(p.spentUsd)} {p.capUsd != null ? `of ${fmtUsd(p.capUsd)}` : '(uncapped)'}
-                </span>
-              </div>
-              {p.percentUsed != null && (
-                <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                  <div
-                    className={cn('h-full rounded-full transition-all', p.percentUsed >= 100 ? 'bg-destructive' : p.percentUsed >= 80 ? 'bg-amber-500' : 'bg-primary')}
-                    style={{ width: `${p.percentUsed}%` }}
-                  />
-                </div>
-              )}
-              {p.percentUsed != null && p.percentUsed >= 100 && (
-                <span className="text-xs text-destructive">Budget exhausted — this provider's models are now blocked until the cap is raised.</span>
-              )}
+          <span className="text-sm font-medium text-foreground">Monthly usage</span>
+          <div className="border rounded-lg p-4 bg-card flex flex-col gap-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="font-medium text-foreground">
+                {data.monthlyUsage.label}
+                {data.monthlyUsage.appliesTo.length > 0 && (
+                  <span className="text-muted-foreground font-normal"> · {data.monthlyUsage.appliesTo.join(', ')}</span>
+                )}
+              </span>
+              <span className="text-muted-foreground">
+                {fmtUsd(data.monthlyUsage.spentUsd)} of {fmtUsd(data.monthlyUsage.capUsd)}
+              </span>
             </div>
-          ))}
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className={cn(
+                  'h-full rounded-full transition-all',
+                  data.monthlyUsage.percentUsed >= 100 ? 'bg-destructive' : data.monthlyUsage.percentUsed >= 80 ? 'bg-amber-500' : 'bg-primary'
+                )}
+                style={{ width: `${data.monthlyUsage.percentUsed}%` }}
+              />
+            </div>
+            {data.monthlyUsage.percentUsed >= 100 ? (
+              <span className="text-xs text-destructive">Monthly budget exhausted — every free/shared model is blocked until it resets on the 1st.</span>
+            ) : (
+              <span className="text-xs text-muted-foreground">Resets on the 1st of every month · {fmtUsd(data.monthlyUsage.remainingUsd)} remaining</span>
+            )}
+          </div>
         </div>
       )}
 
@@ -295,7 +312,8 @@ export function UsageSection() {
                     <th className="px-3 py-2 font-medium text-right">Calls</th>
                     <th className="px-3 py-2 font-medium text-right">Input</th>
                     <th className="px-3 py-2 font-medium text-right">Output</th>
-                    <th className="px-3 py-2 font-medium text-right">Cache</th>
+                    <th className="px-3 py-2 font-medium text-right">Cache write</th>
+                    <th className="px-3 py-2 font-medium text-right">Cache read</th>
                     <th className="px-3 py-2 font-medium text-right">Total tokens</th>
                     <th className="px-3 py-2 font-medium text-right">Cost</th>
                     <th className="px-3 py-2 font-medium text-right">Avg/call</th>
@@ -320,8 +338,9 @@ export function UsageSection() {
                         </td>
                         <td className="px-3 py-2 text-right text-muted-foreground">{fmtTokens(row.inputTokens)}</td>
                         <td className="px-3 py-2 text-right text-muted-foreground">{fmtTokens(row.outputTokens)}</td>
+                        <td className="px-3 py-2 text-right text-muted-foreground">{fmtTokens(row.cacheCreationTokens)}</td>
                         <td className="px-3 py-2 text-right text-muted-foreground" title={`Cache hit rate: ${fmtPct(row.cacheHitRate)}`}>
-                          {fmtTokens(row.cacheCreationTokens + row.cacheReadTokens)}
+                          {fmtTokens(row.cacheReadTokens)}
                         </td>
                         <td className="px-3 py-2 text-right text-foreground font-medium">{fmtTokens(row.totalTokens)}</td>
                         <td className="px-3 py-2 text-right text-foreground">

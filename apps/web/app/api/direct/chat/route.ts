@@ -87,7 +87,7 @@ import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
 import { captureIncrementalSnapshot, captureTurnVersion } from '@entry/db/chat-versioning';
-import { recordUsageEvent, getProviderSpendUsd } from '@entry/db/usage-metering';
+import { recordUsageEvent, getAllSharedSpendUsd, SHARED_MONTHLY_CAP_USD } from '@entry/db/usage-metering';
 import { withApiErrorHandling } from '@/lib/api-error';
 import { resolveByokModel, pickFallbackByokModel } from '@/lib/byok/resolve-model';
 import { getProviderCooldown, markProviderCooldown } from '@/lib/byok/provider-cooldown';
@@ -352,21 +352,27 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     throw err;
   }
 
-  // SHARED-PROVIDER SPEND CAP (2026-07-26, owner ask: a platform-provided
-  // relay key must never spend past its configured cap). Checked here --
-  // AFTER resolution/cooldown-fallback, BEFORE any streaming starts -- so
-  // a request that would push spend over the cap is rejected cleanly
-  // up front instead of after already burning tokens. The cap is read
-  // fresh from the ledger every turn (never a separate counter that could
-  // drift): see getProviderSpendUsd's own comment for why it's a live SUM
-  // over UsageEvent, not a cached running total.
-  if (isByokResolved(resolved) && resolved.isShared && resolved.spendCapUsd != null) {
-    const spentSoFar = await getProviderSpendUsd(resolved.providerId);
-    if (spentSoFar >= resolved.spendCapUsd) {
+  // MONTHLY USAGE CAP -- ONE COMBINED POOL ACROSS EVERY SHARED PROVIDER
+  // (2026-07-27, owner ask: "the $20 usage is for only hcnsec, do it to
+  // be for both free and hcnsec" + "decrease usage to $10" + "change
+  // that place name to monthly usage"). Any platform-provided relay
+  // (HCNSec, freemodel.dev, ...) now draws against the SAME single
+  // monthly budget instead of each having its own separate cap -- so
+  // hitting the cap on one shared model blocks ALL shared models until
+  // the calendar month rolls over, not just that one. Checked here --
+  // AFTER resolution/cooldown-fallback, BEFORE any streaming starts --
+  // so a request that would push spend over the cap is rejected cleanly
+  // up front instead of after already burning tokens. Read fresh from
+  // the ledger every turn (never a separate counter that could drift):
+  // see getAllSharedSpendUsd's own comment for why it's a live SUM over
+  // UsageEvent, not a cached running total.
+  if (isByokResolved(resolved) && resolved.isShared) {
+    const spentSoFar = await getAllSharedSpendUsd();
+    if (spentSoFar >= SHARED_MONTHLY_CAP_USD) {
       await preSave;
       endTurn();
       throw new Error(
-        `This model's shared budget is exhausted ($${spentSoFar.toFixed(2)} of $${resolved.spendCapUsd.toFixed(2)} spent) — pick a different model.`
+        `This month's shared usage budget is exhausted ($${spentSoFar.toFixed(2)} of $${SHARED_MONTHLY_CAP_USD.toFixed(2)} spent across all free/shared models) — pick a BYOK (your own key) model, or wait for next month's reset.`
       );
     }
   }

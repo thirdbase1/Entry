@@ -69,6 +69,29 @@ export async function GET(req: NextRequest) {
     return res;
   };
 
+  // "UPDATE INSTALLATION" REDIRECT FIX (2026-07-27, owner report: "when
+  // I updated it didn't redirect back"). GitHub sends a user straight to
+  // this callback (via the App's Setup URL) when they revisit an
+  // EXISTING installation from github.com itself to add/remove repos --
+  // that visit never went through our /start route at all, so there is
+  // no `github_oauth_state` cookie, no `code`, and no `state` param; it's
+  // just `installation_id` + `setup_action=update`. The old code treated
+  // any missing code/state as a hard "invalid_state" error and bounced
+  // the user to a dead end, even though nothing was actually wrong --
+  // no NEW OAuth grant is needed here (the user already has a valid
+  // token in the vault from their original connect), only the
+  // (possibly changed) installation_id needs persisting. Handle this as
+  // its own case, before the OAuth-state check, and only fall through to
+  // requiring a real code+state when this ISN'T a plain update visit.
+  if (setupAction === 'update' && installationId && !code) {
+    if (session) {
+      await prisma.user
+        .update({ where: { id: session.user.id }, data: { githubInstallationId: installationId } })
+        .catch(err => console.error('[github-oauth callback] failed to persist installationId on update', session.user.id, err));
+    }
+    return clearCookies(NextResponse.redirect(resultUrl('connected')));
+  }
+
   if (!code || !state || !cookieState || state !== cookieState) {
     return clearCookies(NextResponse.redirect(resultUrl('error', 'invalid_state')));
   }

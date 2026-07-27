@@ -42,7 +42,7 @@ const PROVIDER_LABEL = 'freemodel.dev';
 // platform-paid relay) since these Claude models bill at real, fairly
 // high per-token rates. Easy to raise/remove later via Settings or a
 // follow-up seed run -- flagged to the owner in the response body too.
-const SPEND_CAP_USD = 20;
+const SPEND_CAP_USD = 10; // legacy/informational only (2026-07-27): real enforcement now uses the combined SHARED_MONTHLY_CAP_USD in usage-metering.ts, not this per-row field
 
 const MODELS = [
   { modelId: 'claude-fable-5', displayLabel: 'Claude Fable 5' },

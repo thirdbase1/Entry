@@ -95,6 +95,35 @@ export async function getProviderSpendUsd(providerId: string): Promise<number> {
 }
 
 /**
+ * ONE COMBINED POOL ACROSS ALL SHARED PROVIDERS (owner ask 2026-07-27:
+ * "the $20 usage is for only hcnsec model, do it to be for both free and
+ * hcnsec" -- HCNSec and freemodel.dev must draw down the SAME single
+ * monthly budget instead of each having its own separate cap). Renamed
+ * user-facing label is "Monthly usage" everywhere (route.ts's gate error
+ * message + the Settings > Usage card) -- this constant is now the ONE
+ * source of truth for that cap, not each UserModelProvider row's own
+ * `spendCapUsd` column (kept populated for informational/legacy display
+ * only, no longer read for enforcement).
+ *
+ * DECREASED to $10 (owner ask, same message: "decrease usage to $10").
+ */
+export const SHARED_MONTHLY_CAP_USD = 10;
+
+/** Same "live SUM over the ledger, current calendar month" shape as
+ *  getProviderSpendUsd above, but across EVERY isShared provider's usage
+ *  combined (`provider LIKE 'shared:%'`) -- this is what actually gates
+ *  and displays the single combined "Monthly usage" cap now. */
+export async function getAllSharedSpendUsd(): Promise<number> {
+  const now = new Date();
+  const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+  const result = await prisma.usageEvent.aggregate({
+    where: { provider: { startsWith: 'shared:' }, createdAt: { gte: startOfMonth } },
+    _sum: { actualCostUsd: true },
+  });
+  return Number(result._sum.actualCostUsd ?? 0);
+}
+
+/**
  * Latest rate row effective at `at` whose modelPattern matches `model`.
  * Comparison is done on the segment after the last "/" so
  * "claude-sonnet-4-5" converges with an "anthropic/claude-sonnet-4-5"
