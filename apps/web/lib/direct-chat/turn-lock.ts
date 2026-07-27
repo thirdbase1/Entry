@@ -125,6 +125,39 @@ export function startTurnHeartbeat(chatId: string, turnId: string): () => void {
 // turn's stream is now reclaimed within this window instead of never.
 const STREAM_SAFETY_NET_TTL_SECONDS = 30 * 60; // 30m, comfortably above MAX_HEARTBEAT_MS (25m)
 
+// CROSS-TURN STREAM BLEED FIX (2026-07-27, real bug, owner report:
+// "it's showing previous model response [after] reconnect sync poll" --
+// confirmed by reading this file's stream key scheme end to end, not
+// assumed. `streamKey(chatId)` is keyed by chatId ONLY -- every turn for
+// the same chat appends to the exact SAME Redis Stream, forever (only a
+// rolling TTL, never a clear/trim on a NEW turn starting). `readTurnStream`
+// has no per-turn filter either: it yields every entry in stream order
+// and stops at the FIRST end-marker it finds. So the SECOND (or any
+// later) message in a chat starts a reconnect scan from lastId='0' (no
+// watermark yet for the brand-new turnId) straight into a stream that
+// still holds turn #1's entire already-finished reply + end-marker --
+// any reconnect mid-turn-#2-or-later (the periodic recovery poll, a
+// mount-time resumeStream(), a dropped connection) replays turn #1's old
+// content and then STOPS at turn #1's own end-marker, never reaching the
+// actual current turn's chunks at all. Exactly "previous model's
+// response" reappearing on reconnect.
+//
+// FIX: wipe the stream key the moment a NEW turn actually starts (right
+// after this exact turnId's lock is freshly acquired in route.ts, before
+// any chunk for it is published) so each turn's mirror always starts
+// empty. Belt-and-suspenders: readTurnStream below also now skips any
+// entry whose tagged turnId doesn't match the turnId it was asked to
+// replay, so even a reset that racingly loses to an in-flight publish
+// from the tail end of a just-finished prior turn can never leak into a
+// new one's reconnect.
+export async function resetTurnStream(chatId: string): Promise<void> {
+  try {
+    await getRawRedis().del(streamKey(chatId));
+  } catch (err) {
+    console.error('[turn-stream] reset failed', chatId, err);
+  }
+}
+
 export async function publishTurnChunk(chatId: string, turnId: string, chunk: unknown): Promise<void> {
   try {
     // NO MAXLEN TRIM (2026-07-26, real correctness gap found while
@@ -254,6 +287,12 @@ export async function* readTurnStream(
 ): AsyncGenerator<{ chunk: unknown; turnId: string }> {
   const redis = getRawRedis().duplicate();
   const key = streamKey(chatId);
+  // Snapshot the turnId this call is actually meant to replay ONCE, up
+  // front -- see the cross-turn stream bleed fix's header comment above.
+  // Any entry belonging to a DIFFERENT turnId (a straggler from a prior
+  // turn that hadn't been cleared/reset yet) is simply skipped, never
+  // yielded and never treated as this turn's own end-marker.
+  const targetTurnId = await getActiveTurnId(chatId);
   // Best-effort turnId for the watermark lookup: acquireTurnLock/
   // getActiveTurnId already scope one turnId per active lock, so read it
   // once up front -- if it's ever unavailable (lock just expired between
@@ -331,6 +370,13 @@ export async function* readTurnStream(
         // worst case is a future reconnect re-sends a few already-seen
         // chunks (harmless -- isSafeToAdopt/the DB poll already tolerate
         // that), never that it skips content that never made it out.
+        if (targetTurnId && turnId && turnId !== targetTurnId) {
+          // Stale entry from a different (older, or -- in a race -- even
+          // a not-yet-started newer) turn on this same chatId's shared
+          // stream key: never yield it, never let it satisfy this call's
+          // end-marker check.
+          continue;
+        }
         if (turnId) turnReplayWatermark.set(watermarkKey(chatId, turnId), id);
         if ((parsed as { type?: string })?.type === TURN_END_MARKER) {
           if (turnId) {

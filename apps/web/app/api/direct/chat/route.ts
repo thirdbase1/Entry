@@ -142,7 +142,7 @@ import { agentDelegate } from '@entry/agent/tool-impls/agent';
 import { rememberAboutUserTool } from '@entry/agent/tool-impls/remember_about_user';
 import { getWorkingMemory } from '@entry/agent/lib/working-memory';
 import { z } from 'zod';
-import { acquireTurnLock, releaseTurnLock, startTurnHeartbeat, publishTurnChunk, publishTurnEnd } from '@/lib/direct-chat/turn-lock';
+import { acquireTurnLock, releaseTurnLock, startTurnHeartbeat, publishTurnChunk, publishTurnEnd, resetTurnStream } from '@/lib/direct-chat/turn-lock';
 
 // ENABLED (2026-07-15, user request): direct-chat now wires the real
 // `agent` (sub-agent delegation) tool into its own `tools` object below,
@@ -204,6 +204,12 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       { status: 409 }
     );
   }
+  // CROSS-TURN STREAM BLEED FIX (2026-07-27) -- see turn-lock.ts's
+  // resetTurnStream header comment for the full bug this closes. Must
+  // run before this turn's own model call ever publishes its first
+  // chunk, so a reconnect mid-THIS-turn can never see a prior turn's
+  // leftover content in this chat's shared stream key.
+  void resetTurnStream(chatId);
   const stopTurnHeartbeat = startTurnHeartbeat(chatId, turnId);
   // Single place every exit path (normal finish, thrown error, refusal
   // fallback) funnels through to release the lock + stop the heartbeat +
