@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { ChatInterface } from '@/components/chat/chat-interface';
+import { useGithubPicker } from '@/store/github-picker';
 
 export default function NewChatPage() {
   const searchParams = useSearchParams();
@@ -19,6 +20,18 @@ export default function NewChatPage() {
       model: searchParams.get('model') ?? undefined,
     };
   }
+
+  // Auto-open the GitHub repo picker when GitHub's update-repo-access
+  // redirect sends us back with ?github_picker=1. The callback's
+  // setup_action=update handler redirects to /chats?github_picker=1 so
+  // the user lands right back in the picker to select their newly-added
+  // repo without any extra clicks.
+  const openGithubPicker = useGithubPicker(s => s.openPicker);
+  useEffect(() => {
+    if (searchParams.get('github_picker') === '1') {
+      openGithubPicker();
+    }
+  }, [searchParams, openGithubPicker]);
 
   // BUG (2026-07-15, user-reported "I select a model, reload the page, it
   // auto-switches back to [some other model]"): `?model=` here was meant

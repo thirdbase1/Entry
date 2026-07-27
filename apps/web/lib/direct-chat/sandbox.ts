@@ -68,7 +68,7 @@ function resolveApiKey(): string {
 // "sandbox internals" package between them, not because the policy should
 // ever differ. Keep these two in sync if either changes.
 const RETRY_MAX_ATTEMPTS = 10;
-const RETRY_BASE_DELAY_MS = 500;
+const RETRY_BASE_DELAY_MS = 300;
 const RETRY_MAX_DELAY_MS = 8_000;
 
 function isRetryableE2BError(err: unknown): boolean {
@@ -94,7 +94,16 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
   throw lastErr;
 }
 
-const IDLE_TIMEOUT_MS = 45 * 60 * 1000; // 45 min — generous for a long back-and-forth turn, matches the old Vercel config
+// REDUCED (2026-07-27, "sandbox we are using ... it delete everything
+// after every agent turn"): was 45 min, but E2B's `timeoutMs` is a ONE-SHOT
+// wall-clock TTL from creation/connect time, NOT an idle timeout (confirmed
+// in e2b's own docs — see e2b-backend.ts's refreshTimeout comment). A 45-min
+// TTL without per-command refresh means a long turn (>45 min, well within
+// the SOFT_DEADLINE_MS budget) would hit the sandbox's TTL mid-tool-call,
+// pausing/killing it. Reducing to 15 min + refreshing on every command
+// (see refreshTimeout below) means active sandboxes stay alive indefinitely
+// while abandoned ones free up after just 15 min.
+const IDLE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — refreshed on every command
 // Fallback base template + inline bootstrap, used ONLY if eve's root-agent
 // path has genuinely never prewarmed its own snapshot yet (fresh env,
 // nothing in SandboxTemplate). Mirrors apps/agent/agent/sandbox/sandbox.ts's
@@ -218,9 +227,21 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
   }
 
   const id = sandbox.sandboxId;
+  // REFRESH ON EVERY COMMAND (2026-07-27, "sandbox delete everything
+  // after every agent turn"): E2B's `timeoutMs` is a ONE-SHOT wall-clock
+  // TTL, not an idle timeout — without refreshing it, the sandbox gets
+  // paused/killed mid-turn once the original TTL expires. This matches
+  // eve's own e2b-backend.ts's `refreshTimeout()` pattern exactly.
+  // Best-effort — a failed refresh shouldn't fail the actual command.
+  const refreshTimeout = () => {
+    void sandbox.setTimeout(IDLE_TIMEOUT_MS).catch(() => {});
+  };
   return {
     id,
     async run({ command, env, signal }) {
+      // Refresh the sandbox's TTL on every command so it never expires
+      // mid-turn, even on very long turns (>15 min).
+      refreshTimeout();
       // 5 min per-command ceiling is a server-side SAFETY NET only now --
       // in practice the caller's own signal (bash.ts's 120s
       // withTimeoutSignal) fires first and actually cancels the in-flight

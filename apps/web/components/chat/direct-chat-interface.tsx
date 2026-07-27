@@ -127,11 +127,21 @@ function isSafeToAdopt(persisted: UIMessage[], current: UIMessage[]): boolean {
 // makes every valid transition visible in ONE place instead of scattered
 // ad-hoc `setPendingTurn()`/`setTurnError()` calls spread across 1000+
 // lines -- and one mirror ref replaces two.
-type TurnLifecycleState = { pendingTurn: boolean; turnError: string | null };
+// `lastResumeAttemptMs` is a mutable throttle bookkeeping field bolted
+// onto the ref's *current* object directly (not through the reducer --
+// it's not user-visible state, just an internal timestamp guarding
+// resume-attempt spam), so it's declared as optional here instead of a
+// reducer action. FIXED (2026-07-27, PR review): this field was being
+// read/written both with and without `as any` casts inconsistently,
+// which only happened to typecheck at the call sites that used the
+// cast -- declaring it for real here makes every access, cast or not,
+// type-check correctly.
+type TurnLifecycleState = { pendingTurn: boolean; turnError: string | null; isReconnecting: boolean; lastResumeAttemptMs?: number };
 type TurnLifecycleAction =
   | { type: 'SET_PENDING'; value: boolean }
   | { type: 'SET_ERROR'; message: string }
   | { type: 'CLEAR_ERROR' }
+  | { type: 'SET_RECONNECTING'; value: boolean }
   // A reconnect poll found genuinely newer content: adopt both the busy
   // state (still active or not) and clear any stale error atomically --
   // splitting this into two dispatches would let a render land in
@@ -149,13 +159,28 @@ function turnLifecycleReducer(state: TurnLifecycleState, action: TurnLifecycleAc
     case 'SET_PENDING':
       return state.pendingTurn === action.value ? state : { ...state, pendingTurn: action.value };
     case 'SET_ERROR':
-      return { ...state, turnError: action.message };
+      // CLEAR pendingTurn here (2026-07-27): SET_ERROR is now ONLY called
+      // from onSend's .catch handler (sendWithRetry failed completely),
+      // NOT from onError (which uses SET_RECONNECTING instead). When the
+      // SEND itself fails, there's no background turn running — the
+      // request never reached the server — so clearing pendingTurn is
+      // correct and unblocks the user to retry. The stream-drop case
+      // (server still running) uses SET_RECONNECTING which keeps
+      // pendingTurn true.
+      return { ...state, turnError: action.message, pendingTurn: false, isReconnecting: false };
+    case 'SET_RECONNECTING':
+      // When reconnecting, keep pendingTurn true so the send button stays
+      // busy (not white/idle) — the model IS still working, we're just
+      // reattaching.
+      if (action.value === state.isReconnecting) return state;
+      return { ...state, isReconnecting: action.value, pendingTurn: action.value ? true : state.pendingTurn };
     case 'CLEAR_ERROR':
-      return state.turnError === null ? state : { ...state, turnError: null };
+      if (state.turnError === null && !state.isReconnecting) return state;
+      return { ...state, turnError: null, isReconnecting: false };
     case 'RECONNECT_PROGRESS':
-      return { pendingTurn: action.stillActive, turnError: null };
+      return { pendingTurn: action.stillActive, turnError: null, isReconnecting: false };
     case 'RECONNECT_GAVE_UP':
-      return { pendingTurn: false, turnError: action.message ?? state.turnError };
+      return { pendingTurn: false, turnError: action.message ?? state.turnError, isReconnecting: false };
     default:
       return state;
   }
@@ -221,12 +246,13 @@ function findDirectConnectResolution(messages: any[], afterIndex: number, servic
   return undefined;
 }
 
-function ThinkingIndicator() {
+function ThinkingIndicator({ label }: { label?: string }) {
   return (
     <div className="flex items-center gap-1.5 text-sm text-muted-foreground py-1">
       <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:-0.2s]" />
       <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:-0.1s]" />
       <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60 animate-bounce" />
+      {label && <span className="ml-1 text-xs">{label}</span>}
     </div>
   );
 }
@@ -334,15 +360,26 @@ function DirectChatSession({
   const [turnLifecycle, dispatchTurn] = useReducer(turnLifecycleReducer, undefined, () => {
     const last = initialMessages[initialMessages.length - 1];
     const pendingTurn = initialMessages.length > 0 && (!last || last.role === 'user');
-    return { pendingTurn, turnError: null };
+    return { pendingTurn, turnError: null, isReconnecting: false };
   });
-  const { pendingTurn, turnError } = turnLifecycle;
+  const { pendingTurn, turnError, isReconnecting } = turnLifecycle;
   const pollIdRef = useRef<number | undefined>(undefined);
   // Always-fresh mirror for the recovery-poll effect below, whose
   // `tryRecover` closures only get recreated when [sessionId, chat.id,
   // chat.status] change -- reading `turnLifecycle` directly inside an old
   // closure could see an already-stale value otherwise.
   const turnLifecycleRef = useRef(turnLifecycle);
+  // RE-ENTRANCY GUARD for onError: resumeStream() called inside onError's
+  // retry loop can itself trigger onError again (the AI SDK calls onError
+  // when the reattached stream errors). Without this guard, each retry
+  // creates a NEW retry loop, overlapping with the first — up to 4 nested
+  // loops, each making 4 attempts = 16 concurrent resumeStream() calls.
+  const resumingRef = useRef(false);
+  // Track when resumeStream was last attempted to avoid a failure cycle
+  // (see recovery poll's 30s cooldown comment).
+  if (!('lastResumeAttemptMs' in turnLifecycleRef.current)) {
+    turnLifecycleRef.current.lastResumeAttemptMs = 0;
+  }
   useEffect(() => {
     turnLifecycleRef.current = turnLifecycle;
   }, [turnLifecycle]);
@@ -460,7 +497,17 @@ function DirectChatSession({
       // surfacing a scary error for what the user correctly expects to
       // just keep working.
       if (error instanceof Error && error.message.includes('turn_in_progress')) {
-        void chat.resumeStream();
+        // Keep the UI locked and show "Reconnecting…" — the turn is
+        // still running server-side, we just need to reattach.
+        dispatchTurn({ type: 'SET_PENDING', value: true });
+        dispatchTurn({ type: 'SET_RECONNECTING', value: true });
+        if (!resumingRef.current) {
+          resumingRef.current = true;
+          void (async () => {
+            try { await chat.resumeStream(); } catch {}
+            finally { resumingRef.current = false; dispatchTurn({ type: 'SET_RECONNECTING', value: false }); }
+          })();
+        }
         return;
       }
       // RECONNECT-FIRST (2026-07-26, real user report: "it stops in 30s
@@ -477,6 +524,22 @@ function DirectChatSession({
       // call unconditionally. Only surface a real error banner if the
       // reattach itself throws (the one condition that actually rules
       // out "still working, just a rough patch on this connection").
+      //
+      // VISUAL RECONNECT INDICATOR (2026-07-27, "why do the send button
+      // change to white like the model stop ... there is nothing visible
+      // showing connecting or reconnected"): set isReconnecting=true
+      // IMMEDIATELY so the UI shows "Reconnecting..." instead of the send
+      // button going white/idle. This keeps pendingTurn true (via the
+      // reducer) so the input stays locked, and the ThinkingIndicator
+      // below gains a "Reconnecting..." label.
+      // RE-ENTRANCY GUARD: if a previous onError retry loop is still
+      // running, don't start another one — the existing loop will handle
+      // reconnection. This prevents overlapping retry loops when
+      // resumeStream() triggers onError again.
+      if (resumingRef.current) return;
+      resumingRef.current = true;
+      dispatchTurn({ type: 'SET_RECONNECTING', value: true });
+      turnLifecycleRef.current.lastResumeAttemptMs = Date.now();
       void (async () => {
         // RETRY WITH BACKOFF (2026-07-26, continuation of the same
         // reconnect-first fix): a single resumeStream() attempt can
@@ -493,6 +556,8 @@ function DirectChatSession({
           if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
           try {
             await chat.resumeStream();
+            dispatchTurn({ type: 'SET_RECONNECTING', value: false });
+            resumingRef.current = false;
             return;
           } catch (resumeErr) {
             lastResumeErr = resumeErr;
@@ -500,10 +565,24 @@ function DirectChatSession({
         }
         console.error('[direct chat turn error] resumeStream retries exhausted', lastResumeErr);
         reportClientError(readableChatErrorMessage(error), { region: 'direct-chat-turn-error', stack: error instanceof Error ? error.stack : undefined });
-        dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(error) });
+        // ROOT CAUSE FIX (2026-07-27, "agent stops at 1 min but runs for
+        // 21 min in background"): don't show a scary error or clear
+        // pendingTurn. The turn is almost certainly still running server-
+        // side — the connection just dropped on THIS tab. Set
+        // SET_RECONNECTING instead so the UI shows "Reconnecting…" and
+        // the send button stays locked. The recovery poll (which runs
+        // every 800ms while pendingTurn is true) will catch up via DB
+        // snapshots — a simple GET that doesn't depend on streaming
+        // through the same proxy that just dropped the live stream.
+        resumingRef.current = false;
+        dispatchTurn({ type: 'SET_RECONNECTING', value: true });
       })();
     },
     async onFinish({ message }) {
+      // CLEAR pendingTurn (2026-07-27, "send button doesn't allow after
+      // agent finishes"): the turn is done — clear the busy state so the
+      // send button unlocks immediately, not after SETTLE_QUIET_MS (4.5s).
+      dispatchTurn({ type: 'SET_PENDING', value: false });
       dispatchTurn({ type: 'CLEAR_ERROR' });
       // SURFACED (2026-07-27, real report: "I selected a BYOK model but
       // the chat used HCNSec deepseek instead") -- that wasn't the
@@ -691,7 +770,13 @@ function DirectChatSession({
         // DB's content once the merge check below finds a real diff. This
         // is safe specifically BECAUSE it only runs when NOT actively
         // streaming -- there is no live writer to race against.
-        const STALL_MS = 20_000;
+        // DERIVED from timing.ts's WRITER_HEARTBEAT_MS (2026-07-27): must
+        // be at least 3x the heartbeat interval so a few missed heartbeats
+        // (Cloudflare buffering, a slow tick) don't trigger premature
+        // stall detection. With 5s heartbeats, 15s gives 3 full cycles of
+        // slack — same ratio as the old 24s/8s pairing, just tighter
+        // overall since the whole cascade is now faster and more responsive.
+        const STALL_MS = 15_000;
         const isStale = Date.now() - lastProgressRef.current.at > STALL_MS;
         if ((chat.status === 'streaming' || chat.status === 'submitted') && !isStale) return;
         try {
@@ -801,10 +886,16 @@ function DirectChatSession({
             //     flipped isBusy back to true for several seconds with no
             //     visible cause). Only keep the busy-lock when chat.status
             //     itself says work is still active.
-            const stillActivelyStreaming = chat.status === 'streaming' || chat.status === 'submitted';
+            // SMART stillActive (2026-07-27): use chat.status to decide.
+            // 'ready' = turn is genuinely done → unlock (the onFinish
+            // handler already cleared pendingTurn, this is just the
+            // version-card catch-up). 'error' = connection dropped, turn
+            // might still be running → keep locked. 'streaming'/
+            // 'submitted' = actively streaming → keep locked.
+            const stillActive = chat.status !== 'ready';
             lastGrowthAtRef.current = Date.now();
             chat.setMessages(persisted);
-            dispatchTurn({ type: 'RECONNECT_PROGRESS', stillActive: stillActivelyStreaming });
+            dispatchTurn({ type: 'RECONNECT_PROGRESS', stillActive });
             chat.clearError();
             // Mirror onFinish's own first-turn navigation: if the client's
             // onFinish never got to run (the stream broke before it could
@@ -857,18 +948,30 @@ function DirectChatSession({
               // again for it.
               if (stillActive && !(dbLooksComplete && !activelyStreamingNow)) {
                 dispatchTurn({ type: 'SET_PENDING', value: true });
-                // ACTIVELY REATTACH (2026-07-26, real user report: "if am
-                // online the stuff supposed to stream which is not
-                // doing"). Confirming the turn is still alive server-side
-                // isn't enough on its own -- it used to just flip the
-                // busy flag and wait for the next slow poll tick to
-                // eventually catch up via DB snapshots. If this browser
-                // isn't already mid-stream (chat.status !== 'streaming'/
-                // 'submitted'), actively pull the live Redis-mirrored
-                // stream now so tokens actually appear in real time
-                // instead of the tab just sitting there quietly "busy"
-                // until the turn finishes.
-                if (chat.status !== 'streaming' && chat.status !== 'submitted') {
+                // DB POLL IS THE PRIMARY RECOVERY MECHANISM (2026-07-27,
+                // root cause fix for "agent stops at 1 min but runs for
+                // 21 min in background"): do NOT call resumeStream() here
+                // anymore. The live stream and resumeStream() both go
+                // through the same proxy that just dropped the connection
+                // — calling resumeStream() repeatedly creates a failure
+                // cycle (resumeStream fails → onError fires → SET_ERROR
+                // → pendingTurn cleared → recovery poll slows down →
+                // rinse repeat). Instead, rely SOLELY on DB snapshot
+                // polling (this poll's own GET /api/direct/chat/{id}/
+                // snapshot), which is a simple non-streaming GET that
+                // works regardless of proxy buffering. Content will
+                // appear in 800ms increments — not as smooth as live
+                // streaming, but it NEVER silently stops while the
+                // server keeps working. Only try resumeStream() if we
+                // haven't tried it recently (30s cooldown) — a fresh
+                // page load or tab focus should still get a chance to
+                // attach to the live stream.
+                if (
+                  chat.status !== 'streaming' &&
+                  chat.status !== 'submitted' &&
+                  Date.now() - (turnLifecycleRef.current.lastResumeAttemptMs ?? 0) > 30_000
+                ) {
+                  turnLifecycleRef.current.lastResumeAttemptMs = Date.now();
                   void chat.resumeStream();
                 }
               } else {
@@ -978,8 +1081,20 @@ function DirectChatSession({
   // the assistant's reply actually has SOMETHING to show (text, a tool
   // call, or reasoning) — covers response latency, then gets out of the
   // way the instant real content starts arriving.
+  // FIXED (2026-07-27, "when I send a message it will automatically stop
+  // and not know the model is working in background. And nothing show
+  // for me to know"): the old condition only showed the thinking indicator
+  // when the LAST message was NOT an assistant message. But when sending
+  // a NEW message in an existing conversation, the last message IS an
+  // assistant from the PREVIOUS turn — so the indicator never showed
+  // until the new assistant message was created, leaving a gap where the
+  // user sees nothing happening. Now also shows when pendingTurn is true
+  // (the eager signal from onSend) even if the last message is an
+  // assistant reply from before. The `lastMessage.parts.length === 0`
+  // branch still covers the case where the assistant message was created
+  // but hasn't received any content yet.
   const showThinkingIndicator =
-    isBusy && (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.parts.length === 0);
+    isBusy && (pendingTurn || !lastMessage || lastMessage.role !== 'assistant' || lastMessage.parts.length === 0);
 
   // Turn timer (see turn-timer.tsx's file comment) -- live wall-clock
   // count from the moment this turn became busy (submitted or
@@ -1037,7 +1152,26 @@ function DirectChatSession({
         silentlyUpdateChatUrl(`/chats/${chat.id}`);
         useLibraryStore.getState().addLocalChat(chat.id, initialMessage.slice(0, 80) || null);
       }
-      void chat.sendMessage({ text: initialMessage });
+      // Same guards as onSend: eager busy signal, clear old errors,
+      // and retry on network failure (see onSend's own comments).
+      dispatchTurn({ type: 'SET_PENDING', value: true });
+      dispatchTurn({ type: 'CLEAR_ERROR' });
+      void sendWithRetry(() => chat.sendMessage({ text: initialMessage })).catch(err => {
+        if (err instanceof Error && err.message.includes('turn_in_progress')) {
+          dispatchTurn({ type: 'SET_PENDING', value: true });
+          if (!resumingRef.current) {
+            resumingRef.current = true;
+            void (async () => {
+              try { await chat.resumeStream(); } catch {}
+              finally { resumingRef.current = false; dispatchTurn({ type: 'SET_RECONNECTING', value: false }); }
+            })();
+          }
+          return;
+        }
+        console.error('[direct chat initial send failed]', err);
+        reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-initial-send-failed', stack: err instanceof Error ? err.stack : undefined });
+        dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(err) });
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMessage]);
@@ -1059,8 +1193,23 @@ function DirectChatSession({
       integrationCallback.result === 'connected'
         ? `Connected ${name}.`
         : `${name} connection failed${integrationCallback.errorMessage ? `: ${integrationCallback.errorMessage}` : '.'}`;
+    dispatchTurn({ type: 'SET_PENDING', value: true });
+    dispatchTurn({ type: 'CLEAR_ERROR' });
     void sendWithRetry(() => chat.sendMessage({ text })).catch(err => {
+      if (err instanceof Error && err.message.includes('turn_in_progress')) {
+        dispatchTurn({ type: 'SET_PENDING', value: true });
+        if (!resumingRef.current) {
+          resumingRef.current = true;
+          void (async () => {
+            try { await chat.resumeStream(); } catch {}
+            finally { resumingRef.current = false; dispatchTurn({ type: 'SET_RECONNECTING', value: false }); }
+          })();
+        }
+        return;
+      }
       console.error('[integration callback send failed]', err);
+      reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-integration-callback-failed', stack: err instanceof Error ? err.stack : undefined });
+      dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(err) });
     });
     if (sessionId) router.replace(`/chats/${sessionId}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1127,6 +1276,16 @@ function DirectChatSession({
     // Switching to a different model mid-chat is handled by the parent
     // (chat-interface.tsx remounts into the right path); here we only ever
     // send under the current byokModelId/requestedModel.
+    // INSTANT BUSY SIGNAL (2026-07-27, "when I send a message it will
+    // automatically stop and not know the model is working in background.
+    // And nothing show for me to know"): there's a gap between calling
+    // chat.sendMessage() and chat.status actually flipping to 'submitted'
+    // (the AI SDK's own internal async). During that gap, isBusy reads
+    // false, the ThinkingIndicator doesn't show, and the input looks
+    // free — exactly the "nothing shows" complaint. Set pendingTurn
+    // eagerly RIGHT HERE so the busy state is visible from the instant
+    // the user hits send, not after the next render cycle.
+    dispatchTurn({ type: 'SET_PENDING', value: true });
     dispatchTurn({ type: 'CLEAR_ERROR' });
 
     // INSTANT chat creation (2026-07-23, explicit user request: "the chat
@@ -1183,6 +1342,36 @@ function DirectChatSession({
     // server-side change needed for that part.
     const files = (opts?.images ?? []).map(img => ({ type: 'file' as const, mediaType: img.mediaType, url: img.url, filename: img.filename }));
     void sendWithRetry(() => chat.sendMessage({ text: input, files: files.length > 0 ? files : undefined }, { body: { disabledTools: opts?.disabledTools ?? [] } })).catch(err => {
+      // TURN_IN_PROGRESS HANDLING (2026-07-27, "I believe there is a big
+      // bug there" — the user was right): when the user clicks send while
+      // a previous turn's lock is still held (UI looks idle but server is
+      // still working), the 409 was silently swallowed — the user clicked
+      // send and NOTHING happened: no feedback, no reattachment, no error.
+      // Now: re-lock the send button (pendingTurn = true), show
+      // "Reconnecting…" so the user knows something is happening, and
+      // try to reattach to the still-running turn's stream. This is NOT
+      // a duplicate send — the server already rejected it.
+      if (err instanceof Error && err.message.includes('turn_in_progress')) {
+        dispatchTurn({ type: 'SET_PENDING', value: true });
+        dispatchTurn({ type: 'SET_RECONNECTING', value: true });
+        // Try to reattach to the live turn — idempotent (204 if already
+        // done), safe to call even if we just reattached.
+        if (!resumingRef.current) {
+          resumingRef.current = true;
+          void (async () => {
+            try {
+              await chat.resumeStream();
+            } catch {
+              // resumeStream failed — the recovery poll (800ms) will
+              // catch up via DB snapshots. Don't clear pendingTurn.
+            } finally {
+              resumingRef.current = false;
+              dispatchTurn({ type: 'SET_RECONNECTING', value: false });
+            }
+          })();
+        }
+        return;
+      }
       console.error('[direct chat send failed]', err);
       reportClientError(readableChatErrorMessage(err), { region: 'direct-chat-send-failed', stack: err instanceof Error ? err.stack : undefined });
       dispatchTurn({ type: 'SET_ERROR', message: readableChatErrorMessage(err) });
@@ -1364,7 +1553,7 @@ function DirectChatSession({
                       }
                       return null;
                     })}
-                    {isLastAssistant && showThinkingIndicator && <ThinkingIndicator />}
+                    {isLastAssistant && showThinkingIndicator && <ThinkingIndicator label={isReconnecting ? 'Reconnecting…' : undefined} />}
                     {m.role === 'assistant' && (() => {
                       const durationMs = (m.metadata as { durationMs?: number } | undefined)?.durationMs;
                       if (typeof durationMs === 'number' && Number.isFinite(durationMs)) {
@@ -1436,7 +1625,7 @@ function DirectChatSession({
             {((pendingTurn && chat.status !== 'streaming') ||
               (showThinkingIndicator && (!lastMessage || lastMessage.role !== 'assistant'))) && (
               <div className="flex justify-start flex-col items-start">
-                <ThinkingIndicator />
+                <ThinkingIndicator label={isReconnecting ? 'Reconnecting…' : undefined} />
                 {liveTurnElapsedMs != null && <LiveTurnDurationLabel elapsedMs={liveTurnElapsedMs} />}
               </div>
             )}

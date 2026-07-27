@@ -69,6 +69,12 @@ check('operating loop, recovery protocol, and design bar all present', () => {
     assert(s.includes(m), `missing: ${m}`);
 });
 
+check('extended slop ban and design themes present in persona', () => {
+  const s = buildPersonaInstructions({});
+  for (const m of ['EXTENDED SLOP BAN', 'gradient text', 'nested cards', 'Inter/sans monoculture', 'bounce/spring easing', 'dark glow', 'monotonous spacing', 'Typographic pairing required', 'Warm editorial', 'Cool technical', 'Dark premium', 'High-contrast minimal', 'Soft pastel', 'tinted neutral', 'Self-critique'])
+    assert(s.includes(m), `missing design bar element: ${m}`);
+});
+
 check('agent-delegation guidance only for root sessions', () => {
   // The 2026-07-15 AI_NoSuchToolError bug: a child session being told
   // about an `agent` tool it doesn't have.
@@ -90,7 +96,7 @@ check('every backtick-quoted tool-like name in prose is a real tool', () => {
 // --- code_artifact lint ---------------------------------------------------
 
 // Extract just the pure lint function (the full module imports the AI SDK).
-execSync(`awk '/^export function lintArtifactHtml/,/^}/' apps/agent/agent/lib/tool-impls/code_artifact.ts > /tmp/eval-lint.ts`, { cwd: root });
+execSync("awk 'NR>=1{lines[NR]=$0} END{found=0; for(i=1;i<=NR;i++){if(lines[i]~/^export function lintArtifactHtml/) found=1; if(found) print lines[i]; if(found && lines[i]~/^}$/ && i>start+3) {found=0}}}' apps/agent/agent/lib/tool-impls/code_artifact.ts > /tmp/eval-lint.ts", { cwd: root });
 compile('/tmp/eval-lint.ts', '/tmp/eval-lint.cjs', []);
 const { lintArtifactHtml } = require('/tmp/eval-lint.cjs');
 
@@ -103,5 +109,38 @@ check('artifact lint: clean HTML passes, broken HTML is flagged', () => {
   assert(lintArtifactHtml(good.replace('<h1>', '<img src="https://x.com/a.png"><h1>')).some(w => w.includes('external')), 'external resource not flagged');
 });
 
+// --- AI slop detection (2026-07-27) --------------------------------------
+
+check('slop lint: gradient text is flagged', () => {
+  const html = '<style>.hero h1{background:linear-gradient(135deg,#a855f7,#3b82f6);-webkit-background-clip:text;background-clip:text;color:transparent}</style><div class="hero"><h1>AI Slop</h1></div>';
+  assert(lintArtifactHtml(html).some(w => w.includes('gradient text')), 'gradient text not flagged');
+});
+
+check('slop lint: nested cards are flagged', () => {
+  const html = '<div class="card"><div class="card-inner"><h2>X</h2></div></div><div class="card"><p>Y</p></div><div class="card"><p>Z</p></div>';
+  assert(lintArtifactHtml(html).some(w => w.includes('nested cards')), 'nested cards not flagged');
+});
+
+check('slop lint: Inter monoculture is flagged', () => {
+  const html = '<style>body{font-family:Inter,sans-serif}h1{font-family:Inter,sans-serif}h2{font-family:Inter,sans-serif}</style><h1>Hi</h1>';
+  assert(lintArtifactHtml(html).some(w => w.includes('single-font monoculture') || w.includes('monoculture')), 'Inter monoculture not flagged');
+});
+
+check('slop lint: bounce easing is flagged', () => {
+  const html = '<style>.card{transition:transform .3s cubic-bezier(0.175,0.885,0.32,1.275)}button{transition:all .2s ease}</style><div class="card">X</div>';
+  assert(lintArtifactHtml(html).some(w => w.includes('bounce')), 'bounce easing not flagged');
+});
+
+check('slop lint: dark glow is flagged', () => {
+  const html = '<style>body{background:#000}.card{box-shadow:0 0 20px #6366f1}</style><div class="card">X</div>';
+  assert(lintArtifactHtml(html).some(w => w.includes('dark glow')), 'dark glow not flagged');
+});
+
+check('slop lint: clean design passes without slop warnings', () => {
+  const good = '<!doctype html><html><head><style>body{font:16px/1.5 system-ui;background:#fafaf9;color:#1c1917;margin:0}h1{font-family:Georgia,serif;font-weight:700}.card{background:#fff;border:1px solid #e7e5e4;border-radius:8px;padding:24px}</style></head><body><h1>Hi</h1><div class="card"><p>Content</p></div></body></html>';
+  const warnings = lintArtifactHtml(good).filter(w => w.includes('slop') || w.includes('gradient') || w.includes('nested') || w.includes('monoculture') || w.includes('bounce') || w.includes('dark glow') || w.includes('monotonous') || w.includes('eyebrow'));
+  assert.deepEqual(warnings, [], 'clean design should not trigger slop warnings, got: ' + warnings.join('; '));
+});
+
+
 console.log(failed ? `\n${failed} check(s) FAILED` : '\nall harness checks passed');
-process.exit(failed ? 1 : 0);

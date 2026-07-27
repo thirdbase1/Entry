@@ -5,7 +5,7 @@ import { ChatIcon } from '@/components/icons/chat-icon';
 import { AnimatePresence, motion } from 'framer-motion';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import AppSidebar from '@/components/ui/sidebar/sidebar';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { useIsAdmin } from '@/lib/use-is-admin';
@@ -19,6 +19,9 @@ import {
   useLibraryStore,
 } from '@/store/library';
 import { useSidebarStore } from '@/store/sidebar';
+import { useGithubPicker } from '@/store/github-picker';
+import { GitHubRepoPicker } from '@/components/sidebar/github-repo-picker';
+import { GithubIcon } from '@/components/icons/github-icon';
 
 const filterCollected = (items: AllItem[]) =>
   items.filter(item => item?.collected);
@@ -60,6 +63,23 @@ function SidebarContent() {
   const { refresh, chats, initialized, loading } = useLibraryStore();
   const allItems = useAllItems();
   const collectedItems = useMemo(() => filterCollected(allItems), [allItems]);
+  const openGithubPicker = useGithubPicker(s => s.openPicker);
+
+  // Fetch GitHub connection status once on mount so we know whether to
+  // show the "Start with GitHub" button and can pass the installation ID
+  // to the picker (for the "Update repo access" link).
+  const [githubConnected, setGithubConnected] = useState(false);
+  const [githubInstallationId, setGithubInstallationId] = useState<string | null>(null);
+  useEffect(() => {
+    fetch('/api/integrations/connect/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        setGithubConnected(Boolean(data.connected?.github));
+        setGithubInstallationId(data.githubInstallationId ?? null);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -86,6 +106,15 @@ function SidebarContent() {
             <div className="text-sm">New Chat</div>
           </li>
         </Link>
+        {githubConnected && (
+          <li
+            onClick={openGithubPicker}
+            className="flex items-center gap-3 h-[30px] px-2 rounded hover:bg-accent transition-colors cursor-pointer"
+          >
+            <GithubIcon className="w-5 h-5 text-muted-foreground" />
+            <div className="text-sm">Start with GitHub</div>
+          </li>
+        )}
         <Link href="/library">
           <li className={cn(
             'flex items-center gap-3 h-[30px] px-2 rounded hover:bg-accent transition-colors cursor-pointer',
@@ -186,6 +215,19 @@ function SidebarContent() {
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const { open: sidebarOpen, toggleSidebar, setOpen: setSidebarOpen, width } = useSidebarStore();
+  const githubPickerOpen = useGithubPicker(s => s.open);
+  const closeGithubPicker = useGithubPicker(s => s.closePicker);
+
+  // Need the installation ID for the picker's "Update repo access" link.
+  const [githubInstallationId, setGithubInstallationId] = useState<string | null>(null);
+  useEffect(() => {
+    fetch('/api/integrations/connect/status')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.githubInstallationId) setGithubInstallationId(data.githubInstallationId);
+      })
+      .catch(() => {});
+  }, []);
 
   // Tap-anywhere-to-close (2026-07-15, explicit user request: "if the
   // side bar is open if I touch any where on the chat screen it should
@@ -234,6 +276,12 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
           <path d="M9 3v18" />
         </svg>
       </button>
+
+      <GitHubRepoPicker
+        open={githubPickerOpen}
+        onClose={closeGithubPicker}
+        installationId={githubInstallationId}
+      />
     </div>
   );
 }
