@@ -156,25 +156,47 @@ export async function resolveDefaultSharedModel(): Promise<ResolvedCustomProvide
   const providers = await prisma.userModelProvider.findMany({ where: { isShared: true } });
   if (providers.length === 0) return null;
 
-  const preferred = providers.find(p => /freemodel/i.test(p.label)) ?? providers[0];
-
-  const modelRow = await prisma.userModelProviderModel.findFirst({
-    where: { providerId: preferred.id, isEnabled: true },
-    orderBy: { createdAt: 'asc' },
+  // FALLBACK-CHAIN FIX (2026-07-27, real bug): this used to pick ONE
+  // "preferred" provider (freemodel.dev if present, else whichever shared
+  // row happened to exist) and give up entirely -- returning null for the
+  // WHOLE function -- the instant that one provider had zero enabled
+  // model rows. That's exactly the state freemodel.dev was actually in
+  // (its provider row can exist from an earlier partial setup while its
+  // model rows were never seeded/enabled), which meant the "free model
+  // and HCNSec act as one default" sub-agent fallback silently broke
+  // entirely instead of ever reaching HCNSec, even though HCNSec was
+  // sitting right there, fully configured, in the very next row. Now
+  // tries every shared provider in preference order (freemodel.dev
+  // first, per the owner's explicit "make sure the free model and
+  // hcnsec act as one" ask -- freemodel is offered first, HCNSec is the
+  // one seamless fallback behind it) and only returns null if literally
+  // none of them currently have a usable enabled model.
+  const ordered = [...providers].sort((a, b) => {
+    const aPref = /freemodel/i.test(a.label) ? 0 : 1;
+    const bPref = /freemodel/i.test(b.label) ? 0 : 1;
+    return aPref - bPref;
   });
-  if (!modelRow) return null;
 
-  let apiKey: string | undefined;
-  if (preferred.encryptedApiKey) {
-    try {
-      apiKey = decryptApiKey(preferred.encryptedApiKey);
-    } catch {
-      return null; // same non-fatal "just fall back" contract as a missing row
+  for (const candidate of ordered) {
+    const modelRow = await prisma.userModelProviderModel.findFirst({
+      where: { providerId: candidate.id, isEnabled: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!modelRow) continue;
+
+    let apiKey: string | undefined;
+    if (candidate.encryptedApiKey) {
+      try {
+        apiKey = decryptApiKey(candidate.encryptedApiKey);
+      } catch {
+        continue; // this candidate's key is broken -- try the next shared provider, don't give up entirely
+      }
     }
+    const model = await buildCustomModelClient(
+      { label: candidate.label, compatibility: candidate.compatibility, baseUrl: candidate.baseUrl, apiKey },
+      modelRow.modelId
+    );
+    return { model, providerLabel: candidate.label, modelId: modelRow.modelId };
   }
-  const model = await buildCustomModelClient(
-    { label: preferred.label, compatibility: preferred.compatibility, baseUrl: preferred.baseUrl, apiKey },
-    modelRow.modelId
-  );
-  return { model, providerLabel: preferred.label, modelId: modelRow.modelId };
+  return null;
 }
