@@ -30,17 +30,42 @@ import { getCredential } from '@entry/agent/lib/credential-vault';
  * `/installations/new` flow instead of the dead-end re-auth screen.
  */
 async function installationStillActive(userId: string, installationId: string): Promise<boolean> {
+  // FIXED (2026-07-28, real bug, confirmed live via screen recording:
+  // "GitHub connection failed: invalid_state" on EVERY connect attempt).
+  // The previous version defaulted to `false` ("not active") whenever it
+  // couldn't get a definitive yes from GitHub -- no stored token, or a
+  // failed API call. But "no stored token" is exactly what `disconnect`
+  // leaves behind (it only clears our vault credential, see the file
+  // header below) -- which means for the ONE case this whole function
+  // exists to handle -- disconnected-but-still-installed -- it always
+  // guessed wrong, cleared the still-genuinely-valid `githubInstallationId`,
+  // and routed the user into `/installations/new`, which (per the
+  // RECONNECT BUG FIX comment below) dead-ends any already-installed
+  // account on GitHub's own Configure page with no `code`/`state` ever
+  // sent back to us -- the exact dead loop the user hit on every single
+  // attempt.
+  //
+  // We have no App-level (JWT/private-key) credential to check this
+  // definitively without a per-user token, so the safe default when we
+  // genuinely can't ask is "assume still installed" (send them through
+  // `login/oauth/authorize`, which always completes cleanly and is a
+  // no-op if there really is no installation) rather than "assume gone"
+  // (which guarantees the dead-end above). Only return false when we
+  // actually got a real answer from GitHub confirming the installation
+  // is gone.
   const token = await getCredential(userId, 'github').catch(() => null);
-  if (!token) return false;
+  if (!token) return true;
   try {
     const res = await fetch('https://api.github.com/user/installations', {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
     });
-    if (!res.ok) return false;
+    // A failed call (e.g. the stored token itself expired) is not proof
+    // the installation is gone -- don't guess wrong, assume still there.
+    if (!res.ok) return true;
     const json = (await res.json()) as { installations?: Array<{ id: number }> };
     return (json.installations ?? []).some(i => String(i.id) === String(installationId));
   } catch {
-    return false;
+    return true;
   }
 }
 
