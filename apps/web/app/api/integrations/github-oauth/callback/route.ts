@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { randomBytes } from 'node:crypto';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getPublicOrigin } from '@/lib/public-origin';
 import { saveCredential } from '@entry/agent/lib/credential-vault';
@@ -137,6 +138,60 @@ export async function GET(req: NextRequest) {
   // update flow above, which already returned).
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.redirect(new URL('/sign-in', origin));
+
+  // INSTALL-WITHOUT-OAUTH-CODE FIX (2026-07-28, real bug, confirmed via
+  // the diagnostic logging below on the owner's own first-ever install:
+  // hasState/hasCookieState/stateMatches ALL true, hasCode FALSE --
+  // state was never actually invalid. GitHub's real installations/new
+  // screen returned `installation_id` + `state` with NO `code` at all --
+  // installing an App and completing its OAuth grant are two genuinely
+  // separate GitHub-side steps, and evidently entry-github's install
+  // screen only completes the first one in this one round trip. The old
+  // code required `code` unconditionally and mislabeled this as
+  // "invalid_state", which is exactly backwards -- the install itself
+  // had already succeeded (GitHub doesn't hand back a real
+  // installation_id otherwise) and the user was shown a scary error for
+  // something that actually worked.
+  //
+  // Fix: when state genuinely matches and we have a real installationId
+  // but no code, persist the installation immediately (never block a
+  // real success on the separate OAuth half) and chain straight into the
+  // bare `login/oauth/authorize` screen to pick up a real user token too
+  // -- entry-github supports standalone user-to-server OAuth with the
+  // same client id/secret, so this completes transparently (near-instant
+  // approval, since the user just installed the app) without needing any
+  // change to the GitHub App's own settings.
+  if (installationId && !code && state && cookieState && state === cookieState) {
+    await prisma.user
+      .update({ where: { id: session.user.id }, data: { githubInstallationId: installationId } })
+      .catch(err => console.error('[github-oauth callback] failed to persist installationId (no-code install)', session.user.id, err));
+
+    const chainClientId = process.env.GITHUB_OAUTH_CLIENT_ID;
+    if (chainClientId) {
+      const newState = randomBytes(24).toString('base64url');
+      const authorizeUrl = new URL('https://github.com/login/oauth/authorize');
+      authorizeUrl.searchParams.set('client_id', chainClientId);
+      authorizeUrl.searchParams.set('state', newState);
+      authorizeUrl.searchParams.set('redirect_uri', `${origin}/api/integrations/github-oauth/callback`);
+      const res = NextResponse.redirect(authorizeUrl.toString());
+      res.headers.set('Cache-Control', 'no-store, must-revalidate');
+      // Overwrite with a fresh state for this second leg -- leave
+      // github_oauth_return untouched so the chained authorize's own
+      // callback still knows where to send the user back afterward.
+      res.cookies.set('github_oauth_state', newState, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        maxAge: 10 * 60,
+        path: '/api/integrations/github-oauth',
+      });
+      return res;
+    }
+    // No client id configured to chain into OAuth with -- the install
+    // itself is real and already persisted, so still report success
+    // rather than erroring out on the separate, unconfigured OAuth leg.
+    return clearCookies(NextResponse.redirect(resultUrl('connected')));
+  }
 
   if (!code || !state || !cookieState || state !== cookieState) {
     // DIAGNOSTIC (2026-07-27, real bug, ongoing owner report: still
