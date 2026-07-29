@@ -77,6 +77,7 @@ export async function GET(req: NextRequest) {
     res.headers.set('Cache-Control', 'no-store, must-revalidate');
     res.cookies.set('github_oauth_state', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
     res.cookies.set('github_oauth_return', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
+    res.cookies.set('github_pending_installation_id', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
     return res;
   };
   const clearCookiesAndRedirect = (url: string) => clearCookies(NextResponse.redirect(url));
@@ -162,10 +163,18 @@ export async function GET(req: NextRequest) {
   // approval, since the user just installed the app) without needing any
   // change to the GitHub App's own settings.
   if (installationId && !code && state && cookieState && state === cookieState) {
-    await prisma.user
-      .update({ where: { id: session.user.id }, data: { githubInstallationId: installationId } })
-      .catch(err => console.error('[github-oauth callback] failed to persist installationId (no-code install)', session.user.id, err));
-
+    // VERIFY-BEFORE-TRUST FIX (2026-07-29, real bug, owner report: "I
+    // don't have the entry GitHub install, but clicking connect just
+    // reloads and shows connected"). The previous version of this branch
+    // persisted `installationId` straight from the query string and
+    // reported success later purely because the SECOND (chained) leg's
+    // code exchange succeeded -- neither step ever actually asked GitHub
+    // "is this installation real for this user." Never trust a query
+    // param alone for something this consequential. Now: stash the
+    // CANDIDATE id in a short-lived cookie instead of the DB, chain into
+    // oauth/authorize to get a real token, and only persist + report
+    // "connected" once that token is used to confirm the installation
+    // truly appears in this user's own `GET /user/installations` below.
     const chainClientId = process.env.GITHUB_OAUTH_CLIENT_ID;
     if (chainClientId) {
       const newState = randomBytes(24).toString('base64url');
@@ -185,12 +194,18 @@ export async function GET(req: NextRequest) {
         maxAge: 10 * 60,
         path: '/api/integrations/github-oauth',
       });
+      res.cookies.set('github_pending_installation_id', installationId, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        maxAge: 10 * 60,
+        path: '/api/integrations/github-oauth',
+      });
       return res;
     }
-    // No client id configured to chain into OAuth with -- the install
-    // itself is real and already persisted, so still report success
-    // rather than erroring out on the separate, unconfigured OAuth leg.
-    return clearCookies(NextResponse.redirect(resultUrl('connected')));
+    // No client id configured to chain into OAuth with -- can't get a
+    // token to verify against, so don't claim success on an unverified id.
+    return clearCookiesAndRedirect(resultUrl('error', 'not_configured'));
   }
 
   if (!code || !state || !cookieState || state !== cookieState) {
@@ -243,16 +258,52 @@ export async function GET(req: NextRequest) {
 
     await saveCredential({ userId: session.user.id, service: 'github', value: tokenJson.access_token });
 
-    // Persist the installation the user just picked repos for (or
-    // "updated" -- setup_action=update -- if they revisited an existing
-    // one to add/remove repos). Best-effort: a user who somehow lands
-    // here without an installation_id (shouldn't happen via the
-    // installations/new URL, but keep this robust to a stray direct hit
-    // on this callback) still gets their OAuth token saved above --
-    // just without repo access until they do install it.
-    if (installationId) {
+    // VERIFY-BEFORE-TRUST (2026-07-29, see the no-code branch above for
+    // the full bug this closes): the id we're about to persist can come
+    // from THIS request's own installation_id query param, or -- on the
+    // chained second leg after a no-code install -- from the pending
+    // cookie stashed there. Either way, before we ever write it to the
+    // DB or tell the user "connected", actually ask GitHub's own
+    // `/user/installations` (with the token we JUST obtained) whether it
+    // really is installed for this account. A candidate id that doesn't
+    // show up there is never persisted and never reported as success --
+    // this is the one thing standing between "GitHub told us so" and
+    // "we assumed so."
+    const pendingInstallationId = req.cookies.get('github_pending_installation_id')?.value ?? null;
+    const candidateInstallationId = installationId ?? pendingInstallationId;
+
+    if (candidateInstallationId) {
+      let verified = false;
+      try {
+        const instRes = await fetch('https://api.github.com/user/installations', {
+          headers: { Authorization: `Bearer ${tokenJson.access_token}`, Accept: 'application/vnd.github+json' },
+        });
+        if (instRes.ok) {
+          const instJson = (await instRes.json()) as { installations?: Array<{ id: number }> };
+          verified = (instJson.installations ?? []).some(i => String(i.id) === String(candidateInstallationId));
+        }
+      } catch (err) {
+        console.error('[github-oauth callback] installation verification call failed', session.user.id, err);
+      }
+
+      if (!verified) {
+        logError({
+          source: 'github-oauth-unverified-installation',
+          error: new Error('GitHub did not confirm the installation id before it would have been persisted'),
+          userId: session.user.id,
+          context: { candidateInstallationId, fromPendingCookie: !candidateInstallationId ? false : installationId == null },
+        });
+        // A real OAuth token WAS obtained (already saved above), so the
+        // user isn't left with nothing -- just don't claim repo access
+        // that GitHub itself won't confirm. Tell them plainly instead of
+        // silently showing "Connected".
+        return clearCookies(
+          NextResponse.redirect(resultUrl('error', 'GitHub did not confirm the app installation — click Connect again and complete the Install step on GitHub.'))
+        );
+      }
+
       await prisma.user
-        .update({ where: { id: session.user.id }, data: { githubInstallationId: installationId } })
+        .update({ where: { id: session.user.id }, data: { githubInstallationId: candidateInstallationId } })
         .catch(err => console.error('[github-oauth callback] failed to persist installationId', session.user.id, setupAction, err));
     }
 
