@@ -796,21 +796,36 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   const result = streamText({
     model,
-    // RAISED (2026-07-25, real production log: "[direct chat] turn error
-    // ... Failed after 3 attempts. Last error: AI_APICallError: You
-    // exceeded your current quota" -- Google's free-tier Gemini quota is
-    // a shared, per-minute bucket across every concurrent user on this
-    // relay, so a burst of traffic can trip it for a few seconds even
-    // though the account is nowhere near a real/permanent limit. The AI
-    // SDK's own internal retry defaults to `maxRetries: 2` (3 attempts
-    // total) with a short backoff -- nowhere near enough runway to ride
-    // out even the ~2s retryDelay Google's own error response suggested,
-    // let alone a slightly longer burst. This is a pure config bump, same
-    // request budget either way (SOFT_DEADLINE_MS/the chunk timeout below
-    // still bound the worst case) -- it just gives transient 429/quota
-    // bursts more real chances to clear before the turn gives up and
-    // surfaces an error to the user at all.
-    maxRetries: 5,
+    // LOWERED BACK DOWN (2026-07-29, real bug, owner report: "why does
+    // it take long for ALL shared ai to respond"). This was raised to 5
+    // on 2026-07-25 specifically because 429/quota bursts (e.g. Google's
+    // shared free-tier bucket) had nowhere else to be retried fast --
+    // gateway-retry-fetch.ts's own wrapper (used by every BYOK/shared
+    // model, see build-model-client.ts) didn't handle 429 AT ALL back
+    // then, so every single 429 fell through to exactly THIS outer
+    // AI-SDK-level retry, which uses the SDK's hardcoded, non-configurable
+    // exponential backoff -- 2s, 4s, 8s, 16s, 32s between attempts (see
+    // @ai-sdk/provider-utils's retryWithExponentialBackoff defaults,
+    // `initialDelayInMs: 2000, backoffFactor: 2`, not overridable via
+    // streamText's own options) -- up to 62 real SECONDS of pure waiting
+    // on one turn before even counting actual request latency. Shared
+    // providers pool many users onto one upstream account, so they hit
+    // momentary 429s far more than a private BYOK key ever would --
+    // exactly why this was disproportionately a "shared AI is slow"
+    // complaint specifically, not a general one.
+    //
+    // Now that gateway-retry-fetch.ts properly retries 429 itself (added
+    // 2026-07-29, see that file's own comment) with its OWN much cheaper
+    // ~200ms-based backoff and correct permanent-vs-transient
+    // classification, this outer retry is really only a thin safety net
+    // for genuine transport-level failures (a thrown network exception
+    // before any HTTP response came back at all, which never even
+    // reaches the inner wrapper's status-code logic) -- it no longer
+    // needs to carry the FULL weight of absorbing every 429 burst itself,
+    // so it's brought back down to a modest value instead of layering a
+    // second, much slower retry system on top of a problem the inner
+    // wrapper now already solves quickly.
+    maxRetries: 2,
     stopWhen: [
       stepCountIs(400), // generous ceiling so a long agentic turn is bounded by the SOFT_DEADLINE_MS time budget, not an arbitrary low step count
       // FIXED (2026-07-27, real bug from a user-recorded video: a shared

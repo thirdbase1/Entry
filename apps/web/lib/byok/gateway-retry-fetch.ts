@@ -151,6 +151,40 @@ function matchesKnownTransientBody(status: number, bodyText: string, headers?: H
   // for why a legitimate 404 is not possible for how we call this API.
   if (status === 404) return true;
 
+  // 429 FAST-RETRY FIX (2026-07-29, real bug, owner report: "why does it
+  // take long for ALL shared ai to respond"). This wrapper never handled
+  // 429 at all -- a bare rate-limit response fell through every branch
+  // here untouched and went straight back to the caller, which meant
+  // EVERY 429 from ANY shared/BYOK provider skipped this wrapper's fast
+  // ~200ms-based backoff entirely and hit the AI SDK's own generic outer
+  // retry instead (2s/4s/8s/16s/32s exponential, see streamText's
+  // `maxRetries` in direct/chat/route.ts) -- up to 62 real seconds of
+  // pure waiting on a single turn before even one retry's actual request
+  // latency is counted. Shared providers (many users pooling one
+  // upstream account) hit momentary 429s far more often than a private
+  // BYOK key ever would, so this was disproportionately a "shared AI"
+  // problem specifically, matching the report exactly.
+  //
+  // For 429 specifically, PERMANENT_SIGNAL_PATTERN is too broad to reuse
+  // as-is -- its `rate[_ ]?limit`/`usage[_ ]?limit` keywords are exactly
+  // the boilerplate wording EVERY 429 uses regardless of whether it's a
+  // momentary burst (retry in a second, totally normal) or a real
+  // hours-long cap, so applying it here would just re-create the "every
+  // 429 treated as permanent" problem this fix exists to solve. A 429 is
+  // only genuinely NOT worth retrying here when the body names an actual
+  // long reset window or hard balance/quota exhaustion (things a fast
+  // in-process retry loop cannot possibly outlast) -- e.g. the real
+  // Opencode Zen body seen in production, "Monthly usage limit reached.
+  // Resets in 18hr 59min... enable usage from your available balance".
+  // Everything else classified 429 -- the overwhelming common case, a
+  // plain momentary rate-limit/burst response -- gets this wrapper's
+  // fast, cheap backoff instead of the outer SDK layer's slow one.
+  const HARD_429_CAP_PATTERN = /resets? in|monthly|insufficient[_ ]?balance|insufficient[_ ]?quota|available balance|out of (credits|quota)/i;
+  if (status === 429) {
+    if (HARD_429_CAP_PATTERN.test(messageText) || HARD_429_CAP_PATTERN.test(trimmed)) return false;
+    return true;
+  }
+
   if (status >= 500 && status < 600) {
     // A real, permanent error always names what's actually wrong.
     if (PERMANENT_SIGNAL_PATTERN.test(messageText) || PERMANENT_SIGNAL_PATTERN.test(trimmed)) return false;
