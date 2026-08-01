@@ -152,3 +152,35 @@ a specific key if something is actually confirmed missing/wrong.
 
 `ANCHORBROWSER_API_KEY` was added 2026-07-24 for the Anchor Browser
 lane — 57 vars total as of this writing.
+
+## GitHub-connected deploy settings (paste into Pxxl dashboard)
+
+If connecting this repo to Pxxl via GitHub (auto-deploy on push to `main`)
+instead of the manual `pxxl deploy` CLI, use these exact settings in the
+project's Git/Build settings on the Pxxl dashboard:
+
+- **Repository:** thirdbase1/Entry
+- **Branch:** main
+- **Root directory:** (repo root — leave blank/`.`)
+- **Framework:** Next.js
+- **Package manager:** npm
+- **Install command:**
+  ```
+  npm install
+  ```
+- **Build command:**
+  ```
+  SKIP_PRODUCTION_MIGRATE_GUARD=1 npm run build && mkdir -p apps/web/.next/standalone/apps/web/.next && cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static && cp -r apps/web/public apps/web/.next/standalone/apps/web/public
+  ```
+- **Start command:**
+  ```
+  node apps/web/.next/standalone/apps/web/server.js
+  ```
+- **Port:** 3000
+- **Project ID:** proj_ibab5ldta4l63qoentq7
+
+These are identical to the `pxxl.toml` values above — the standalone-build
+trick is what beats Pxxl's proxy-promotion readiness timeout, and that's
+true whether the deploy is triggered by the CLI or by a GitHub push. Env
+vars are already set on this project (see below) so a GitHub-triggered
+deploy should pick them up without re-entering anything.
