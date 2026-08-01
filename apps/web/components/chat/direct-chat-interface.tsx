@@ -265,6 +265,13 @@ function ThinkingIndicator({ label }: { label?: string }) {
 export function DirectChatInterface(props: DirectChatInterfaceProps) {
   const { sessionId } = props;
   const [initialMessages, setInitialMessages] = useState<any[] | null>(sessionId ? null : []);
+  // Server-issued last-write time for this chat row (EveChatSession.updatedAt).
+  // Used ONLY as the staleness bound on the interrupted-turn seed below --
+  // the persisted `events` array holds AI SDK UIMessages, which carry no
+  // per-message timestamp of their own, so the row's own updatedAt is the
+  // only trustworthy "when did the server last touch this turn" signal
+  // available on load.
+  const [snapshotUpdatedAt, setSnapshotUpdatedAt] = useState<string | null>(null);
   useEffect(() => {
     if (!sessionId) return;
     setInitialMessages(null);
@@ -274,6 +281,7 @@ export function DirectChatInterface(props: DirectChatInterfaceProps) {
       .then(snap => {
         if (cancelled) return;
         setInitialMessages(Array.isArray(snap?.events) ? snap.events : []);
+        setSnapshotUpdatedAt(typeof snap?.updatedAt === 'string' ? snap.updatedAt : null);
       })
       .catch(() => {
         if (!cancelled) setInitialMessages([]);
@@ -299,6 +307,7 @@ export function DirectChatInterface(props: DirectChatInterfaceProps) {
       key={sessionId ?? 'new'}
       {...props}
       initialMessages={initialMessages}
+      snapshotUpdatedAt={snapshotUpdatedAt}
     />
   );
 }
@@ -320,7 +329,8 @@ function DirectChatSession({
   initialMessage,
   integrationCallback,
   initialMessages,
-}: DirectChatInterfaceProps & { initialMessages: any[] }) {
+  snapshotUpdatedAt,
+}: DirectChatInterfaceProps & { initialMessages: any[]; snapshotUpdatedAt: string | null }) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const createdRef = useRef(!!sessionId);
@@ -355,11 +365,53 @@ function DirectChatSession({
   // the current poll cadence (800ms fast vs 3s normal) to stay correct;
   // wall-clock time doesn't care, so it can't declare "settled" while
   // still inside a normal save gap no matter which cadence is active.
+  // Upper bound on how old an interrupted-looking turn can be before the
+  // "server might still be working on it" seed below stops believing it.
+  // Anchored to the agent runtime's own hard ceiling -- with-agent-timeout.ts
+  // caps any single tool call at MAX_TIMEOUT_SECONDS (1 hour), so a turn
+  // whose last persisted message is older than that provably cannot still
+  // be running. Doubled to 2h purely as slack for clock skew between the
+  // user's device and the server (this compares a server-issued updatedAt
+  // against a client-side Date.now()); the exact value is not load-bearing,
+  // only the existence of SOME finite bound is.
+  const MAX_RESUMABLE_AGE_MS = 2 * 60 * 60 * 1000;
   const SETTLE_QUIET_MS = 4_500;
   const lastGrowthAtRef = useRef(Date.now());
+  // STALENESS BOUND (2026-07-28, owner bug report: thinking indicator
+  // spinning on both a NEW chat and an OLD chat without sending anything).
+  // The seed above is a heuristic -- "last persisted message is from the
+  // user" is treated as proof a turn was in flight when the page was left.
+  // That inference is only sound while the turn could PLAUSIBLY still be
+  // running. It is not time-bounded, so it also fires for a conversation
+  // whose final turn died months ago (server crash / abort / error before
+  // any assistant row was persisted). Opening that old chat re-seeded
+  // pendingTurn=true forever: the recovery poll only clears pendingTurn on
+  // RECONNECT_PROGRESS/RECONNECT_GAVE_UP, and a long-dead turn produces no
+  // new DB content to trigger either -- so the spinner never settles and
+  // the composer stays locked (isBusy) on a chat the user never touched.
+  //
+  // A turn that was genuinely interrupted seconds ago is worth recovering.
+  // One whose last message is older than the server could still be working
+  // on is not. MAX_RESUMABLE_AGE_MS bounds the heuristic to the server's
+  // own hard turn ceiling, so we never claim "still running" for something
+  // that provably cannot be.
   const [turnLifecycle, dispatchTurn] = useReducer(turnLifecycleReducer, undefined, () => {
     const last = initialMessages[initialMessages.length - 1];
-    const pendingTurn = initialMessages.length > 0 && (!last || last.role === 'user');
+    // Empty history (a brand-new chat) is already excluded by length > 0.
+    const looksInterrupted = initialMessages.length > 0 && (!last || last.role === 'user');
+    if (!looksInterrupted) return { pendingTurn: false, turnError: null, isReconnecting: false };
+    // Staleness bound uses the chat ROW's server-issued updatedAt, not a
+    // per-message timestamp: `events` holds AI SDK UIMessages, which have
+    // no createdAt of their own, so there is nothing message-level to read.
+    // updatedAt is bumped by the very same write that persisted this
+    // trailing user message, so it IS that turn's start time in practice.
+    // Missing/unparseable timestamp => treat as NOT resumable: failing
+    // closed costs at most a slightly late spinner on a genuine resume
+    // (the recovery poll flips pendingTurn true within one 800ms tick as
+    // soon as it sees new content), whereas failing open is exactly the
+    // permanently-stuck-chat bug being fixed here.
+    const lastAtMs = snapshotUpdatedAt ? new Date(snapshotUpdatedAt).getTime() : NaN;
+    const pendingTurn = Number.isFinite(lastAtMs) && Date.now() - lastAtMs < MAX_RESUMABLE_AGE_MS;
     return { pendingTurn, turnError: null, isReconnecting: false };
   });
   const { pendingTurn, turnError, isReconnecting } = turnLifecycle;
@@ -810,7 +862,24 @@ function DirectChatSession({
           missedPollsRef.current = 0;
           const snap = await res.json();
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
-          if (!persisted || persisted.length === 0) return;
+          // NEW-CHAT INDICATOR FIX (2026-07-28, owner bug report: thinking
+          // indicator spinning forever on a chat with no messages loaded).
+          // The seed heuristic (line ~340, `last.role === 'user'`) can guess
+          // pendingTurn=true for any chat where the last persisted message is
+          // a user turn within the last 2h -- but it says nothing about
+          // WHETHER the snapshot API returns events at all for that chat. A
+          // chat with events=[] (fresh/unused session, or the snapshot shape
+          // doesn't include an events key) would trigger the early return
+          // here, which sits BEFORE the settle check: the content-diff logic
+          // needs a non-empty persisted array, but the settle check
+          // (lastGrowthAtRef + SETTLE_QUIET_MS + /turn-status ping) does
+          // NOT -- it only needs to know whether time has passed with no DB
+          // growth. An empty persisted array is trivially "not newer than"
+          // whatever the client has, so it safely falls through to the ELSE
+          // (settle) branch below, same as any other no-change tick. The
+          // only acceptable early exit is `persisted === null` (the endpoint
+          // didn't return an events array at all, e.g. a shape mismatch).
+          if (!persisted) return;
           // Content-level compare, not just a length check -- now that
           // this also runs during 'ready', the failure mode to guard
           // against shifted: the LAST message can grow more parts (a
