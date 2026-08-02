@@ -1,22 +1,25 @@
 # Pxxl Deployment Notes — Entry (thirdbase1/Entry)
 
-Last updated: 2026-07-25
+Last updated: 2026-08-02 (account correction pending — see notice below)
 
-## Current status: LIVE and working
+## ACCOUNT CORRECTION (2026-08-02)
+
+The owner has corrected this: the actual Pxxl login/deploy account is
+**vwhehj@gmail.com**. Earlier notes in this doc calling that account
+"dead" were wrong. Project ID / production URL under this account are
+being re-confirmed — do not assume `proj_ibab5ldta4l63qoentq7` or
+`entry.pxxl.pro` still apply until re-verified with `pxxl whoami` /
+`pxxl projects list` while logged into vwhehj@gmail.com.
+
+Never embed a literal API key value in this file (or any repo file) —
+reference the sandbox rule file instead. A key was previously leaked this
+way via old commits to this exact file; treat any key ever committed here
+as burned.
+
+## Current status: needs re-verification under the corrected account
 
 Production for this app runs on **Pxxl**. Pxxl is the only deploy target —
 there is no other platform in the loop.
-
-- **Account:** miraclethirdbase1@gmail.com
-- **Project:** `entry` (`proj_ibab5ldta4l63qoentq7`)
-- **Live URL:** https://entry.pxxl.pro
-- Verified healthy: `curl https://entry.pxxl.pro/api/health` returns
-  `{"ok":true,"db":"connected"}`.
-
-Any other account/project you might see referenced anywhere else
-(`vwhehj@gmail.com`, `alfredjames0852@gmail.com`, `entry-test`,
-`oneshotsx-entry`) is dead — ignore it. The account and project above are
-the only ones that matter.
 
 ### The one real platform bug, and its fix
 
@@ -49,7 +52,7 @@ projectId = "proj_ibab5ldta4l63qoentq7"
 
 1. **Env var override**: `$PXXL_TOKEN`/`$PXXL_API_KEY` in the sandbox may
    point at a different account than intended. Always run `pxxl whoami`
-   first — it should say `miraclethirdbase1@gmail.com`. If not:
+   first — it should say `vwhehj@gmail.com`. If not:
    `pxxl login --api-key <key from .agents rule>`.
 2. **~16MB hard cap on the CLI upload endpoint**: exceeding it returns a
    raw/unhelpful `502`, not a clean error. Binary-search the zip size if
@@ -89,7 +92,7 @@ projectId = "proj_ibab5ldta4l63qoentq7"
 ## The correct procedure (current, working)
 
 ```bash
-pxxl whoami   # confirm miraclethirdbase1@gmail.com
+pxxl whoami   # confirm vwhehj@gmail.com
 
 git pull origin main
 
