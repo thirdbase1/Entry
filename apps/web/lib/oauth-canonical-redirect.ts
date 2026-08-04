@@ -9,7 +9,7 @@ import type { NextResponse } from 'next/server';
  * whatever host the browser is actually on when it hits `/start` (e.g. a
  * user working from `entry.pxxl.pro`), but `redirect_uri` / the final
  * post-connect landing page is always the FIXED `NEXT_PUBLIC_APP_URL`
- * origin (`entry.oneshotsx.cv` -- deliberately fixed since 2026-07-23 to
+ * origin (`entry.pxxl.run` -- deliberately fixed since 2026-07-23 to
  * dodge a real Render 0.0.0.0-bind bug, see public-origin.ts). GitHub/
  * Vercel only ever redirect back to that fixed callback origin, which
  * never has the state/PKCE cookies the browser set on the OTHER domain
