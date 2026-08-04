@@ -64,7 +64,7 @@ export const auth = betterAuth({
 
   // Deliberately NOT pinned to VERCEL_PROJECT_PRODUCTION_URL: that env var
   // is the project's raw *.vercel.app domain and does NOT reflect a custom
-  // domain (e.g. entry.oneshotsx.cv) aliased on top of it. Pinning baseURL
+  // domain (e.g. entry.pxxl.run) aliased on top of it. Pinning baseURL
   // to the wrong domain caused a real bug: Google OAuth would complete on
   // the vercel.app domain, but the session cookie set there is invisible
   // once the user lands back on the custom domain (different eTLD, cookies
@@ -83,7 +83,8 @@ export const auth = betterAuth({
   // env var dependency either way, in both prod and local dev.
   baseURL: {
     allowedHosts: [
-      'entry.oneshotsx.cv',
+      'entry.pxxl.run', // primary custom domain (2026-08-05, oneshotsx.cv removed/decommissioned by owner)
+      'ec.pxxl.click', // secondary alias, live 2026-08-02
       'entry-nine-pi.vercel.app',
       'entry-thirdbase1s-projects.vercel.app',
       'entry-oneshotsx-thirdbase1s-projects.vercel.app',
@@ -98,7 +99,8 @@ export const auth = betterAuth({
   // OAuth state-cookie / origin checks never reject a legitimate request
   // regardless of which one baseURL inference picks for a given request.
   trustedOrigins: [
-    'https://entry.oneshotsx.cv',
+    'https://entry.pxxl.run',
+    'https://ec.pxxl.click',
     'https://entry-nine-pi.vercel.app',
     'https://entry-thirdbase1s-projects.vercel.app',
     'https://entry-oneshotsx-thirdbase1s-projects.vercel.app',

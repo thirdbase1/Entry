@@ -15,7 +15,7 @@ import type { NextRequest } from 'next/server';
  * redirect_uri is wrong" -- confirmed live). A single fixed
  * NEXT_PUBLIC_APP_URL is wrong by construction now: this app is genuinely
  * served under TWO live production domains at once (`entry.pxxl.pro` AND
- * the custom domain `entry.oneshotsx.cv`, both pointed at the same Pxxl
+ * the custom domain `entry.pxxl.run`, both pointed at the same Pxxl
  * deployment -- confirmed via `/api/admin/diag-host-headers` and Render's
  * own API showing zero custom domains left on the old `entry-web`
  * service). Whichever one is hardcoded, a user connecting from the OTHER
@@ -35,7 +35,10 @@ import type { NextRequest } from 'next/server';
  * domain not added here yet, or a request that reaches us some other
  * way), and to `req.nextUrl.origin` for local dev.
  */
-const PRODUCTION_ORIGINS = ['https://entry.pxxl.pro', 'https://entry.oneshotsx.cv'];
+// UPDATED (2026-08-05, owner: "I have removed entry.pxxl.run, using entry.pxxl.run now") --
+// oneshotsx.cv is decommissioned, entry.pxxl.run is now the primary custom
+// domain, ec.pxxl.click is a live secondary alias (added 2026-08-02).
+const PRODUCTION_ORIGINS = ['https://entry.pxxl.pro', 'https://entry.pxxl.run', 'https://ec.pxxl.click'];
 
 export function getPublicOrigin(req: NextRequest): string {
   const host = (req.headers.get('x-forwarded-host') || req.headers.get('host') || '').trim();

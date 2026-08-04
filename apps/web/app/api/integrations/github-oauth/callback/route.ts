@@ -112,7 +112,7 @@ export async function GET(req: NextRequest) {
   // back on the app, not stranded on github.com.
   //
   // NOTE: This flow requires the GitHub App's Setup URL to be set to
-  //   https://entry.oneshotsx.cv/api/integrations/github-oauth/callback
+  //   https://entry.pxxl.run/api/integrations/github-oauth/callback
   // AND "Redirect on update" enabled in the App's settings on
   // github.com/apps/entry-github. Without both, GitHub does NOT
   // redirect here at all after an update — it just leaves the user on

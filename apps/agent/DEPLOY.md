@@ -37,7 +37,7 @@ and Northflank/Zeabur (require payment method upfront) were all ruled out.
 | `CREDENTIAL_VAULT_KEY` | Must byte-for-byte match the web app's value |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Blob storage |
 | `ADMIN_DEBUG_TOKEN` | Internal diagnostics auth |
-| `ENTRY_WEB_ORIGIN` | `https://entry.oneshotsx.cv` (CORS) |
+| `ENTRY_WEB_ORIGIN` | `https://entry.pxxl.run` (CORS) |
 | `WORKFLOW_TARGET_WORLD` | `@workflow/world-postgres` |
 
 **`NODE_OPTIONS` value:**
