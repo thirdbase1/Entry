@@ -986,13 +986,14 @@ function DirectChatSession({
             //     flipped isBusy back to true for several seconds with no
             //     visible cause). Only keep the busy-lock when chat.status
             //     itself says work is still active.
-            // SMART stillActive (2026-07-27): use chat.status to decide.
-            // 'ready' = turn is genuinely done → unlock (the onFinish
-            // handler already cleared pendingTurn, this is just the
-            // version-card catch-up). 'error' = connection dropped, turn
-            // might still be running → keep locked. 'streaming'/
-            // 'submitted' = actively streaming → keep locked.
-            const stillActive = chat.status !== 'ready';
+            // Server content is proof that the turn is still producing or
+            // finalizing work. Do not consult this tab's local `chat.status`
+            // here: after a dropped stream it can be `ready` while the
+            // server is still writing newer snapshots. Keep pendingTurn
+            // true until the authoritative turn-status check reports
+            // inactive, so the timer and send button cannot go idle
+            // mid-generation.
+            const stillActive = true;
             lastGrowthAtRef.current = Date.now();
             chat.setMessages(mergeMessagesAppendOnly(chat.messages, persisted));
             dispatchTurn({ type: 'RECONNECT_PROGRESS', stillActive });
