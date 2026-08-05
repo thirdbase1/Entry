@@ -92,7 +92,7 @@ export function withAgentTimeout<T extends ToolImpl>(toolName: string, impl: T, 
       return await Promise.race([
         rawExecute(rest, shadowCtx),
         new Promise<never>((_, reject) => {
-          t.signal.addEventListener('abort', () => reject(t.signal.reason ?? new Error(`${toolName} timed out after ${timeoutMs / 1000}s`)), {
+          t.signal.addEventListener('abort', () => reject(t.signal.reason ?? new Error(`${toolName} timed out after ${(timeoutMs ?? 0) / 1000}s`)), {
             once: true,
           });
         }),

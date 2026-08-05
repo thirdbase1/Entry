@@ -882,7 +882,13 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // finishes" case, which 30 minutes still does just fine.
     // Disable AI SDK wall-clock/stall aborts; recovery is handled by the
     // persisted turn stream and DB snapshots, not by killing a live model.
-    timeout: false,
+    // NOTE: this AI SDK version's TimeoutConfiguration type is
+    // `number | { totalMs?, stepMs?, ... }` -- it has no `false` variant
+    // (that was a type error, never actually valid here). `undefined` is
+    // the SDK's real "no timeout configured" value (see
+    // getTotalTimeoutMs's own doc comment in node_modules/ai), so this
+    // achieves the exact same intended effect this line always meant.
+    timeout: undefined,
     // See modelMessages' own comment above for why this (persona prompt +
     // optional compaction summary) moved here instead of being spliced
     // into `messages` as fake `role: 'system'` entries -- this is the

@@ -95,7 +95,7 @@ function messageCompleteness(value: unknown): number {
   if (!value || typeof value !== 'object') return 0;
   const message = value as { parts?: unknown[] };
   const parts = Array.isArray(message.parts) ? message.parts : [];
-  const textLength = parts.reduce((sum, part) => {
+  const textLength = parts.reduce<number>((sum, part) => {
     if (!part || typeof part !== 'object') return sum;
     const text = (part as { text?: unknown }).text;
     return sum + (typeof text === 'string' ? text.length : 0);
