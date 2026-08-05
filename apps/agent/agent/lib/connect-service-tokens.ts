@@ -46,16 +46,43 @@ import { prisma } from '@entry/db';
 // a service isn't in this map. github stays -- it has its own real,
 // working direct-OAuth flow (github-oauth/start+callback) that never
 // depended on Vercel Connect in the first place.
-export const CONNECT_CONNECTORS: Record<string, string> = {
-  github: 'github/entry-github',
-};
+// FIXED (2026-08-05, real production bug confirmed against a live chat's
+// raw event log, reported as "GitHub connect card never shows" +
+// "GitHub shows 502" + duplicate-looking agent replies retrying the same
+// failed call): 'github' USED to live here, with a comment claiming "it
+// has its own real, working direct-OAuth flow... that never depended on
+// Vercel Connect in the first place." That claim was WRONG -- it only
+// covered startConnectAuthorization/isConnectAuthorized/
+// disconnectConnectAuthorization (which DO all guard on isVercelRuntime()
+// before calling Connect). resolveServiceCredential below -- the ONE
+// function inject_credential (i.e. every real chat tool call) actually
+// uses -- had NO such guard on its github branch: with no vault token
+// yet, it fell straight into resolveGithubInstallationId() -> Vercel
+// Connect's getTokenResponse(), which always throws a raw
+// `VercelOidcTokenError: ... Have you linked your project with vc link?`
+// off-Vercel. That error isn't a ConnectorInstallationRequiredError or
+// UserAuthorizationRequiredError, so it fell through to the generic
+// `return { error: e.message }` with NO `needsConnect` field -- which is
+// exactly why the chat UI never rendered the inline connect card for
+// GitHub, and why the model (seeing a bare confusing error instead of a
+// clean "not connected" signal) kept retrying the same failing call over
+// and over, reading in the UI as duplicate/near-duplicate responses.
+// Real fix: github never needs Vercel Connect at all -- it has its own
+// complete, working, vault-backed flow (github-oauth/start+callback
+// routes write the token AND `User.githubInstallationId` directly, no
+// Connect SDK involved). Empty map now -- matches 'vercel'/'supabase',
+// removed for the identical reason on 2026-07-23 (see the comment
+// immediately below). This makes resolveServiceCredential's existing
+// `if (!connector)` branch (which already returns a proper
+// needsConnect+oauth response for anything in DIRECT_OAUTH_SERVICES)
+// handle github too, instead of the dead Connect codepath ever running.
+export const CONNECT_CONNECTORS: Record<string, string> = {};
 
 /** Minimal, read/write-capable default scopes per service — narrow
  *  enough to avoid over-asking, broad enough that the agent's normal
- *  deploy/provision actions don't hit a scope wall mid-task. */
-export const CONNECT_DEFAULT_SCOPES: Record<string, string[] | undefined> = {
-  github: undefined, // Vercel-managed GitHub App install; scopes are fixed by the app's own permissions, not requestable here.
-};
+ *  deploy/provision actions don't hit a scope wall mid-task. Empty now
+ *  that CONNECT_CONNECTORS itself is empty (see that const's comment). */
+export const CONNECT_DEFAULT_SCOPES: Record<string, string[] | undefined> = {};
 
 export function hasConnectConnector(service: string): boolean {
   return service in CONNECT_CONNECTORS;
