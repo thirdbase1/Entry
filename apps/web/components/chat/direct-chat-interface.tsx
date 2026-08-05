@@ -470,7 +470,15 @@ function DirectChatSession({
     // still working (the bug behind both reports above: the send button
     // looking free to use, and a second prompt racing the still-running
     // first one).
-    resume: true,
+    // FIXED (2026-08-05, reproduced from the screen recording): only
+    // existing chats may resume. A brand-new `/chats` page still gets a
+    // client-generated chat.id, but there is no server row or stream yet.
+    // `resume: true` unconditionally made the AI SDK GET
+    // `/api/direct/chat/<generated-id>/stream` on mount; the expected 404
+    // was then surfaced as a failed/reconnecting turn before the user had
+    // typed or sent anything. Existing chats retain durable resume for
+    // reloads, tab switches, and background turns.
+    resume: Boolean(sessionId),
     // Throttle UI updates to at most once per 50ms (2026-07-18, "streaming
     // lags when the model is super fast" report) -- unset by default,
     // which means every single raw text-delta chunk from the stream

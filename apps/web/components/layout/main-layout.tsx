@@ -5,7 +5,7 @@ import { ChatIcon } from '@/components/icons/chat-icon';
 import { AnimatePresence, motion } from 'framer-motion';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppSidebar from '@/components/ui/sidebar/sidebar';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { useIsAdmin } from '@/lib/use-is-admin';
@@ -64,6 +64,7 @@ function SidebarContent() {
   const allItems = useAllItems();
   const collectedItems = useMemo(() => filterCollected(allItems), [allItems]);
   const openGithubPicker = useGithubPicker(s => s.openPicker);
+  const closeGithubPicker = useGithubPicker(s => s.closePicker);
 
   // Fetch GitHub connection status once on mount so we know whether to
   // show the "Start with GitHub" button and can pass the installation ID
@@ -92,12 +93,34 @@ function SidebarContent() {
   const inAdmin = pathname.startsWith('/admin');
   const isAdmin = useIsAdmin();
 
+  // FIXED (2026-08-05, real bug: "I click new chat, GitHub repo picker
+  // shows, I didn't click Start with GitHub"). The picker's `open` state
+  // lives in a global store (github-picker.ts) that survives client-side
+  // navigation -- it was only ever set to true (via the sidebar button or
+  // the ?github_picker=1 deep link) and NEVER set back to false on its
+  // own, so once opened it silently stayed open through any later
+  // navigation -- including a plain "New Chat" click -- until the user
+  // happened to dismiss it manually (select a repo, Escape, click the
+  // backdrop). Auto-close it any time the route actually changes -- a
+  // real navigation is a clear enough signal the user is done with it.
+  // Guarded by prevPathnameRef so this doesn't fire on initial mount
+  // (which would immediately close a picker the ?github_picker=1 deep
+  // link just opened via chats/page.tsx's own effect, since both run on
+  // the same first render).
+  const prevPathnameRef = useRef(pathname);
+  useEffect(() => {
+    if (prevPathnameRef.current !== pathname) {
+      closeGithubPicker();
+      prevPathnameRef.current = pathname;
+    }
+  }, [pathname, closeGithubPicker]);
+
   return (
     <div className="size-full flex flex-col">
       <div className="flex flex-col gap-1 px-2">
         <UserInfo />
         <Cmdk className="mb-1" />
-        <Link href="/chats">
+        <Link href="/chats" onClick={closeGithubPicker}>
           <li className={cn(
             'flex items-center gap-3 h-[30px] px-2 rounded hover:bg-accent transition-colors cursor-pointer',
             inChats && 'bg-accent'

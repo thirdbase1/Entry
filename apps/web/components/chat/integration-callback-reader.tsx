@@ -1,6 +1,7 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 
 export interface IntegrationCallback {
@@ -59,6 +60,20 @@ export function IntegrationCallbackReader({ children }: { children: (cb: Integra
 
   const callback: IntegrationCallback | undefined =
     service && (result === 'connected' || result === 'error') ? { service, result, errorMessage } : undefined;
+  const router = useRouter();
+  const pathname = usePathname();
+
+  // FIXED (2026-08-05, existing-chat recording): OAuth callback query
+  // parameters were read and converted into an automatic "Connected X."
+  // message, but never removed from `/chats/<sessionId>`. A later reload,
+  // history restore, or navigation back to that URL replayed the callback
+  // and looked like an unsolicited new turn. Consume the one-shot deep link
+  // after this render has handed `callback` to the child, then keep the clean
+  // pathname in history without triggering a full navigation.
+  useEffect(() => {
+    if (!callback) return;
+    router.replace(pathname, { scroll: false });
+  }, [callback, pathname, router]);
 
   return <>{children(callback)}</>;
 }

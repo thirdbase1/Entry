@@ -26,9 +26,25 @@ export default function NewChatPage() {
   // setup_action=update handler redirects to /chats?github_picker=1 so
   // the user lands right back in the picker to select their newly-added
   // repo without any extra clicks.
+  //
+  // FIXED (2026-08-05, real bug: "I click new chat, GitHub repo picker
+  // shows, and I didn't click Start with GitHub"). Root cause: this
+  // param was opened but NEVER stripped from the URL afterward (unlike
+  // msg/model below, which already had this exact one-time-seed
+  // staleness problem and were already fixed for it). Once a tab ever
+  // landed on /chats?github_picker=1 (via the callback's real redirect),
+  // that exact URL stuck around in browser history/back-forward cache
+  // forever -- any later reload, back/forward navigation, or mobile tab
+  // restore that returned to this same address re-ran this effect and
+  // popped the modal again, with the user having done nothing that
+  // looked like "click Start with GitHub" THIS time. Folded into the
+  // existing seed-stripping effect below (same router.replace call) so
+  // it's a one-time consume, exactly like msg/model.
   const openGithubPicker = useGithubPicker(s => s.openPicker);
+  const pickerConsumedRef = useRef(false);
   useEffect(() => {
-    if (searchParams.get('github_picker') === '1') {
+    if (searchParams.get('github_picker') === '1' && !pickerConsumedRef.current) {
+      pickerConsumedRef.current = true;
       openGithubPicker();
     }
   }, [searchParams, openGithubPicker]);
@@ -56,7 +72,7 @@ export default function NewChatPage() {
   // the user's actual last choice -- instead of resurrecting a seed value
   // that was only ever supposed to apply once.
   useEffect(() => {
-    if (!searchParams.get('msg') && !searchParams.get('model')) return;
+    if (!searchParams.get('msg') && !searchParams.get('model') && !searchParams.get('github_picker') && !searchParams.get('integration_status')) return;
     router.replace(pathname, { scroll: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
