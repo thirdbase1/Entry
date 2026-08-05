@@ -32,11 +32,12 @@ export function getByokDispatcher(): Agent {
       // Keep pooled sockets alive across normal tool-call gaps (previously
       // 4s default -- bumped to 2 minutes, comfortably longer than any
       // single tool execution most turns hit).
-      keepAliveTimeout: 120_000,
+      // Long model requests must not hit the old 120-second socket boundary.
+      keepAliveTimeout: 10 * 60 * 1000,
       // Absolute cap a socket is ever kept, regardless of traffic --
       // avoids holding a socket open indefinitely if a relay's own LB
       // expects periodic rotation.
-      keepAliveMaxTimeout: 600_000,
+      keepAliveMaxTimeout: 24 * 60 * 60 * 1000,
       // Enough concurrent sockets per BYOK origin for several parallel
       // chats/tool calls without queuing on the connection pool itself.
       connections: 32,
