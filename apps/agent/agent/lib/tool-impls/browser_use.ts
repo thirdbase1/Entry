@@ -94,12 +94,38 @@ const MAX_STEEL_STEPS = 20;
 const MAX_STEPS_STORED = 200;
 
 type Lane =
+  | { provider: 'agent_browser'; slot: 1 }
   | { provider: 'browser_use'; slot: BrowserUseSlot }
   | { provider: 'steel'; slot: 1 }
   | { provider: 'brightdata'; slot: 1 | 2 }
   | { provider: 'anchorbrowser'; slot: 1 };
 
 const LANES: Lane[] = [
+  // DEFAULT lane (2026-08-05, explicit user request: "wire the vercel
+  // agent-browser... make it the default"). Free, open-source, self-hosted
+  // inside this chat's own E2B sandbox -- agent-browser + Chrome for
+  // Testing are already baked into the shared sandbox snapshot and
+  // smoke-tested on every build (see sandbox.ts's bootstrap step), so both
+  // objections that shelved this the first time around (2026-07-25, see
+  // git history) no longer hold:
+  //   1. "local-Chrome launch needs system shared libs not present by
+  //      default" -- fixed at the bootstrap level (libnss3 etc. are
+  //      installed BEFORE `agent-browser install`, then verified with a
+  //      real open/close smoke test at build time, not just hoped-for).
+  //   2. "self-driving it gives no real embeddable live view, only
+  //      after-the-fact screenshots" -- agent-browser has since added
+  //      `stream enable` (genuine WebSocket viewport streaming), tunneled
+  //      out publicly the same way get_preview_url.ts already exposes a
+  //      dev server (cloudflared quick tunnel -- already installed in the
+  //      same bootstrap, no extra infra needed).
+  // Driven one accessibility-tree-snapshot action at a time (see
+  // decideAgentBrowserAction) -- genuinely cheaper per step than the
+  // screenshot+vision loop the paid lanes below use, since a snapshot is
+  // plain text with element refs (`click @e2`), no image tokens and no
+  // need for a vision-capable model. Tried FIRST for every new session
+  // (see pickFreeLane's default ordering == this array's order) -- the
+  // paid lanes below are now the fallback, not the default.
+  { provider: 'agent_browser', slot: 1 },
   { provider: 'browser_use', slot: 1 },
   { provider: 'steel', slot: 1 },
   { provider: 'brightdata', slot: 1 },
@@ -113,34 +139,6 @@ const LANES: Lane[] = [
   // session (see anchorbrowser-client.ts) and with a genuine live view
   // URL available immediately from session creation.
   { provider: 'anchorbrowser', slot: 1 },
-  // PLANNED, not yet implemented (2026-07-25): a 6th lane using Vercel
-  // Labs' `agent-browser` (github.com/vercel-labs/agent-browser), open
-  // source and free -- no per-session API cost like the 5 lanes above.
-  // Note this project already tried this exact CLI once before (see the
-  // 2026-07-16 REWRITTEN note at the top of this file) and moved away
-  // from it specifically because self-driving it gave no real embeddable
-  // live view, only after-the-fact screenshots -- that objection still
-  // applies to a naive re-add.
-  //   - Tested hands-on (2026-07-24): its own local-Chrome launch needs
-  //     system shared libs (libnspr4.so etc.) not present by default --
-  //     would need a custom Pxxl/Docker build step to bundle them, this
-  //     is NOT a drop-in addition.
-  //   - Also tried pointing its `agent-browser connect <cdp-url>` at our
-  //     real Steel and Anchor Browser remote sessions (to reuse their
-  //     live-view URLs and dodge the local-Chrome problem entirely) --
-  //     both rejected the handshake with a plain 400. Its CDP client
-  //     doesn't speak whatever these providers' gateways expect (they're
-  //     built/verified against Playwright's connectOverCDP, which is what
-  //     steel-client.ts and anchorbrowser-client.ts actually use).
-  //   - Its real selling point is token efficiency: an accessibility-tree
-  //     snapshot with element refs (`click @e2`, `fill @e3 "..."`)
-  //     instead of a screenshot judged by a vision model every step --
-  //     genuinely cheaper than the Steel/Bright Data decide/act loop
-  //     above, IF the live-view and launch problems get solved.
-  //   - Next step if this gets picked up for real: a Dockerfile-level Pxxl
-  //     build change to install Chrome's system deps, self-host the
-  //     daemon, and separately solve/accept the no-live-view gap (e.g. by
-  //     screenshotting on demand rather than promising a live iframe).
 ];
 
 type SessionRow = {
@@ -166,7 +164,7 @@ function appendSteps(existing: unknown, add: StepEntry[]): StepEntry[] {
   return merged.length > MAX_STEPS_STORED ? merged.slice(merged.length - MAX_STEPS_STORED) : merged;
 }
 
-async function pickFreeLane(chatId: string, preferred?: 'browser_use' | 'steel' | 'brightdata' | 'anchorbrowser'): Promise<Lane> {
+async function pickFreeLane(chatId: string, preferred?: 'agent_browser' | 'browser_use' | 'steel' | 'brightdata' | 'anchorbrowser'): Promise<Lane> {
   const active = await prisma.chatBrowserSession.findMany({
     where: { chatId, status: { in: ['running', 'idle'] } },
     select: { provider: true, slot: true },
@@ -900,6 +898,321 @@ async function runSteelLane(params: {
   }
 }
 
+// --- Agent Browser lane (free, open-source, self-hosted in this chat's own
+// E2B sandbox -- see LANES's doc comment above for why this exists and why
+// it is now the default). Driven one accessibility-tree-snapshot action at
+// a time, same one-real-action-per-step shape as the Steel/Bright Data
+// lanes above, but text-only (a snapshot with element refs, no screenshot,
+// no vision-capable model needed) -- genuinely cheaper per step. --------
+
+const MAX_AGENT_BROWSER_STEPS = 20;
+// Fixed rather than auto-selected so the tunnel step below always targets
+// a known port -- avoids an extra round-trip to ask agent-browser which
+// port it picked.
+const AGENT_BROWSER_STREAM_PORT = 9223;
+// agent-browser's own documented escape hatch for launching Chrome inside
+// a container where its default sandboxed process model can't initialize
+// (see sandbox.ts's bootstrap smoke test -- confirmed live this is
+// required, not optional, in this exact sandbox environment).
+const AGENT_BROWSER_ENV = { AGENT_BROWSER_ARGS: '--no-sandbox,--disable-dev-shm-usage,--disable-gpu' };
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+async function runAgentBrowserCli(
+  sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>,
+  sessionName: string,
+  subcommand: string,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return sandbox.run({ command: `agent-browser --session ${shellQuote(sessionName)} ${subcommand}`, env: AGENT_BROWSER_ENV });
+}
+
+/**
+ * Enables agent-browser's runtime WebSocket viewport stream and tunnels it
+ * out publicly with cloudflared -- the exact same quick-tunnel mechanism
+ * get_preview_url.ts already uses for dev-server ports (same binary,
+ * already installed in the shared sandbox bootstrap; see that file's
+ * `startTunnel` for the pattern this mirrors). Idempotent: reuses an
+ * already-running tunnel for this port if one is still alive, so calling
+ * this again on a follow-up turn is cheap and safe.
+ */
+async function ensureAgentBrowserStream(sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>, sessionName: string): Promise<string | null> {
+  await runAgentBrowserCli(sandbox, sessionName, `stream enable --port ${AGENT_BROWSER_STREAM_PORT} --json`).catch(() => {});
+
+  const port = AGENT_BROWSER_STREAM_PORT;
+  const logFile = `/tmp/.agent-browser-tunnel-${port}.log`;
+  const pidFile = `/tmp/.agent-browser-tunnel-${port}.pid`;
+  const urlPattern = /https:\/\/[^\s]+\.trycloudflare\.com/;
+
+  const status = await sandbox.run({
+    command: `cat ${logFile} 2>/dev/null || true; echo __SPLIT__; test -f ${pidFile} && kill -0 "$(cat ${pidFile})" 2>/dev/null && echo YES || echo NO`,
+  });
+  const [existingLogOut, aliveOut] = status.stdout.split('__SPLIT__');
+  const existingMatch = (existingLogOut ?? '').match(urlPattern);
+  if (existingMatch && (aliveOut ?? '').includes('YES')) return existingMatch[0];
+
+  await sandbox.run({ command: `test -f ${pidFile} && kill "$(cat ${pidFile})" 2>/dev/null; rm -f ${pidFile}; true` });
+  await sandbox.run({ command: `nohup cloudflared tunnel --url http://localhost:${port} > ${logFile} 2>&1 & echo $! > ${pidFile}; sleep 2` });
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const log = await sandbox.run({ command: `cat ${logFile} 2>/dev/null || true` });
+    const match = log.stdout.match(urlPattern);
+    if (match) return match[0];
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+  return null;
+}
+
+async function captureAndUploadAgentBrowserScreenshot(
+  sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>,
+  sessionName: string,
+): Promise<string | null> {
+  try {
+    const path = `/tmp/agent-browser-shot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+    const shot = await runAgentBrowserCli(sandbox, sessionName, `screenshot ${shellQuote(path)}`);
+    if (shot.exitCode !== 0) return null;
+    const encoded = await sandbox.run({ command: `base64 -w0 ${shellQuote(path)} 2>/dev/null || base64 ${shellQuote(path)}` });
+    const b64 = encoded.stdout.trim();
+    if (!b64) return null;
+    const buf = Buffer.from(b64, 'base64');
+    const blob = await put(`browser-agent/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`, buf, { access: 'public', contentType: 'image/png' });
+    return blob.url;
+  } catch {
+    return null;
+  }
+}
+
+const AgentBrowserActionSchema = z.object({
+  done: z
+    .boolean()
+    .nullish()
+    .transform(v => v ?? false)
+    .describe('True once the task is fully complete or has definitively failed. Omit or leave false while still working.'),
+  success: z
+    .boolean()
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('When done=true: whether the task actually succeeded.'),
+  summary: z
+    .string()
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('When done=true: concise markdown summary of the outcome, for the end user.'),
+  stepDescription: z
+    .string()
+    .nullish()
+    .transform(v => v ?? '')
+    .describe('One short sentence describing this step (shown in the UI).'),
+  action: z
+    .enum(['goto', 'click', 'fill', 'press', 'scroll_down', 'scroll_up', 'wait_ms'])
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('The single next action. Omit or use null only when done=true.'),
+  ref: z
+    .string()
+    .nullish()
+    .transform(v => v ?? undefined)
+    .describe('The element ref from the accessibility-tree snapshot (e.g. "@e2") for click/fill. Required for those, null/omit otherwise.'),
+  value: z
+    .union([z.string(), z.number()])
+    .nullish()
+    .transform(v => (v === null || v === undefined ? undefined : String(v)))
+    .describe('Payload: URL for goto, text to fill, key name for press (e.g. "Enter"), ms/px amount for scroll/wait_ms.'),
+});
+type AgentBrowserAction = z.infer<typeof AgentBrowserActionSchema>;
+
+/** Text-only decision loop -- no screenshot, no vision-capable model needed (see LANES's doc comment for why this is the cheaper lane). */
+async function decideAgentBrowserAction(params: {
+  llmModel: Parameters<typeof generateObject>[0]['model'];
+  task: string;
+  history: string[];
+  snapshotText: string;
+  url: string;
+  title: string;
+}): Promise<{ ok: true; action: AgentBrowserAction } | { ok: false; reason: string; transient?: boolean }> {
+  const MAX_ATTEMPTS = 3;
+  let lastBadText = '';
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const textContent =
+      `Task: ${params.task}\n\nSteps so far (${params.history.length}): ${params.history.join('; ') || '(none yet)'}\n\n` +
+      `Current URL: ${params.url}\nPage title: ${params.title}\n\n` +
+      `Accessibility-tree snapshot (element refs like @e2 are the clickable/fillable targets):\n${params.snapshotText.slice(0, 6000)}` +
+      (attempt > 0
+        ? `\n\nIMPORTANT: your previous response was not valid JSON matching the schema. Respond with ONLY strict JSON, no markdown fences, no commentary.${lastBadText ? `\n\nYour last (invalid) response: ${lastBadText.slice(0, 500)}` : ''}`
+        : '');
+    try {
+      const { object } = await generateObject({
+        model: params.llmModel,
+        schema: AgentBrowserActionSchema,
+        system:
+          'You control a real browser one action at a time via an accessibility-tree snapshot with element refs. You are ' +
+          'given the task, steps taken so far, the current URL/title, and the current snapshot. Decide the SINGLE next ' +
+          'action needed to make progress, using the element ref from the snapshot (e.g. "@e2") for click/fill targets. ' +
+          'Only set done=true once the task is genuinely complete, or cannot be completed after reasonable attempts (then ' +
+          'success=false and explain why).',
+        messages: [{ role: 'user', content: textContent }],
+      });
+      return { ok: true, action: object };
+    } catch (err) {
+      if (NoObjectGeneratedError.isInstance(err)) {
+        lastBadText = err.text ?? '';
+        continue;
+      }
+      if (isTransientProviderError(err) && attempt < MAX_ATTEMPTS - 1) {
+        await sleep(2000 * (attempt + 1));
+        continue;
+      }
+      return {
+        ok: false,
+        reason: isTransientProviderError(err)
+          ? `upstream model provider currently has no available capacity for this model (${err instanceof Error ? err.message : String(err)})`
+          : err instanceof Error
+            ? err.message
+            : String(err),
+        transient: isTransientProviderError(err),
+      };
+    }
+  }
+  return { ok: false, reason: 'the controlling model kept returning invalid responses', transient: false };
+}
+
+async function runAgentBrowserLane(params: {
+  task: string;
+  sandbox: Awaited<ReturnType<ToolExecCtx['getSandbox']>>;
+  llmModel: Parameters<typeof generateObject>[0]['model'];
+  rowId: string;
+  priorSteps: unknown;
+  sessionName: string;
+  isNewSession: boolean;
+}): Promise<{ output: string | null; screenshotUrl: string | null; isTaskSuccessful: boolean | null; liveUrl: string | null }> {
+  const { sandbox, sessionName } = params;
+
+  if (params.isNewSession) {
+    const open = await runAgentBrowserCli(sandbox, sessionName, 'open about:blank --json');
+    if (open.exitCode !== 0) throw new Error(`agent-browser failed to launch Chrome: ${open.stderr.slice(0, 500) || open.stdout.slice(0, 500)}`);
+  }
+
+  const liveUrl = await ensureAgentBrowserStream(sandbox, sessionName);
+  if (liveUrl) await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { liveUrl } }).catch(() => {});
+
+  let steps = params.priorSteps;
+  const history: string[] = [];
+  let outcome: { done: boolean; success?: boolean; summary?: string } = { done: false };
+  let finalScreenshotUrl: string | null = null;
+  let prevSig: string | null = null;
+  let noChangeStreak = 0;
+  const NO_CHANGE_ABORT_AT = 4;
+
+  for (let i = 0; i < MAX_AGENT_BROWSER_STEPS; i++) {
+    const [snap, urlRes, titleRes] = await Promise.all([
+      runAgentBrowserCli(sandbox, sessionName, 'snapshot'),
+      runAgentBrowserCli(sandbox, sessionName, 'get url'),
+      runAgentBrowserCli(sandbox, sessionName, 'get title'),
+    ]);
+    const snapshotText = snap.stdout.trim();
+    const currentUrl = urlRes.stdout.trim();
+    const sig = `${currentUrl}::${snapshotText.slice(0, 800)}`;
+    if (prevSig !== null && sig === prevSig) noChangeStreak++;
+    else noChangeStreak = 0;
+    prevSig = sig;
+
+    if (noChangeStreak >= NO_CHANGE_ABORT_AT) {
+      outcome = {
+        done: true,
+        success: false,
+        summary: `Stopped: the last ${noChangeStreak} actions had no visible effect on the page (stuck -- likely a blocking overlay/cookie banner, or a ref that silently no-ops). Try a more specific task description, or dismiss any blocking dialog first.`,
+      };
+      steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
+      await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+      break;
+    }
+
+    const decision = await decideAgentBrowserAction({
+      llmModel: params.llmModel,
+      task: params.task,
+      history,
+      snapshotText,
+      url: currentUrl,
+      title: titleRes.stdout.trim(),
+    });
+
+    if (!decision.ok) {
+      outcome = { done: true, success: false, summary: `Browser automation stopped: ${decision.reason}.` };
+      steps = appendSteps(steps, [{ role: 'ai', summary: outcome.summary!, screenshotUrl: null, at: new Date().toISOString() }]);
+      await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+      break;
+    }
+
+    const next = decision.action;
+    if (next.done) {
+      finalScreenshotUrl = await captureAndUploadAgentBrowserScreenshot(sandbox, sessionName);
+      outcome = { done: true, success: next.success, summary: next.summary };
+      steps = appendSteps(steps, [
+        { role: 'ai', summary: next.summary || (next.success ? 'Task completed.' : 'Task did not complete.'), screenshotUrl: finalScreenshotUrl, at: new Date().toISOString() },
+      ]);
+      await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+      break;
+    }
+
+    let stepText: string;
+    try {
+      switch (next.action) {
+        case 'goto':
+          if (next.value) {
+            const nav = await runAgentBrowserCli(sandbox, sessionName, `open ${shellQuote(next.value)}`);
+            if (nav.exitCode !== 0) throw new Error(nav.stderr.slice(0, 300) || nav.stdout.slice(0, 300));
+          }
+          break;
+        case 'click':
+          if (next.ref) {
+            const click = await runAgentBrowserCli(sandbox, sessionName, `click ${shellQuote(next.ref)}`);
+            if (click.exitCode !== 0) throw new Error(click.stderr.slice(0, 300) || click.stdout.slice(0, 300));
+          }
+          break;
+        case 'fill':
+          if (next.ref && next.value !== undefined) {
+            const fill = await runAgentBrowserCli(sandbox, sessionName, `fill ${shellQuote(next.ref)} ${shellQuote(next.value)}`);
+            if (fill.exitCode !== 0) throw new Error(fill.stderr.slice(0, 300) || fill.stdout.slice(0, 300));
+          }
+          break;
+        case 'press':
+          if (next.value) await runAgentBrowserCli(sandbox, sessionName, `press ${shellQuote(next.value)}`);
+          break;
+        case 'scroll_down':
+          await runAgentBrowserCli(sandbox, sessionName, `scroll down ${Number(next.value) || 500}`);
+          break;
+        case 'scroll_up':
+          await runAgentBrowserCli(sandbox, sessionName, `scroll up ${Number(next.value) || 500}`);
+          break;
+        case 'wait_ms':
+          await new Promise(resolve => setTimeout(resolve, Math.min(Number(next.value) || 1000, 5000)));
+          break;
+      }
+      history.push(next.stepDescription);
+      stepText = next.stepDescription;
+    } catch (err) {
+      const failText = `${next.stepDescription} -- FAILED: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300);
+      history.push(failText);
+      stepText = failText;
+    }
+
+    steps = appendSteps(steps, [{ role: 'ai', summary: stepText, screenshotUrl: null, at: new Date().toISOString() }]);
+    await prisma.chatBrowserSession.update({ where: { id: params.rowId }, data: { steps: steps as object } }).catch(() => {});
+
+    if (i === MAX_AGENT_BROWSER_STEPS - 1 && !outcome.done) {
+      outcome = { done: true, success: false, summary: `Stopped after ${MAX_AGENT_BROWSER_STEPS} steps without the task reporting completion.` };
+    }
+  }
+
+  return {
+    output: outcome.summary ?? (outcome.success ? 'Task completed.' : 'The task did not complete successfully.'),
+    screenshotUrl: finalScreenshotUrl,
+    isTaskSuccessful: outcome.success ?? null,
+    liveUrl,
+  };
+}
+
 // --- Bright Data lane (raw CDP, we drive it ourselves -- same decide/act loop as Steel) ----
 
 async function runBrightDataLane(params: {
@@ -1162,10 +1475,10 @@ export const browserUse = {
   description:
     'Drive a real cloud browser to complete a task: navigate, click, fill forms, read pages, extract data. Give it a ' +
     "natural-language task; it runs in a live, watchable cloud browser (the chat UI's Browser tab shows it in real " +
-    "time, plus a live step-by-step feed of what it's doing) and returns a summary when done. For browser_use/steel, " +
-    'the browser stays alive after the task finishes -- pass the returned session_id back in to send a FOLLOW-UP task ' +
-    'in the SAME browser (same cookies/tabs/page state) instead of starting fresh; call browser_stop when genuinely ' +
-    'finished with one of those. brightdata is different: it is ONE-SHOT ONLY -- the task runs to completion (or its ' +
+    "time, plus a live step-by-step feed of what it's doing) and returns a summary when done. For agent_browser/" +
+    'browser_use/steel, the browser stays alive after the task finishes -- pass the returned session_id back in to ' +
+    'send a FOLLOW-UP task in the SAME browser (same cookies/tabs/page state) instead of starting fresh; call ' +
+    'browser_stop when genuinely finished with one of those. brightdata is different: it is ONE-SHOT ONLY -- the task runs to completion (or its ' +
     'step limit) and the browser closes at the end of this same call, no session_id follow-up is supported for it ' +
     '(the underlying provider has no way to reattach to an already-open browser instance). brightdata also has TWO ' +
     'independent zones/credentials under the hood (added 2026-07-24), so up to two brightdata tasks can run at the ' +
@@ -1174,10 +1487,14 @@ export const browserUse = {
     'free automatically, no extra parameter needed to choose between them. anchorbrowser (added 2026-07-25) is ' +
     "another fully-agentic lane like browser_use -- give it a task, its own agent (browser-use by default) plans " +
     'and executes it -- and it IS resumable via session_id just like browser_use/steel, with its own genuine live ' +
-    'view. Up to FIVE sessions total can run in parallel for this chat (browser_use + steel + two brightdata zones ' +
-    '+ anchorbrowser) -- pass `provider` to pick which provider for a NEW session (defaults to trying browser_use ' +
-    "first, cascading automatically through steel, then brightdata, then anchorbrowser if an earlier provider's " +
-    'account itself is unavailable, e.g. out of quota). ' +
+    'view. Up to SIX sessions total can run in parallel for this chat (agent_browser + browser_use + steel + two ' +
+    "brightdata zones + anchorbrowser). agent_browser (added 2026-08-05) is FREE and open-source, self-hosted in " +
+    "this chat's own sandbox with a real live view -- driven one accessibility-tree-snapshot action at a time like " +
+    'steel/brightdata, but cheaper per step (plain text with element refs, no screenshots) -- and it IS resumable ' +
+    'via session_id. It is now the DEFAULT for a brand new session -- pass `provider` to force a specific one ' +
+    'instead (defaults to trying agent_browser first, cascading automatically through browser_use, then steel, ' +
+    "then brightdata, then anchorbrowser if an earlier provider is unavailable, e.g. out of quota or this chat's " +
+    'sandbox itself cannot come up). ' +
     'For best results, make `task` as specific and self-contained as possible -- name the exact site/URL, the exact ' +
     'field values or button labels to use, and what "done" looks like -- rather than a vague goal; the steel/brightdata ' +
     "lanes plan one raw action at a time from just this text plus what's visible on the page, so ambiguity there " +
@@ -1193,22 +1510,22 @@ export const browserUse = {
       .optional()
       .describe(
         'An existing browser session id (returned by a previous browser_use call) to send this task as a follow-up in the SAME live browser. Only ' +
-          'valid for browser_use/steel sessions -- brightdata sessions are one-shot and cannot be resumed. Omit to start a brand new session.',
+          'valid for agent_browser/browser_use/steel sessions -- brightdata sessions are one-shot and cannot be resumed. Omit to start a brand new session.',
       ),
     provider: z
-      .enum(['browser_use', 'steel', 'brightdata', 'anchorbrowser'])
+      .enum(['agent_browser', 'browser_use', 'steel', 'brightdata', 'anchorbrowser'])
       .optional()
       .describe(
-        'Force a specific provider for a NEW session: "browser_use" (fully agentic, hands-off -- its own agent plans and executes the whole task), ' +
-          '"steel" (a raw remote Chrome, driven one action at a time by this tool, resumable via session_id), "brightdata" (another raw remote ' +
-          'Chrome driven the same way, but ONE-SHOT ONLY -- no session_id follow-up, though it has two independent zones so two can run at once), ' +
-          'or "anchorbrowser" (fully agentic like browser_use, its own agent plans and executes the task, resumable via session_id). Omit to ' +
-          "auto-pick (tries browser_use first, cascading through steel, then brightdata, then anchorbrowser if an earlier provider's account can't " +
-          "run anything right now, e.g. out of quota). Ignored when session_id is given -- a follow-up always reuses that session's existing " +
-          'provider.',
+        'Force a specific provider for a NEW session: "agent_browser" (FREE, open-source, self-hosted -- driven one action at a time like steel, ' +
+          'resumable via session_id, this is the DEFAULT), "browser_use" (fully agentic, hands-off -- its own agent plans and executes the whole ' +
+          'task), "steel" (a raw remote Chrome, driven one action at a time by this tool, resumable via session_id), "brightdata" (another raw ' +
+          'remote Chrome driven the same way, but ONE-SHOT ONLY -- no session_id follow-up, though it has two independent zones so two can run at ' +
+          'once), or "anchorbrowser" (fully agentic like browser_use, its own agent plans and executes the task, resumable via session_id). Omit ' +
+          "to auto-pick (tries agent_browser first, cascading through browser_use, then steel, then brightdata, then anchorbrowser if an earlier " +
+          "provider is unavailable). Ignored when session_id is given -- a follow-up always reuses that session's existing provider.",
       ),
   }),
-  async execute({ task, session_id, provider }: { task: string; session_id?: string; provider?: 'browser_use' | 'steel' | 'brightdata' | 'anchorbrowser' }, ctx: ToolExecCtx) {
+  async execute({ task, session_id, provider }: { task: string; session_id?: string; provider?: 'agent_browser' | 'browser_use' | 'steel' | 'brightdata' | 'anchorbrowser' }, ctx: ToolExecCtx) {
     const chatId = ctx.session.id;
 
     let row: SessionRow | null = null;
@@ -1220,19 +1537,83 @@ export const browserUse = {
       if (existing.status === 'stopped') throw new Error(`Browser session "${session_id}" was already stopped -- omit session_id to start a new one.`);
       row = existing as SessionRow;
       lane =
-        existing.provider === 'steel'
-          ? { provider: 'steel', slot: 1 }
-          : existing.provider === 'brightdata'
-            ? { provider: 'brightdata', slot: existing.slot as 1 | 2 }
-            : existing.provider === 'anchorbrowser'
-              ? { provider: 'anchorbrowser', slot: 1 }
-              : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
+        existing.provider === 'agent_browser'
+          ? { provider: 'agent_browser', slot: 1 }
+          : existing.provider === 'steel'
+            ? { provider: 'steel', slot: 1 }
+            : existing.provider === 'brightdata'
+              ? { provider: 'brightdata', slot: existing.slot as 1 | 2 }
+              : existing.provider === 'anchorbrowser'
+                ? { provider: 'anchorbrowser', slot: 1 }
+                : { provider: 'browser_use', slot: existing.slot as BrowserUseSlot };
     } else {
       lane = await pickFreeLane(chatId, provider);
     }
 
     let fellBackTo: 'steel' | 'brightdata' | 'anchorbrowser' | null = null;
     let fellBackToBrightDataSlot: 1 | 2 | null = null;
+
+    if (lane.provider === 'agent_browser') {
+      const isNewSession = !row;
+      if (!row) {
+        row = (await prisma.chatBrowserSession.create({
+          data: { chatId, provider: 'agent_browser', slot: 1, providerSessionId: 'pending', task, status: 'running', steps: [] },
+        })) as SessionRow;
+        row = (await prisma.chatBrowserSession.update({
+          where: { id: row.id },
+          data: { providerSessionId: `ab-${row.id}` },
+        })) as SessionRow;
+      }
+      const sessionName = row.providerSessionId;
+
+      let laneResult: Awaited<ReturnType<typeof runAgentBrowserLane>>;
+      try {
+        const sandbox = await ctx.getSandbox();
+        // Text-only decisions (see decideAgentBrowserAction) -- no need for
+        // a vision-capable model here, unlike Steel's pinned gpt-4o-mini.
+        const llmModel = await model(undefined, ctx?.byokModel);
+        laneResult = await runAgentBrowserLane({
+          task,
+          sandbox,
+          llmModel,
+          rowId: row.id,
+          priorSteps: row.steps,
+          sessionName,
+          isNewSession,
+        });
+      } catch (err) {
+        // Never leave a lane permanently "stuck" occupied by a row that
+        // failed before it ever produced a real outcome -- mirrors the
+        // browser_use lane's own failure handling below.
+        await prisma.chatBrowserSession.update({ where: { id: row.id }, data: { status: 'failed' } }).catch(() => {});
+        throw new Error(
+          `agent_browser (free, self-hosted lane) failed: ${err instanceof Error ? err.message : String(err)}. ` +
+            'Retry with provider: "browser_use", "steel", "brightdata", or "anchorbrowser" for a paid cloud lane instead.',
+        );
+      }
+
+      row = (await prisma.chatBrowserSession.update({
+        where: { id: row.id },
+        data: {
+          task,
+          status: 'idle',
+          output: laneResult.output,
+          isTaskSuccessful: laneResult.isTaskSuccessful,
+          liveUrl: laneResult.liveUrl ?? row.liveUrl,
+        },
+      })) as SessionRow;
+
+      return {
+        status: laneResult.isTaskSuccessful === false ? 'failed' : 'finished',
+        steps: [],
+        screenshotUrl: laneResult.screenshotUrl,
+        markdown: laneResult.output ?? '',
+        sessionId: row.id,
+        liveUrl: row.liveUrl,
+        recordingUrl: null,
+        provider: 'agent_browser',
+      };
+    }
 
     if (lane.provider === 'browser_use') {
       // Create the row up front (before the lane even starts polling) so

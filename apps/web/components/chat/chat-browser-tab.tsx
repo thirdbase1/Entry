@@ -59,6 +59,7 @@ function providerLabel(provider: string, slot: number): string {
   // one, same as Browser Use's own two slots below.
   if (provider === 'brightdata') return `Bright Data (${slot})`;
   if (provider === 'anchorbrowser') return 'Anchor Browser'; // added 2026-07-25
+  if (provider === 'agent_browser') return 'Agent Browser (free)'; // added 2026-08-05 -- default lane
   return `Browser Use (${slot})`;
 }
 
