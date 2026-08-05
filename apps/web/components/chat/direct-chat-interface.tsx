@@ -209,6 +209,8 @@ interface DirectChatInterfaceProps {
    *  because this surface (BYOK/Gateway direct-chat) renders its OWN tool
    *  parts, separate from message-renderer.tsx's ToolPart switch. */
   integrationCallback?: IntegrationCallback;
+  /** Server-confirmed live turn state; prevents reconnecting ordinary history opens. */
+  initialTurnActive?: boolean;
 }
 
 /** Same heuristic as message-renderer.tsx's findChooseAnswer, adapted for plain AI SDK UIMessages. */
@@ -319,6 +321,7 @@ function DirectChatSession({
   className = '',
   initialMessage,
   integrationCallback,
+  initialTurnActive = false,
   initialMessages,
 }: DirectChatInterfaceProps & { initialMessages: any[] }) {
   const router = useRouter();
@@ -478,7 +481,7 @@ function DirectChatSession({
     // was then surfaced as a failed/reconnecting turn before the user had
     // typed or sent anything. Existing chats retain durable resume for
     // reloads, tab switches, and background turns.
-    resume: Boolean(sessionId),
+    resume: Boolean(sessionId && initialTurnActive),
     // Throttle UI updates to at most once per 50ms (2026-07-18, "streaming
     // lags when the model is super fast" report) -- unset by default,
     // which means every single raw text-delta chunk from the stream
