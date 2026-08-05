@@ -1746,8 +1746,11 @@ function DirectChatSession({
         <ChatInput
           onSend={onSend}
           sending={isBusy}
-          streaming={chat.status === 'streaming'}
-          onAbort={chat.stop}
+          // `pendingTurn` is the durable server-side signal. Do not show
+          // the voice/mic state merely because this tab's local AI SDK
+          // status fell back to `ready` after a disconnect.
+          streaming={isBusy}
+          onAbort={chat.status === 'streaming' || chat.status === 'submitted' ? chat.stop : undefined}
           placeholder={placeholder}
           model={model}
           onModelChange={setModel}

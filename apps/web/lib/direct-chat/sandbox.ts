@@ -103,7 +103,7 @@ async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
 // pausing/killing it. Reducing to 15 min + refreshing on every command
 // (see refreshTimeout below) means active sandboxes stay alive indefinitely
 // while abandoned ones free up after just 15 min.
-const IDLE_TIMEOUT_MS = 160 * 60 * 1000; // 15 min — refreshed on every command
+const IDLE_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — refreshed on every command
 // Fallback base template + inline bootstrap, used ONLY if eve's root-agent
 // path has genuinely never prewarmed its own snapshot yet (fresh env,
 // nothing in SandboxTemplate). Mirrors apps/agent/agent/sandbox/sandbox.ts's

@@ -1312,10 +1312,16 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // no actual runtime behavior; it only removes a misleading, now-false
   // "this needs Vercel to work" implication from code that's been
   // running on Render since 2026-07-22.
-  Promise.resolve(result.consumeStream()).catch((err: unknown) => {
-    console.error('[direct chat] background consumeStream failed', chatId, err);
-    logError({ source: 'direct-chat-consumestream', error: err, userId, chatId, context: { providerLabel, modelId } });
-  });
+  // The durable turn lock must follow the model's actual background
+  // consumption, not the browser-facing relay. A client disconnect or a
+  // relay iterator ending early must never make turn-status report idle
+  // while the provider/tool loop is still running.
+  Promise.resolve(result.consumeStream())
+    .catch((err: unknown) => {
+      console.error('[direct chat] background consumeStream failed', chatId, err);
+      logError({ source: 'direct-chat-consumestream', error: err, userId, chatId, context: { providerLabel, modelId } });
+    })
+    .finally(() => endTurn());
 
   const innerUiStream = result.toUIMessageStream({
     originalMessages: uiMessages,
@@ -1662,7 +1668,8 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           void publishTurnChunk(chatId, turnId, chunk);
         }
       } catch (err) {
-        endTurn();
+        // The background consumer owns turn lifetime. The client relay may
+        // fail independently without stopping model/tool execution.
         try { controller.error(err); } catch {}
         return;
       }
@@ -1679,7 +1686,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
           void publishTurnChunk(chatId, turnId, fc);
         }
       }
-      endTurn();
       try { controller.close(); } catch {}
     },
   });
