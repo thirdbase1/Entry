@@ -16,9 +16,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
 import { safeJson } from '@/components/settings/shared';
+import { ModelIcon } from '@/components/settings/model-icon';
 import { useRouter } from 'next/navigation';
 
-type AdminTab = 'users' | 'versions';
+type AdminTab = 'users' | 'providers' | 'versions' | 'billing' | 'usage';
 
 interface AdminUser {
   id: string;
@@ -216,12 +217,15 @@ interface AppVersion {
   label: string;
   createdAt: string;
   isLive: boolean;
+  commitSha?: string;
+  commitUrl?: string | null;
 }
 
 function VersionsSection() {
   const [versions, setVersions] = useState<AppVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revertingId, setRevertingId] = useState<string | null>(null);
+  const [revertEnabled, setRevertEnabled] = useState(true);
 
   const load = useCallback(async () => {
     setError(null);
@@ -230,6 +234,7 @@ function VersionsSection() {
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json?.error || `Failed to load versions (${res.status})`);
       setVersions(json.versions ?? []);
+      setRevertEnabled(json.revertEnabled !== false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -259,6 +264,11 @@ function VersionsSection() {
   return (
     <div className="flex flex-col gap-3">
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
+      {!revertEnabled ? (
+        <div className="text-xs text-muted-foreground p-2 rounded bg-muted/30 border">
+          One-click revert isn't wired up yet -- add a <code>DEPLOY_GITHUB_TOKEN</code> secret in the Pxxl dashboard to enable it. Until then, ask the agent to revert a specific commit.
+        </div>
+      ) : null}
       {versions === null ? (
         <div className="text-sm text-muted-foreground">Loading versions…</div>
       ) : versions.length === 0 ? (
@@ -272,12 +282,22 @@ function VersionsSection() {
                   {v.isLive ? <span className="text-xs px-1.5 py-0.5 rounded bg-primary/15 text-primary font-medium">LIVE</span> : null}
                   <span className="truncate">{v.label}</span>
                 </div>
-                <div className="text-xs text-muted-foreground">{new Date(v.createdAt).toLocaleString()}</div>
+                <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <span>{new Date(v.createdAt).toLocaleString()}</span>
+                  {v.commitUrl ? (
+                    <>
+                      <span>·</span>
+                      <a href={v.commitUrl} target="_blank" rel="noreferrer" className="underline hover:text-foreground">
+                        {v.commitSha?.slice(0, 7)}
+                      </a>
+                    </>
+                  ) : null}
+                </div>
               </div>
               {!v.isLive ? (
                 <button
                   onClick={() => revert(v)}
-                  disabled={revertingId === v.id}
+                  disabled={revertingId === v.id || !revertEnabled}
                   className="text-sm px-2 py-1 rounded border hover:bg-accent shrink-0 disabled:opacity-50"
                 >
                   {revertingId === v.id ? 'Reverting…' : 'Revert to this'}
@@ -285,6 +305,327 @@ function VersionsSection() {
               ) : null}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+interface SharedProviderModel {
+  id: string;
+  modelId: string;
+  label: string | null;
+  isEnabled: boolean;
+  reasoningEnabled: boolean;
+  lastTestStatus: string | null;
+}
+
+interface SharedProvider {
+  id: string;
+  label: string;
+  compatibility: string;
+  baseUrl: string;
+  spendCapUsd: number | null;
+  lastError: string | null;
+  updatedAt: string;
+  modelCount: number;
+  enabledCount: number;
+  models: SharedProviderModel[];
+}
+
+function ToggleSwitch({
+  checked,
+  onChange,
+  disabled,
+  size = 'md',
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  size?: 'sm' | 'md';
+}) {
+  const dims = size === 'sm' ? { w: 32, h: 18, knob: 14 } : { w: 40, h: 22, knob: 18 };
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'relative shrink-0 rounded-full transition-colors duration-200 ease-out disabled:opacity-40 disabled:cursor-not-allowed',
+        checked ? 'bg-primary' : 'bg-muted-foreground/25'
+      )}
+      style={{ width: dims.w, height: dims.h }}
+    >
+      <span
+        className="absolute top-1/2 rounded-full bg-white shadow-sm transition-transform duration-200 ease-out"
+        style={{
+          width: dims.knob,
+          height: dims.knob,
+          transform: `translate(${checked ? dims.w - dims.knob - 2 : 2}px, -50%)`,
+          top: '50%',
+        }}
+      />
+    </button>
+  );
+}
+
+function ProvidersSection() {
+  const [providers, setProviders] = useState<SharedProvider[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await fetch('/api/admin/shared-providers');
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json?.error || `Failed to load providers (${res.status})`);
+      setProviders(json.providers ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggleProvider = useCallback(async (providerId: string, enabled: boolean) => {
+    setBusyKey(providerId);
+    try {
+      const res = await fetch('/api/admin/shared-providers', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId, enabled }),
+      });
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+    }
+  }, [load]);
+
+  const toggleModel = useCallback(async (providerId: string, modelRowId: string, enabled: boolean) => {
+    setBusyKey(modelRowId);
+    try {
+      const res = await fetch('/api/admin/shared-providers', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId, modelRowId, enabled }),
+      });
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+    }
+  }, [load]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      {error ? <div className="text-sm text-destructive">{error}</div> : null}
+      {providers === null ? (
+        <div className="text-sm text-muted-foreground">Loading shared providers…</div>
+      ) : providers.length === 0 ? (
+        <div className="text-sm text-muted-foreground">No shared providers configured.</div>
+      ) : (
+        providers.map(p => {
+          const allOn = p.enabledCount === p.modelCount && p.modelCount > 0;
+          const allOff = p.enabledCount === 0;
+          return (
+            <div
+              key={p.id}
+              className={cn(
+                'rounded-xl border bg-card/60 shadow-sm overflow-hidden transition-opacity',
+                allOff && 'opacity-60'
+              )}
+            >
+              <div className="flex items-center justify-between gap-3 p-4 border-b bg-muted/20">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold truncate">{p.label}</span>
+                    <span
+                      className={cn(
+                        'text-[11px] px-1.5 py-0.5 rounded-full font-medium',
+                        allOn ? 'bg-primary/15 text-primary' : allOff ? 'bg-destructive/15 text-destructive' : 'bg-amber-500/15 text-amber-600'
+                      )}
+                    >
+                      {p.enabledCount}/{p.modelCount} enabled
+                    </span>
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate mt-0.5">
+                    {p.baseUrl}
+                    {p.spendCapUsd !== null ? ` · $${p.spendCapUsd.toFixed(2)} cap` : ' · uncapped'}
+                  </div>
+                  {p.lastError ? (
+                    <div className="text-xs text-destructive truncate mt-0.5">⚠ {p.lastError}</div>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-xs text-muted-foreground">{allOff ? 'Off' : 'On'}</span>
+                  <ToggleSwitch
+                    checked={!allOff}
+                    disabled={busyKey === p.id}
+                    onChange={next => toggleProvider(p.id, next)}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-col divide-y">
+                {p.models.map(m => (
+                  <div key={m.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <ModelIcon modelId={m.modelId} size={22} />
+                      <div className="min-w-0">
+                        <div className={cn('text-sm truncate', !m.isEnabled && 'text-muted-foreground')}>
+                          {m.label || m.modelId}
+                        </div>
+                        {m.lastTestStatus ? (
+                          <div className={cn('text-[11px]', m.lastTestStatus === 'success' ? 'text-primary' : 'text-destructive')}>
+                            {m.lastTestStatus === 'success' ? 'Last test OK' : 'Last test failed'}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                    <ToggleSwitch
+                      size="sm"
+                      checked={m.isEnabled}
+                      disabled={busyKey === m.id}
+                      onChange={next => toggleModel(p.id, m.id, next)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+
+interface UsageSummary {
+  events: number;
+  inputTokens: number;
+  outputTokens: number;
+  faceValueUsd: number;
+  actualCostUsd: number;
+  marginUsd: number;
+  marginPercent: number;
+  unpricedEvents: number;
+}
+
+interface UsageEventRow {
+  id: string;
+  userId: string;
+  model: string;
+  provider: string;
+  inputTokens: number;
+  outputTokens: number;
+  faceValueUsd: number;
+  actualCostUsd: number;
+  priceRateId: string | null;
+  success: boolean;
+  createdAt: string;
+}
+
+interface UsageResponse {
+  summary: UsageSummary;
+  byModel: Array<{ model: string; _count: { _all: number }; faceValueUsd: number; actualCostUsd: number }>;
+  events: UsageEventRow[];
+}
+
+function money(value: number) {
+  return `$${value.toFixed(4)}`;
+}
+
+function UsageSection({ mode }: { mode: 'billing' | 'usage' }) {
+  const [data, setData] = useState<UsageResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [days, setDays] = useState(30);
+  const [model, setModel] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const from = new Date(Date.now() - days * 86400000).toISOString();
+      const params = new URLSearchParams({ from, limit: mode === 'usage' ? '200' : '1' });
+      if (model.trim()) params.set('model', model.trim());
+      const res = await fetch(`/api/admin/usage?${params}`);
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json?.error || `Failed to load usage (${res.status})`);
+      setData(json);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [days, mode, model]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const exportCsv = useCallback(async () => {
+    const from = new Date(Date.now() - days * 86400000).toISOString();
+    const params = new URLSearchParams({ from, limit: '500' });
+    if (model.trim()) params.set('model', model.trim());
+    const res = await fetch(`/api/admin/usage?${params}`);
+    const json = await safeJson(res);
+    if (!res.ok) { setError(json?.error || `Export failed (${res.status})`); return; }
+    const rows = (json.events ?? []) as UsageEventRow[];
+    const header = ['createdAt', 'userId', 'model', 'provider', 'inputTokens', 'outputTokens', 'faceValueUsd', 'actualCostUsd', 'success'];
+    const csv = [header, ...rows.map(r => [r.createdAt, r.userId, r.model, r.provider, r.inputTokens, r.outputTokens, r.faceValueUsd, r.actualCostUsd, r.success])]
+      .map(row => row.map(v => `"${String(v).replaceAll('"', '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `entry-usage-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }, [days, model]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="text-sm flex flex-col gap-1">Range
+          <select value={days} onChange={e => setDays(Number(e.target.value))} className="border rounded px-2 py-1 bg-background">
+            <option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option>
+          </select>
+        </label>
+        <label className="text-sm flex flex-col gap-1">Model
+          <input value={model} onChange={e => setModel(e.target.value)} placeholder="All models" className="border rounded px-2 py-1 bg-background" />
+        </label>
+        <button onClick={load} disabled={loading} className="text-sm px-3 py-1 rounded border disabled:opacity-50">{loading ? 'Loading…' : 'Refresh'}</button>
+        {mode === 'usage' ? <button onClick={exportCsv} className="text-sm px-3 py-1 rounded border">Export CSV</button> : null}
+      </div>
+      {error ? <div className="text-sm text-destructive">{error}</div> : null}
+      {!data ? <div className="text-sm text-muted-foreground">Loading usage…</div> : mode === 'billing' ? (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {[
+              ['Events', data.summary.events.toLocaleString()],
+              ['Face value', money(data.summary.faceValueUsd)],
+              ['Actual cost', money(data.summary.actualCostUsd)],
+              ['Margin', `${money(data.summary.marginUsd)} (${data.summary.marginPercent.toFixed(1)}%)`],
+            ].map(([label, value]) => <div key={label} className="border rounded p-3"><div className="text-xs text-muted-foreground">{label}</div><div className="text-lg font-semibold">{value}</div></div>)}
+          </div>
+          {data.summary.unpricedEvents > 0 ? <div className="text-sm text-amber-700 bg-amber-500/10 border border-amber-500/30 rounded p-3">{data.summary.unpricedEvents} events have no matched price rate.</div> : null}
+          <div className="border rounded divide-y">
+            <div className="p-3 text-sm font-medium">Spend by model</div>
+            {data.byModel.length === 0 ? <div className="p-3 text-sm text-muted-foreground">No usage in this range.</div> : data.byModel.map(row => <div key={row.model} className="p-3 flex justify-between gap-3 text-sm"><span className="truncate">{row.model}</span><span className="shrink-0">{row._count._all} calls · {money(row.faceValueUsd)}</span></div>)}
+          </div>
+        </>
+      ) : (
+        <div className="border rounded overflow-x-auto">
+          <table className="w-full text-sm"><thead><tr className="border-b text-left"><th className="p-2">Time</th><th className="p-2">User</th><th className="p-2">Model</th><th className="p-2">Provider</th><th className="p-2">Tokens</th><th className="p-2">Face</th><th className="p-2">Status</th></tr></thead><tbody>
+            {data.events.map(row => <tr key={row.id} className="border-b last:border-0"><td className="p-2 whitespace-nowrap">{new Date(row.createdAt).toLocaleString()}</td><td className="p-2 font-mono text-xs">{row.userId.slice(0, 8)}</td><td className="p-2 max-w-48 truncate">{row.model}</td><td className="p-2">{row.provider}</td><td className="p-2">{(row.inputTokens + row.outputTokens).toLocaleString()}</td><td className="p-2">{money(row.faceValueUsd)}</td><td className="p-2">{row.success ? 'OK' : 'Failed'}{!row.priceRateId ? ' · unpriced' : ''}</td></tr>)}
+          </tbody></table>
+          {data.events.length === 0 ? <div className="p-3 text-sm text-muted-foreground">No usage events in this range.</div> : null}
         </div>
       )}
     </div>
@@ -336,6 +677,33 @@ export default function AdminPage() {
             Users
           </button>
           <button
+            onClick={() => setTab('providers')}
+            className={cn(
+              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
+              tab === 'providers' ? 'border-primary text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            Providers
+          </button>
+          <button
+            onClick={() => setTab('billing')}
+            className={cn(
+              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
+              tab === 'billing' ? 'border-primary text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            Billing
+          </button>
+          <button
+            onClick={() => setTab('usage')}
+            className={cn(
+              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
+              tab === 'usage' ? 'border-primary text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            Usage Events
+          </button>
+          <button
             onClick={() => setTab('versions')}
             className={cn(
               'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
@@ -348,7 +716,7 @@ export default function AdminPage() {
       </div>
 
       <div className="max-w-3xl w-full mx-auto px-4 py-6 flex flex-col gap-4 w-full">
-        {tab === 'users' ? <UsersSection /> : <VersionsSection />}
+        {tab === 'users' ? <UsersSection /> : tab === 'providers' ? <ProvidersSection /> : tab === 'versions' ? <VersionsSection /> : <UsageSection mode={tab} />}
       </div>
     </div>
   );

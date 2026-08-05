@@ -27,6 +27,7 @@ import { createUIMessageStreamResponse, type UIMessageChunk } from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { getActiveTurnId, readTurnStream, hasTurnStreamEnded } from '@/lib/direct-chat/turn-lock';
+import { logError } from '@entry/db/error-log';
 
 export async function GET(req: Request, { params }: { params: Promise<{ chatId: string }> }) {
   const { session } = await getUserSessionFromRequest(req);
@@ -38,6 +39,24 @@ export async function GET(req: Request, { params }: { params: Promise<{ chatId: 
   if (!chat) return Response.json({ error: 'Not found' }, { status: 404 });
 
   const activeTurnId = await getActiveTurnId(chatId);
+  // DIAGNOSTIC (2026-07-28, real bug, owner report: opening a brand new
+  // chat OR an existing one shows a stuck "..."/live-timer loading state
+  // with NO message ever sent -- confirmed via screen recording. That
+  // state is only possible if `chat.status` (client) ends up
+  // 'submitted'/'streaming', which the AI SDK's own resumeStream() code
+  // never sets on a clean 204 -- so either this endpoint is NOT actually
+  // returning 204 for these chats (a genuinely-truthy `activeTurnId` when
+  // there should be none), or the fetch itself never resolves. Logging
+  // every hit's actual decision here (never the chunk bodies) so the next
+  // occurrence gives a real chatId + activeTurnId + branch taken instead
+  // of a guess.
+  logError({
+    source: 'direct-chat-stream-resume',
+    error: new Error('resume-stream GET'),
+    userId: session.user.id,
+    chatId,
+    context: { hasActiveTurnId: !!activeTurnId, activeTurnId },
+  });
   // TERMINAL-REPLAY FIX (2026-07-27) -- see hasTurnStreamEnded's own
   // comment in turn-lock.ts. A stale-but-not-yet-expired lock can still
   // report `activeTurnId` truthy well after this exact turn already

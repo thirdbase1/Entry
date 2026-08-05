@@ -95,29 +95,41 @@ export async function getProviderSpendUsd(providerId: string): Promise<number> {
 }
 
 /**
- * ONE COMBINED POOL ACROSS ALL SHARED PROVIDERS (owner ask 2026-07-27:
- * "the $20 usage is for only hcnsec model, do it to be for both free and
- * hcnsec" -- HCNSec and freemodel.dev must draw down the SAME single
- * monthly budget instead of each having its own separate cap). Renamed
- * user-facing label is "Monthly usage" everywhere (route.ts's gate error
- * message + the Settings > Usage card) -- this constant is now the ONE
- * source of truth for that cap, not each UserModelProvider row's own
- * `spendCapUsd` column (kept populated for informational/legacy display
- * only, no longer read for enforcement).
+ * ONE COMBINED POOL ACROSS ALL SHARED PROVIDERS, PER USER (owner ask
+ * 2026-07-27: "the $20 usage is for only hcnsec model, do it to be for
+ * both free and hcnsec" -- HCNSec, freemodel.dev, and now Opencode Zen
+ * must draw down the SAME single monthly budget instead of each having
+ * its own separate cap). Renamed user-facing label is "Monthly usage"
+ * everywhere (route.ts's gate error message + the Settings > Usage
+ * card) -- this constant is now the ONE source of truth for that cap,
+ * not each UserModelProvider row's own `spendCapUsd` column (kept
+ * populated for informational/legacy display only, no longer read for
+ * enforcement).
  *
  * DECREASED to $10 (owner ask, same message: "decrease usage to $10").
+ *
+ * FIXED (2026-07-27, real bug the owner caught live): this was a single
+ * PLATFORM-WIDE pool with zero userId scoping -- getAllSharedSpendUsd()
+ * summed every user's usageEvent rows together, so one heavy user could
+ * exhaust the $10 cap for every other account on the platform. That is
+ * NOT what "$10 monthly usage" was ever supposed to mean -- each account
+ * gets its own independent $10/mo budget. getAllSharedSpendUsd now
+ * requires a userId and filters on it; there is no more all-accounts
+ * variant.
  */
 export const SHARED_MONTHLY_CAP_USD = 10;
 
 /** Same "live SUM over the ledger, current calendar month" shape as
  *  getProviderSpendUsd above, but across EVERY isShared provider's usage
- *  combined (`provider LIKE 'shared:%'`) -- this is what actually gates
- *  and displays the single combined "Monthly usage" cap now. */
-export async function getAllSharedSpendUsd(): Promise<number> {
+ *  combined (`provider LIKE 'shared:%'`) for ONE user -- this is what
+ *  actually gates and displays that user's own "Monthly usage" cap.
+ *  Scoped by userId (fixed 2026-07-27 -- see constant comment above for
+ *  why an unscoped, all-accounts sum was a real bug, not the design). */
+export async function getAllSharedSpendUsd(userId: string): Promise<number> {
   const now = new Date();
   const startOfMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
   const result = await prisma.usageEvent.aggregate({
-    where: { provider: { startsWith: 'shared:' }, createdAt: { gte: startOfMonth } },
+    where: { userId, provider: { startsWith: 'shared:' }, createdAt: { gte: startOfMonth } },
     _sum: { actualCostUsd: true },
   });
   return Number(result._sum.actualCostUsd ?? 0);

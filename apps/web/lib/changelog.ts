@@ -13,6 +13,43 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-08-04',
+    title: 'New models available: Opencode Zen (Free Tier)',
+    items: [
+      "Added four new models to the model picker -- fast, no-cost options alongside the existing shared providers, backed by real vendor pricing under the hood.",
+    ],
+  },
+  {
+    date: '2026-08-01',
+    title: 'Fixed a stuck "thinking..." indicator',
+    items: [
+      "The thinking indicator could go stale and keep showing after a reply had already finished, and could also misbehave right after starting a brand-new chat. Both are fixed -- it now tracks the real state of the turn instead of a snapshot that could fall behind.",
+    ],
+  },
+  {
+    date: '2026-07-29',
+    title: 'Faster replies when a shared model is busy, and a real fix for "Connected" lying about GitHub access',
+    items: [
+      "Root cause of slow shared-model responses found: rate-limit responses (which shared/pooled models hit far more often than a personal API key) were falling through to a hardcoded, non-configurable wait schedule -- up to 62 seconds of pure waiting before anything happened. Rate limits are now detected and retried fast instead.",
+      "Fixed the GitHub integration showing a green \"Connected\" badge for accounts that were authorized but never actually had real repo access -- it now checks the real installation status with GitHub, not just whether we once saw a token.",
+    ],
+  },
+  {
+    date: '2026-07-27',
+    title: 'Fixed a real billing bug: your usage was being pooled with everyone else\'s',
+    items: [
+      "Found and fixed a critical bug where the shared-model monthly usage cap was a single pool shared across every account on the platform instead of per-user -- meaning your usage could be affected by other people's activity. Every account now has its own fully independent monthly budget.",
+      "Also fixed a related slowdown: hitting a hard monthly limit on a shared model used to trigger several retries with backoff delays before finally failing -- it now fails fast and clearly instead.",
+    ],
+  },
+  {
+    date: '2026-07-27',
+    title: 'Fixed the recurring GitHub "invalid_state" connection error',
+    items: [
+      "Root cause found: GitHub's own install flow and its OAuth flow are two separate steps, and the install step doesn't return the same parameters the OAuth step does -- our code was treating that as a broken/expired state instead of a normal part of connecting. Reconnecting GitHub should now work reliably on the first try.",
+    ],
+  },
+  {
     date: '2026-07-22',
     title: 'Fixed: messages stopping instantly and nothing saving',
     items: [
@@ -349,4 +386,29 @@ export const CHANGELOG: ChangelogEntry[] = [
       'Production secrets now live exclusively in Vercel\'s encrypted environment store.',
     ],
   },
+  {
+    date: '2026-07-14',
+    title: 'A real in-chat coding environment: editor, live files, terminal',
+    items: [
+      "Added a real code editor tab, a live file tree that updates as the agent writes, and an actual terminal tab -- so you can watch and touch what the agent is doing to your project, not just read a transcript of it.",
+      "Chat no longer \"forgets\" halfway through a long conversation -- long chats are now automatically compacted so the agent keeps real context instead of silently losing earlier instructions.",
+      "Smoothed out choppy, stuttery agent replies during fast streaming.",
+    ],
+  },
+  {
+    date: '2026-07-11',
+    title: 'Dark mode, and BYOK reasoning/effort controls actually work',
+    items: [
+      "Added dark mode.",
+      "Fixed the reasoning-effort toggle for your own connected (BYOK) models -- it was silently ignored, so \"thinking\" mode never actually turned on no matter what you picked.",
+    ],
+  },
+  {
+    date: '2026-07-09',
+    title: 'Bring your own key (BYOK): connect your own model providers',
+    items: [
+      "You can now connect your own AI provider accounts (OpenAI-compatible, Anthropic, Google, and more) with your own API key, pick exactly which of that provider's models show up in your chat model picker, and use them right alongside the built-in models.",
+    ],
+  },
+
 ];

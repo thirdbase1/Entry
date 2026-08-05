@@ -367,27 +367,35 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     throw err;
   }
 
-  // MONTHLY USAGE CAP -- ONE COMBINED POOL ACROSS EVERY SHARED PROVIDER
-  // (2026-07-27, owner ask: "the $20 usage is for only hcnsec, do it to
-  // be for both free and hcnsec" + "decrease usage to $10" + "change
-  // that place name to monthly usage"). Any platform-provided relay
-  // (HCNSec, freemodel.dev, ...) now draws against the SAME single
-  // monthly budget instead of each having its own separate cap -- so
-  // hitting the cap on one shared model blocks ALL shared models until
-  // the calendar month rolls over, not just that one. Checked here --
-  // AFTER resolution/cooldown-fallback, BEFORE any streaming starts --
-  // so a request that would push spend over the cap is rejected cleanly
-  // up front instead of after already burning tokens. Read fresh from
-  // the ledger every turn (never a separate counter that could drift):
-  // see getAllSharedSpendUsd's own comment for why it's a live SUM over
-  // UsageEvent, not a cached running total.
+  // MONTHLY USAGE CAP -- ONE COMBINED POOL ACROSS EVERY SHARED PROVIDER,
+  // PER ACCOUNT (2026-07-27, owner ask: "the $20 usage is for only
+  // hcnsec, do it to be for both free and hcnsec" + "decrease usage to
+  // $10" + "change that place name to monthly usage"). Any
+  // platform-provided relay (HCNSec, freemodel.dev, Opencode Zen, ...)
+  // now draws against the SAME single monthly budget instead of each
+  // having its own separate cap -- so hitting the cap on one shared
+  // model blocks ALL shared models for THIS ACCOUNT until the calendar
+  // month rolls over, not just that one model.
+  //
+  // FIXED (2026-07-27, real bug the owner caught live): this used to sum
+  // spend across EVERY account on the platform, so one heavy user could
+  // exhaust the shared budget for every other account. Each account gets
+  // its own independent $10/mo pool -- getAllSharedSpendUsd is scoped to
+  // `userId` now, see its own comment in usage-metering.ts.
+  //
+  // Checked here -- AFTER resolution/cooldown-fallback, BEFORE any
+  // streaming starts -- so a request that would push spend over the cap
+  // is rejected cleanly up front instead of after already burning
+  // tokens. Read fresh from the ledger every turn (never a separate
+  // counter that could drift): see getAllSharedSpendUsd's own comment
+  // for why it's a live SUM over UsageEvent, not a cached running total.
   if (isByokResolved(resolved) && resolved.isShared) {
-    const spentSoFar = await getAllSharedSpendUsd();
+    const spentSoFar = await getAllSharedSpendUsd(userId);
     if (spentSoFar >= SHARED_MONTHLY_CAP_USD) {
       await preSave;
       endTurn();
       throw new Error(
-        `This month's shared usage budget is exhausted ($${spentSoFar.toFixed(2)} of $${SHARED_MONTHLY_CAP_USD.toFixed(2)} spent across all free/shared models) — pick a BYOK (your own key) model, or wait for next month's reset.`
+        `Your monthly usage budget is exhausted ($${spentSoFar.toFixed(2)} of $${SHARED_MONTHLY_CAP_USD.toFixed(2)} spent across all free/shared models) — pick a BYOK (your own key) model, or wait for next month's reset.`
       );
     }
   }
@@ -788,21 +796,36 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   const result = streamText({
     model,
-    // RAISED (2026-07-25, real production log: "[direct chat] turn error
-    // ... Failed after 3 attempts. Last error: AI_APICallError: You
-    // exceeded your current quota" -- Google's free-tier Gemini quota is
-    // a shared, per-minute bucket across every concurrent user on this
-    // relay, so a burst of traffic can trip it for a few seconds even
-    // though the account is nowhere near a real/permanent limit. The AI
-    // SDK's own internal retry defaults to `maxRetries: 2` (3 attempts
-    // total) with a short backoff -- nowhere near enough runway to ride
-    // out even the ~2s retryDelay Google's own error response suggested,
-    // let alone a slightly longer burst. This is a pure config bump, same
-    // request budget either way (SOFT_DEADLINE_MS/the chunk timeout below
-    // still bound the worst case) -- it just gives transient 429/quota
-    // bursts more real chances to clear before the turn gives up and
-    // surfaces an error to the user at all.
-    maxRetries: 5,
+    // LOWERED BACK DOWN (2026-07-29, real bug, owner report: "why does
+    // it take long for ALL shared ai to respond"). This was raised to 5
+    // on 2026-07-25 specifically because 429/quota bursts (e.g. Google's
+    // shared free-tier bucket) had nowhere else to be retried fast --
+    // gateway-retry-fetch.ts's own wrapper (used by every BYOK/shared
+    // model, see build-model-client.ts) didn't handle 429 AT ALL back
+    // then, so every single 429 fell through to exactly THIS outer
+    // AI-SDK-level retry, which uses the SDK's hardcoded, non-configurable
+    // exponential backoff -- 2s, 4s, 8s, 16s, 32s between attempts (see
+    // @ai-sdk/provider-utils's retryWithExponentialBackoff defaults,
+    // `initialDelayInMs: 2000, backoffFactor: 2`, not overridable via
+    // streamText's own options) -- up to 62 real SECONDS of pure waiting
+    // on one turn before even counting actual request latency. Shared
+    // providers pool many users onto one upstream account, so they hit
+    // momentary 429s far more than a private BYOK key ever would --
+    // exactly why this was disproportionately a "shared AI is slow"
+    // complaint specifically, not a general one.
+    //
+    // Now that gateway-retry-fetch.ts properly retries 429 itself (added
+    // 2026-07-29, see that file's own comment) with its OWN much cheaper
+    // ~200ms-based backoff and correct permanent-vs-transient
+    // classification, this outer retry is really only a thin safety net
+    // for genuine transport-level failures (a thrown network exception
+    // before any HTTP response came back at all, which never even
+    // reaches the inner wrapper's status-code logic) -- it no longer
+    // needs to carry the FULL weight of absorbing every 429 burst itself,
+    // so it's brought back down to a modest value instead of layering a
+    // second, much slower retry system on top of a problem the inner
+    // wrapper now already solves quickly.
+    maxRetries: 2,
     stopWhen: [
       stepCountIs(400), // generous ceiling so a long agentic turn is bounded by the SOFT_DEADLINE_MS time budget, not an arbitrary low step count
       // FIXED (2026-07-27, real bug from a user-recorded video: a shared

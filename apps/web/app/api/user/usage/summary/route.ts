@@ -167,14 +167,18 @@ export const GET = withApiErrorHandling(async (req: NextRequest) => {
 
   // ONE COMBINED "MONTHLY USAGE" POOL (owner ask 2026-07-27: rename from
   // a provider-specific "$20 hnsec" label, apply the SAME cap to every
-  // shared/free model together, decrease to $10). PLATFORM-WIDE, not
-  // scoped to this one user -- matches exactly what actually gates
-  // requests in direct/chat/route.ts (getAllSharedSpendUsd has no
-  // per-user filter, since the whole point is protecting the platform's
-  // own relay budget) -- showing only "my own slice" here would make the
-  // bar look artificially empty for one user while the shared pool is
-  // actually near/at the real cap from everyone else's usage combined.
-  const monthlySpentUsd = sharedProviderRows.length ? await getAllSharedSpendUsd() : 0;
+  // shared/free model together, decrease to $10). PER ACCOUNT, not
+  // platform-wide -- matches exactly what actually gates requests in
+  // direct/chat/route.ts (getAllSharedSpendUsd is scoped to `userId`).
+  //
+  // FIXED (2026-07-27, real bug the owner caught live): this used to be
+  // an unscoped, all-accounts sum -- every user on the platform shared
+  // ONE $10 pool, so one heavy account could exhaust it for everyone
+  // else, and this page would show a near-empty user their own bar
+  // already near/at cap from other people's usage. Each account gets its
+  // own independent $10/mo pool now; see usage-metering.ts's comment on
+  // getAllSharedSpendUsd for the full story.
+  const monthlySpentUsd = sharedProviderRows.length ? await getAllSharedSpendUsd(userId) : 0;
   const monthlyUsage = {
     label: 'Monthly usage',
     capUsd: SHARED_MONTHLY_CAP_USD,

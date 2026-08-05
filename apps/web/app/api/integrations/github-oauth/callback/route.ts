@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { randomBytes } from 'node:crypto';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { getPublicOrigin } from '@/lib/public-origin';
 import { saveCredential } from '@entry/agent/lib/credential-vault';
 import { prisma } from '@entry/db';
+import { logError } from '@entry/db/error-log';
 
 /**
  * GET /api/integrations/github-oauth/callback
@@ -72,8 +74,10 @@ export async function GET(req: NextRequest) {
   const cookieState = req.cookies.get('github_oauth_state')?.value;
 
   const clearCookies = (res: NextResponse) => {
+    res.headers.set('Cache-Control', 'no-store, must-revalidate');
     res.cookies.set('github_oauth_state', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
     res.cookies.set('github_oauth_return', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
+    res.cookies.set('github_pending_installation_id', '', { maxAge: 0, path: '/api/integrations/github-oauth' });
     return res;
   };
   const clearCookiesAndRedirect = (url: string) => clearCookies(NextResponse.redirect(url));
@@ -108,7 +112,7 @@ export async function GET(req: NextRequest) {
   // back on the app, not stranded on github.com.
   //
   // NOTE: This flow requires the GitHub App's Setup URL to be set to
-  //   https://entry.oneshotsx.cv/api/integrations/github-oauth/callback
+  //   https://entry.pxxl.run/api/integrations/github-oauth/callback
   // AND "Redirect on update" enabled in the App's settings on
   // github.com/apps/entry-github. Without both, GitHub does NOT
   // redirect here at all after an update — it just leaves the user on
@@ -136,7 +140,95 @@ export async function GET(req: NextRequest) {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return NextResponse.redirect(new URL('/sign-in', origin));
 
+  // INSTALL-WITHOUT-OAUTH-CODE FIX (2026-07-28, real bug, confirmed via
+  // the diagnostic logging below on the owner's own first-ever install:
+  // hasState/hasCookieState/stateMatches ALL true, hasCode FALSE --
+  // state was never actually invalid. GitHub's real installations/new
+  // screen returned `installation_id` + `state` with NO `code` at all --
+  // installing an App and completing its OAuth grant are two genuinely
+  // separate GitHub-side steps, and evidently entry-github's install
+  // screen only completes the first one in this one round trip. The old
+  // code required `code` unconditionally and mislabeled this as
+  // "invalid_state", which is exactly backwards -- the install itself
+  // had already succeeded (GitHub doesn't hand back a real
+  // installation_id otherwise) and the user was shown a scary error for
+  // something that actually worked.
+  //
+  // Fix: when state genuinely matches and we have a real installationId
+  // but no code, persist the installation immediately (never block a
+  // real success on the separate OAuth half) and chain straight into the
+  // bare `login/oauth/authorize` screen to pick up a real user token too
+  // -- entry-github supports standalone user-to-server OAuth with the
+  // same client id/secret, so this completes transparently (near-instant
+  // approval, since the user just installed the app) without needing any
+  // change to the GitHub App's own settings.
+  if (installationId && !code && state && cookieState && state === cookieState) {
+    // VERIFY-BEFORE-TRUST FIX (2026-07-29, real bug, owner report: "I
+    // don't have the entry GitHub install, but clicking connect just
+    // reloads and shows connected"). The previous version of this branch
+    // persisted `installationId` straight from the query string and
+    // reported success later purely because the SECOND (chained) leg's
+    // code exchange succeeded -- neither step ever actually asked GitHub
+    // "is this installation real for this user." Never trust a query
+    // param alone for something this consequential. Now: stash the
+    // CANDIDATE id in a short-lived cookie instead of the DB, chain into
+    // oauth/authorize to get a real token, and only persist + report
+    // "connected" once that token is used to confirm the installation
+    // truly appears in this user's own `GET /user/installations` below.
+    const chainClientId = process.env.GITHUB_OAUTH_CLIENT_ID;
+    if (chainClientId) {
+      const newState = randomBytes(24).toString('base64url');
+      const authorizeUrl = new URL('https://github.com/login/oauth/authorize');
+      authorizeUrl.searchParams.set('client_id', chainClientId);
+      authorizeUrl.searchParams.set('state', newState);
+      authorizeUrl.searchParams.set('redirect_uri', `${origin}/api/integrations/github-oauth/callback`);
+      const res = NextResponse.redirect(authorizeUrl.toString());
+      res.headers.set('Cache-Control', 'no-store, must-revalidate');
+      // Overwrite with a fresh state for this second leg -- leave
+      // github_oauth_return untouched so the chained authorize's own
+      // callback still knows where to send the user back afterward.
+      res.cookies.set('github_oauth_state', newState, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        maxAge: 10 * 60,
+        path: '/api/integrations/github-oauth',
+      });
+      res.cookies.set('github_pending_installation_id', installationId, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        maxAge: 10 * 60,
+        path: '/api/integrations/github-oauth',
+      });
+      return res;
+    }
+    // No client id configured to chain into OAuth with -- can't get a
+    // token to verify against, so don't claim success on an unverified id.
+    return clearCookiesAndRedirect(resultUrl('error', 'not_configured'));
+  }
+
   if (!code || !state || !cookieState || state !== cookieState) {
+    // DIAGNOSTIC (2026-07-27, real bug, ongoing owner report: still
+    // getting "invalid_state" after the stale-installationId fix). This
+    // was previously a silent redirect with zero durable trace of WHICH
+    // piece was actually missing/mismatched -- logging booleans only
+    // (never the actual state/cookie values, those are still
+    // security-sensitive) so the next occurrence is diagnosable from
+    // error_logs instead of guessed at blind.
+    logError({
+      source: 'github-oauth-invalid-state',
+      error: new Error('GitHub OAuth callback invalid_state'),
+      userId: session.user.id,
+      context: {
+        host: req.headers.get('x-forwarded-host') || req.headers.get('host'),
+        hasCode: !!code,
+        hasState: !!state,
+        hasCookieState: !!cookieState,
+        stateMatches: !!state && !!cookieState && state === cookieState,
+        referer: req.headers.get('referer'),
+      },
+    });
     return clearCookiesAndRedirect(resultUrl('error', 'invalid_state'));
   }
 
@@ -166,16 +258,52 @@ export async function GET(req: NextRequest) {
 
     await saveCredential({ userId: session.user.id, service: 'github', value: tokenJson.access_token });
 
-    // Persist the installation the user just picked repos for (or
-    // "updated" -- setup_action=update -- if they revisited an existing
-    // one to add/remove repos). Best-effort: a user who somehow lands
-    // here without an installation_id (shouldn't happen via the
-    // installations/new URL, but keep this robust to a stray direct hit
-    // on this callback) still gets their OAuth token saved above --
-    // just without repo access until they do install it.
-    if (installationId) {
+    // VERIFY-BEFORE-TRUST (2026-07-29, see the no-code branch above for
+    // the full bug this closes): the id we're about to persist can come
+    // from THIS request's own installation_id query param, or -- on the
+    // chained second leg after a no-code install -- from the pending
+    // cookie stashed there. Either way, before we ever write it to the
+    // DB or tell the user "connected", actually ask GitHub's own
+    // `/user/installations` (with the token we JUST obtained) whether it
+    // really is installed for this account. A candidate id that doesn't
+    // show up there is never persisted and never reported as success --
+    // this is the one thing standing between "GitHub told us so" and
+    // "we assumed so."
+    const pendingInstallationId = req.cookies.get('github_pending_installation_id')?.value ?? null;
+    const candidateInstallationId = installationId ?? pendingInstallationId;
+
+    if (candidateInstallationId) {
+      let verified = false;
+      try {
+        const instRes = await fetch('https://api.github.com/user/installations', {
+          headers: { Authorization: `Bearer ${tokenJson.access_token}`, Accept: 'application/vnd.github+json' },
+        });
+        if (instRes.ok) {
+          const instJson = (await instRes.json()) as { installations?: Array<{ id: number }> };
+          verified = (instJson.installations ?? []).some(i => String(i.id) === String(candidateInstallationId));
+        }
+      } catch (err) {
+        console.error('[github-oauth callback] installation verification call failed', session.user.id, err);
+      }
+
+      if (!verified) {
+        logError({
+          source: 'github-oauth-unverified-installation',
+          error: new Error('GitHub did not confirm the installation id before it would have been persisted'),
+          userId: session.user.id,
+          context: { candidateInstallationId, fromPendingCookie: !candidateInstallationId ? false : installationId == null },
+        });
+        // A real OAuth token WAS obtained (already saved above), so the
+        // user isn't left with nothing -- just don't claim repo access
+        // that GitHub itself won't confirm. Tell them plainly instead of
+        // silently showing "Connected".
+        return clearCookies(
+          NextResponse.redirect(resultUrl('error', 'GitHub did not confirm the app installation — click Connect again and complete the Install step on GitHub.'))
+        );
+      }
+
       await prisma.user
-        .update({ where: { id: session.user.id }, data: { githubInstallationId: installationId } })
+        .update({ where: { id: session.user.id }, data: { githubInstallationId: candidateInstallationId } })
         .catch(err => console.error('[github-oauth callback] failed to persist installationId', session.user.id, setupAction, err));
     }
 

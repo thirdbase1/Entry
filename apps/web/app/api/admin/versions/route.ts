@@ -1,75 +1,62 @@
 /**
- * Custom, app-native version history (2026-07-16, replaces two earlier,
- * explicitly-rejected attempts: first a raw Vercel-deployment browser
- * (broke on a misconfigured token, "access token not configured"), then
- * a GitHub-commit browser with manual git-revert + "ask your agent to
- * deploy" (rejected: "No not GitHub versioning... our own custom
- * versioning, so when agent do something wrong I can revert to another
- * version").
+ * Custom, app-native version history -- REWORKED 2026-08-05.
  *
- * This is the actual custom system: every shipped change gets its own
- * `AppVersion` row (id, plain-language label, timestamp) written by the
- * agent right after a successful production deploy (see DEPLOY.md +
- * POST below). No git shas, no commit messages, no GitHub concepts are
- * ever surfaced to the product. Reverting is fully self-service and
- * instant: each version privately carries the Vercel deployment id that
- * was live when it was created, and "revert" calls Vercel's real Instant
- * Rollback API to repoint production at that already-built artifact --
- * seconds, no rebuild, no agent needed at click time. That's the only
- * mechanism that makes "click revert -> live" literally true, so it's
- * kept as an internal implementation detail rather than reintroducing a
- * rebuild-every-revert flow.
+ * This used to ride Vercel's Instant Rollback API (record = "stamp
+ * whatever Vercel deployment is currently live", revert = call Vercel's
+ * rollback endpoint). That stopped being true the day production moved to
+ * Pxxl's git-based auto-deploy: there is no "currently live Vercel
+ * deployment" anymore, so the old logic would silently stamp/revert
+ * against a stale, disconnected system. Reworked to be git-native instead,
+ * matching how deploys actually happen now (push to `main` on GitHub ->
+ * Pxxl dashboard auto-deploys it):
  *
- * CREDENTIAL SOURCE (2026-07-17): this used to read a static personal
- * access token from a `VERCEL_TOKEN_2` env var, which twice went dead
- * (wrong scope, then a stale value) and both times silently broke this
- * whole route until manually caught and re-pasted. Replaced with Vercel
- * Connect (`@vercel/connect`) -- a `vercel/entry-vercel-internal`
- * connector owned by this project, authenticated via this Function's own
- * OIDC identity, no stored long-lived secret at all. `getToken()` mints
- * a short-lived scoped token per call and Vercel handles rotation --
- * this class of "token silently died" bug should no longer be possible
- * here. See @vercel/connect's README for the underlying OIDC exchange.
- *
- * GET  -> version list, newest first, each flagged `isLive` by exact
- *         match against Vercel's current production deployment id
- *         (exact id equality -- no fuzzy sha matching).
- * POST { label } -> agent-only: records a new version pointing at
- *         whatever Vercel deployment is *currently* live production (to
- *         be called immediately after a successful `vercel deploy
- *         --prebuilt --prod`).
- * POST { revertToId } -> user-facing: instantly rolls production back to
- *         that version's Vercel deployment via Instant Rollback, then
- *         records a fresh AppVersion row for the resulting live state so
- *         the timeline stays an honest, append-only log (never mutates
- *         or deletes past rows).
- *
- * Admin-only, single-owner product (see DEPLOY.md) -- any authenticated
- * session on this instance is the owner.
+ * - Each `AppVersion` row now stores a GIT COMMIT SHA (reusing the
+ *   existing `vercelDeploymentId` column -- no migration needed, it's
+ *   just a sha string in that column now) instead of a Vercel deployment
+ *   id. `vercelUrl` similarly now holds the GitHub commit URL.
+ * - "isLive" is determined by comparing a version's sha against the
+ *   real HEAD of `main` on GitHub (public repo, unauthenticated read,
+ *   works with zero secrets configured).
+ * - POST { label } still records a version the same way as before --
+ *   call this right after a push to `main` lands (see DEPLOY.md / the
+ *   sandbox rule file). If no `commitSha` is passed in the body, it looks
+ *   up `main`'s current HEAD itself.
+ * - POST { revertToId } (one-click revert) needs write access to the repo,
+ *   which this route does NOT have by default (no secret shipped here on
+ *   purpose). Set a `DEPLOY_GITHUB_TOKEN` env var (a GitHub PAT scoped to
+ *   `contents:write` on this repo) in the Pxxl dashboard to enable it. If
+ *   that's not configured, revert returns a clear 501 explaining exactly
+ *   that, instead of pretending to succeed.
+ * - Reverting never rewrites history: it creates a brand-new commit on
+ *   `main` whose tree matches the target commit's tree, then fast-forwards
+ *   the ref to it -- an honest, append-only "restore to this snapshot"
+ *   commit, not a force-push.
  */
 import { prisma } from '@entry/db';
 import { getUserSessionFromRequest } from '@entry/auth';
-import { getToken } from '@vercel/connect';
 import { isAdminBearerAuthorized } from '@/lib/admin-auth';
 
-const VERCEL_API = 'https://api.vercel.com';
-const PROJECT_ID = process.env.VERCEL_PROJECT_ID || 'prj_vwm0Sv2SJz07EcyEu7eGIPblMpLd';
-const TEAM_ID = process.env.VERCEL_ORG_ID || 'team_T8HMN4wYS9DoznHfnNiplKJW';
-const VERCEL_CONNECTOR = 'vercel/entry-vercel-internal';
+const GITHUB_API = 'https://api.github.com';
+const REPO = process.env.DEPLOY_GITHUB_REPO || 'thirdbase1/Entry';
+const BRANCH = 'main';
 
-// The "vercel" connector is a generic-OAuth connector (Vercel has no
-// dedicated managed connector type for itself), set up by a real human
-// (the app owner) authorizing it in their own browser -- so its grant is
-// bound to that owner's Vercel account, not an app-wide credential.
-// Redeeming it therefore needs subject: { type: 'user', id: <owner's
-// Vercel account uid> }, not { type: 'app' } (confirmed via the "Token
-// unresolved" error returned for the app-subject attempt).
-const OWNER_VERCEL_UID = process.env.VERCEL_OWNER_UID || 'X3QHylwBnTGvxQ1jG1LZ4HVe';
+function githubHeaders(token?: string) {
+  const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
 
-async function vercelHeaders() {
-  const token = await getToken(VERCEL_CONNECTOR, { subject: { type: 'user', id: OWNER_VERCEL_UID } });
-  if (!token) throw new Error(`Vercel Connect returned no token for connector "${VERCEL_CONNECTOR}".`);
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+async function currentMainSha(): Promise<string | null> {
+  // Unauthenticated read works fine for a public repo (lower rate limit,
+  // but this route is only hit by the admin page + occasional agent calls).
+  const token = process.env.DEPLOY_GITHUB_TOKEN;
+  const res = await fetch(`${GITHUB_API}/repos/${REPO}/commits/${BRANCH}`, {
+    headers: githubHeaders(token),
+    cache: 'no-store',
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { sha: string };
+  return data.sha || null;
 }
 
 async function isAuthorized(req: Request): Promise<boolean> {
@@ -78,32 +65,25 @@ async function isAuthorized(req: Request): Promise<boolean> {
   return Boolean(session);
 }
 
-async function currentLiveDeploymentId(): Promise<string | null> {
-  const res = await fetch(
-    `${VERCEL_API}/v6/deployments?projectId=${PROJECT_ID}&teamId=${TEAM_ID}&target=production&limit=1&state=READY`,
-    { headers: await vercelHeaders(), cache: 'no-store' },
-  );
-  if (!res.ok) return null;
-  const data = (await res.json()) as { deployments: Array<{ uid: string }> };
-  return data.deployments?.[0]?.uid || null;
-}
-
 export async function GET(req: Request) {
   if (!(await isAuthorized(req))) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const [versions, liveId] = await Promise.all([
+    const [versions, liveSha] = await Promise.all([
       prisma.appVersion.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
-      currentLiveDeploymentId().catch(() => null),
+      currentMainSha().catch(() => null),
     ]);
 
     return Response.json({
-      liveIdKnown: Boolean(liveId),
+      liveIdKnown: Boolean(liveSha),
+      revertEnabled: Boolean(process.env.DEPLOY_GITHUB_TOKEN),
       versions: versions.map(v => ({
         id: v.id,
         label: v.label,
         createdAt: v.createdAt,
-        isLive: liveId != null && v.vercelDeploymentId === liveId,
+        commitSha: v.vercelDeploymentId,
+        commitUrl: v.vercelUrl,
+        isLive: liveSha != null && v.vercelDeploymentId === liveSha,
       })),
     });
   } catch (err) {
@@ -114,7 +94,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   if (!(await isAuthorized(req))) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
-  let body: { label?: string; revertToId?: string };
+  let body: { label?: string; commitSha?: string; revertToId?: string };
   try {
     body = await req.json();
   } catch {
@@ -122,39 +102,87 @@ export async function POST(req: Request) {
   }
 
   try {
-    // Branch 1: agent recording a fresh version right after a deploy.
+    // Branch 1: agent recording a fresh version right after a push to main.
     if (body.label) {
-      const liveId = await currentLiveDeploymentId();
-      if (!liveId) return Response.json({ error: 'Could not determine the current live deployment.' }, { status: 502 });
+      const sha = body.commitSha || (await currentMainSha());
+      if (!sha) return Response.json({ error: 'Could not determine the current HEAD of main.' }, { status: 502 });
       const version = await prisma.appVersion.create({
-        data: { label: body.label.slice(0, 500), vercelDeploymentId: liveId },
+        data: {
+          label: body.label.slice(0, 500),
+          vercelDeploymentId: sha,
+          vercelUrl: `https://github.com/${REPO}/commit/${sha}`,
+        },
       });
       return Response.json({ ok: true, version });
     }
 
-    // Branch 2: user-facing instant revert.
+    // Branch 2: user-facing revert -- needs DEPLOY_GITHUB_TOKEN.
     if (body.revertToId) {
+      const token = process.env.DEPLOY_GITHUB_TOKEN;
+      if (!token) {
+        return Response.json(
+          {
+            error:
+              'Revert isn\'t wired up yet. Add a DEPLOY_GITHUB_TOKEN secret (a GitHub personal access token with contents:write on this repo) in the Pxxl dashboard to enable one-click revert. Until then, ask the agent to git-revert and push the target commit.',
+          },
+          { status: 501 },
+        );
+      }
+
       const target = await prisma.appVersion.findUnique({ where: { id: body.revertToId } });
       if (!target) return Response.json({ error: 'Version not found.' }, { status: 404 });
 
-      const liveId = await currentLiveDeploymentId();
-      if (liveId === target.vercelDeploymentId) {
+      const liveSha = await currentMainSha();
+      if (liveSha === target.vercelDeploymentId) {
         return Response.json({ error: 'That version is already live.' }, { status: 400 });
       }
+      if (!liveSha) return Response.json({ error: 'Could not determine the current HEAD of main.' }, { status: 502 });
 
-      const rollbackRes = await fetch(
-        `${VERCEL_API}/v9/projects/${PROJECT_ID}/rollback/${target.vercelDeploymentId}?teamId=${TEAM_ID}`,
-        { method: 'POST', headers: await vercelHeaders() },
-      );
-      if (!rollbackRes.ok) {
-        const t = await rollbackRes.text();
-        return Response.json({ error: `Rollback failed (${rollbackRes.status}): ${t.slice(0, 300)}` }, { status: 502 });
+      // Get the target commit's tree.
+      const targetCommitRes = await fetch(`${GITHUB_API}/repos/${REPO}/git/commits/${target.vercelDeploymentId}`, {
+        headers: githubHeaders(token),
+      });
+      if (!targetCommitRes.ok) {
+        return Response.json({ error: `Could not read target commit (${targetCommitRes.status}).` }, { status: 502 });
+      }
+      const targetCommit = (await targetCommitRes.json()) as { tree: { sha: string } };
+
+      // Create a brand-new commit on top of current main, with the target's tree.
+      const newCommitRes = await fetch(`${GITHUB_API}/repos/${REPO}/git/commits`, {
+        method: 'POST',
+        headers: { ...githubHeaders(token), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: `Revert to "${target.label}"`,
+          tree: targetCommit.tree.sha,
+          parents: [liveSha],
+        }),
+      });
+      if (!newCommitRes.ok) {
+        const t = await newCommitRes.text();
+        return Response.json({ error: `Could not create revert commit (${newCommitRes.status}): ${t.slice(0, 300)}` }, { status: 502 });
+      }
+      const newCommit = (await newCommitRes.json()) as { sha: string };
+
+      // Fast-forward main to it (never force -- this is always a linear
+      // append on top of whatever is live right now).
+      const refRes = await fetch(`${GITHUB_API}/repos/${REPO}/git/refs/heads/${BRANCH}`, {
+        method: 'PATCH',
+        headers: { ...githubHeaders(token), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sha: newCommit.sha, force: false }),
+      });
+      if (!refRes.ok) {
+        const t = await refRes.text();
+        return Response.json({ error: `Could not update main ref (${refRes.status}): ${t.slice(0, 300)}` }, { status: 502 });
       }
 
       // Log the revert itself as a new, honest entry in the same
       // append-only timeline -- never delete or hide history.
       const version = await prisma.appVersion.create({
-        data: { label: `Reverted to "${target.label}"`, vercelDeploymentId: target.vercelDeploymentId },
+        data: {
+          label: `Reverted to "${target.label}"`,
+          vercelDeploymentId: newCommit.sha,
+          vercelUrl: `https://github.com/${REPO}/commit/${newCommit.sha}`,
+        },
       });
       return Response.json({ ok: true, version, reverted: true });
     }

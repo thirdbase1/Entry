@@ -59,6 +59,7 @@ export async function GET(req: NextRequest) {
   const verifier = req.cookies.get('vercel_oauth_verifier')?.value;
 
   const clearCookies = (res: NextResponse) => {
+    res.headers.set('Cache-Control', 'no-store, must-revalidate');
     for (const name of ['vercel_oauth_state', 'vercel_oauth_nonce', 'vercel_oauth_verifier', 'vercel_oauth_return']) {
       res.cookies.set(name, '', { maxAge: 0, path: '/api/integrations/vercel-oauth' });
     }

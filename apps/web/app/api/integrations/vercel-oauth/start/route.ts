@@ -76,6 +76,10 @@ export async function GET(req: NextRequest) {
   authorizeUrl.searchParams.set('scope', 'openid email profile offline_access');
 
   const res = NextResponse.redirect(authorizeUrl.toString());
+  // Never let a CDN/edge cache this -- same reasoning as the GitHub
+  // start route: it embeds a one-time state/PKCE pair, and a cached
+  // repeat would carry stale values that can never match a fresh cookie.
+  res.headers.set('Cache-Control', 'no-store, must-revalidate');
   const cookieOpts = {
     httpOnly: true,
     secure: true,
