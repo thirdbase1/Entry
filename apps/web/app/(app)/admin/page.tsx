@@ -16,9 +16,10 @@ import { useCallback, useEffect, useState } from 'react';
 import { AutoSidebarPadding } from '@/components/layout/auto-sidebar-padding';
 import { cn } from '@/lib/utils';
 import { safeJson } from '@/components/settings/shared';
+import { ModelIcon } from '@/components/settings/model-icon';
 import { useRouter } from 'next/navigation';
 
-type AdminTab = 'users' | 'versions' | 'billing' | 'usage';
+type AdminTab = 'users' | 'providers' | 'versions' | 'billing' | 'usage';
 
 interface AdminUser {
   id: string;
@@ -216,12 +217,15 @@ interface AppVersion {
   label: string;
   createdAt: string;
   isLive: boolean;
+  commitSha?: string;
+  commitUrl?: string | null;
 }
 
 function VersionsSection() {
   const [versions, setVersions] = useState<AppVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revertingId, setRevertingId] = useState<string | null>(null);
+  const [revertEnabled, setRevertEnabled] = useState(true);
 
   const load = useCallback(async () => {
     setError(null);
@@ -230,6 +234,7 @@ function VersionsSection() {
       const json = await safeJson(res);
       if (!res.ok) throw new Error(json?.error || `Failed to load versions (${res.status})`);
       setVersions(json.versions ?? []);
+      setRevertEnabled(json.revertEnabled !== false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -259,6 +264,11 @@ function VersionsSection() {
   return (
     <div className="flex flex-col gap-3">
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
+      {!revertEnabled ? (
+        <div className="text-xs text-muted-foreground p-2 rounded bg-muted/30 border">
+          One-click revert isn't wired up yet -- add a <code>DEPLOY_GITHUB_TOKEN</code> secret in the Pxxl dashboard to enable it. Until then, ask the agent to revert a specific commit.
+        </div>
+      ) : null}
       {versions === null ? (
         <div className="text-sm text-muted-foreground">Loading versions…</div>
       ) : versions.length === 0 ? (
@@ -272,12 +282,22 @@ function VersionsSection() {
                   {v.isLive ? <span className="text-xs px-1.5 py-0.5 rounded bg-primary/15 text-primary font-medium">LIVE</span> : null}
                   <span className="truncate">{v.label}</span>
                 </div>
-                <div className="text-xs text-muted-foreground">{new Date(v.createdAt).toLocaleString()}</div>
+                <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  <span>{new Date(v.createdAt).toLocaleString()}</span>
+                  {v.commitUrl ? (
+                    <>
+                      <span>·</span>
+                      <a href={v.commitUrl} target="_blank" rel="noreferrer" className="underline hover:text-foreground">
+                        {v.commitSha?.slice(0, 7)}
+                      </a>
+                    </>
+                  ) : null}
+                </div>
               </div>
               {!v.isLive ? (
                 <button
                   onClick={() => revert(v)}
-                  disabled={revertingId === v.id}
+                  disabled={revertingId === v.id || !revertEnabled}
                   className="text-sm px-2 py-1 rounded border hover:bg-accent shrink-0 disabled:opacity-50"
                 >
                   {revertingId === v.id ? 'Reverting…' : 'Revert to this'}
@@ -286,6 +306,204 @@ function VersionsSection() {
             </div>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+
+interface SharedProviderModel {
+  id: string;
+  modelId: string;
+  label: string | null;
+  isEnabled: boolean;
+  reasoningEnabled: boolean;
+  lastTestStatus: string | null;
+}
+
+interface SharedProvider {
+  id: string;
+  label: string;
+  compatibility: string;
+  baseUrl: string;
+  spendCapUsd: number | null;
+  lastError: string | null;
+  updatedAt: string;
+  modelCount: number;
+  enabledCount: number;
+  models: SharedProviderModel[];
+}
+
+function ToggleSwitch({
+  checked,
+  onChange,
+  disabled,
+  size = 'md',
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  size?: 'sm' | 'md';
+}) {
+  const dims = size === 'sm' ? { w: 32, h: 18, knob: 14 } : { w: 40, h: 22, knob: 18 };
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'relative shrink-0 rounded-full transition-colors duration-200 ease-out disabled:opacity-40 disabled:cursor-not-allowed',
+        checked ? 'bg-primary' : 'bg-muted-foreground/25'
+      )}
+      style={{ width: dims.w, height: dims.h }}
+    >
+      <span
+        className="absolute top-1/2 rounded-full bg-white shadow-sm transition-transform duration-200 ease-out"
+        style={{
+          width: dims.knob,
+          height: dims.knob,
+          transform: `translate(${checked ? dims.w - dims.knob - 2 : 2}px, -50%)`,
+          top: '50%',
+        }}
+      />
+    </button>
+  );
+}
+
+function ProvidersSection() {
+  const [providers, setProviders] = useState<SharedProvider[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await fetch('/api/admin/shared-providers');
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json?.error || `Failed to load providers (${res.status})`);
+      setProviders(json.providers ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggleProvider = useCallback(async (providerId: string, enabled: boolean) => {
+    setBusyKey(providerId);
+    try {
+      const res = await fetch('/api/admin/shared-providers', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId, enabled }),
+      });
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+    }
+  }, [load]);
+
+  const toggleModel = useCallback(async (providerId: string, modelRowId: string, enabled: boolean) => {
+    setBusyKey(modelRowId);
+    try {
+      const res = await fetch('/api/admin/shared-providers', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providerId, modelRowId, enabled }),
+      });
+      const json = await safeJson(res);
+      if (!res.ok) throw new Error(json?.error || `Failed (${res.status})`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyKey(null);
+    }
+  }, [load]);
+
+  return (
+    <div className="flex flex-col gap-4">
+      {error ? <div className="text-sm text-destructive">{error}</div> : null}
+      {providers === null ? (
+        <div className="text-sm text-muted-foreground">Loading shared providers…</div>
+      ) : providers.length === 0 ? (
+        <div className="text-sm text-muted-foreground">No shared providers configured.</div>
+      ) : (
+        providers.map(p => {
+          const allOn = p.enabledCount === p.modelCount && p.modelCount > 0;
+          const allOff = p.enabledCount === 0;
+          return (
+            <div
+              key={p.id}
+              className={cn(
+                'rounded-xl border bg-card/60 shadow-sm overflow-hidden transition-opacity',
+                allOff && 'opacity-60'
+              )}
+            >
+              <div className="flex items-center justify-between gap-3 p-4 border-b bg-muted/20">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold truncate">{p.label}</span>
+                    <span
+                      className={cn(
+                        'text-[11px] px-1.5 py-0.5 rounded-full font-medium',
+                        allOn ? 'bg-primary/15 text-primary' : allOff ? 'bg-destructive/15 text-destructive' : 'bg-amber-500/15 text-amber-600'
+                      )}
+                    >
+                      {p.enabledCount}/{p.modelCount} enabled
+                    </span>
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate mt-0.5">
+                    {p.baseUrl}
+                    {p.spendCapUsd !== null ? ` · $${p.spendCapUsd.toFixed(2)} cap` : ' · uncapped'}
+                  </div>
+                  {p.lastError ? (
+                    <div className="text-xs text-destructive truncate mt-0.5">⚠ {p.lastError}</div>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-xs text-muted-foreground">{allOff ? 'Off' : 'On'}</span>
+                  <ToggleSwitch
+                    checked={!allOff}
+                    disabled={busyKey === p.id}
+                    onChange={next => toggleProvider(p.id, next)}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-col divide-y">
+                {p.models.map(m => (
+                  <div key={m.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <ModelIcon modelId={m.modelId} size={22} />
+                      <div className="min-w-0">
+                        <div className={cn('text-sm truncate', !m.isEnabled && 'text-muted-foreground')}>
+                          {m.label || m.modelId}
+                        </div>
+                        {m.lastTestStatus ? (
+                          <div className={cn('text-[11px]', m.lastTestStatus === 'success' ? 'text-primary' : 'text-destructive')}>
+                            {m.lastTestStatus === 'success' ? 'Last test OK' : 'Last test failed'}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                    <ToggleSwitch
+                      size="sm"
+                      checked={m.isEnabled}
+                      disabled={busyKey === m.id}
+                      onChange={next => toggleModel(p.id, m.id, next)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })
       )}
     </div>
   );
@@ -459,6 +677,15 @@ export default function AdminPage() {
             Users
           </button>
           <button
+            onClick={() => setTab('providers')}
+            className={cn(
+              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
+              tab === 'providers' ? 'border-primary text-foreground font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            Providers
+          </button>
+          <button
             onClick={() => setTab('billing')}
             className={cn(
               'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
@@ -489,7 +716,7 @@ export default function AdminPage() {
       </div>
 
       <div className="max-w-3xl w-full mx-auto px-4 py-6 flex flex-col gap-4 w-full">
-        {tab === 'users' ? <UsersSection /> : tab === 'versions' ? <VersionsSection /> : <UsageSection mode={tab} />}
+        {tab === 'users' ? <UsersSection /> : tab === 'providers' ? <ProvidersSection /> : tab === 'versions' ? <VersionsSection /> : <UsageSection mode={tab} />}
       </div>
     </div>
   );

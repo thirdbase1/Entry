@@ -236,16 +236,15 @@ Notes:
 
 ## Step 6 — Record a Version (do this after EVERY production deploy)
 
-The chat UI's "History" tab (`ChatDeploymentsTab`, backed by
-`/api/admin/versions`) is a custom, app-native checkpoint system — plain-
-language labels, no git/GitHub/Vercel jargon shown to the user — that lets
-the user instantly self-service revert production if a change breaks
-something, with zero rebuild wait (it rides Vercel's Instant Rollback
-under the hood, repointing production at the already-built artifact from
-that version). It only works if a version row actually exists for every
-build that goes live, so:
+**Reworked 2026-08-05 to be git-native** — deploys now go through Pxxl's
+git-based auto-deploy (push to `main` -> Pxxl dashboard deploys it), not
+Vercel, so the version history (`/api/admin/versions`, Admin > Versions
+tab) no longer rides Vercel's Instant Rollback. It now stores a real git
+commit sha per version, and "is this live" is answered by comparing
+against `main`'s actual current HEAD on GitHub — no Vercel dependency at
+all anymore.
 
-**Immediately after every successful `vercel deploy --prebuilt --prod`**,
+**Immediately after every push to `main` that reaches production**,
 record what shipped:
 
 ```bash
@@ -258,11 +257,16 @@ curl -s -X POST -H "Authorization: Bearer $ADMIN_DEBUG_TOKEN" \
 - The label is what the USER sees in the History tab — write it for them,
   not for a git log (e.g. "Fixed the browser tool crashing after 2
   messages", not "fix: ToolLoopAgent smoothStream handler").
-- This call reads whatever Vercel deployment is *currently* live and
-  stamps the new version to it — so it must run right after the deploy
-  actually finishes, not before.
-- Skipping this step means that deploy's changes are invisible to the
-  user's revert UI — they'd have no way to get back to it if a *later*
+- Omit `commitSha` and the route looks up `main`'s current HEAD itself —
+  only pass it explicitly if you're recording something other than the
+  very latest push.
+- One-click revert from the admin UI needs a `DEPLOY_GITHUB_TOKEN` secret
+  (GitHub PAT with `contents:write` on this repo) set in the Pxxl
+  dashboard. Without it, revert returns a clear "not configured" error
+  instead of silently doing nothing — ask the agent to revert a specific
+  commit by hand in that case.
+- Skipping the record step means that deploy's changes are invisible to
+  the user's revert UI — they'd have no way to get back to it if a *later*
   change breaks something.
 
 ## Architecture Notes
