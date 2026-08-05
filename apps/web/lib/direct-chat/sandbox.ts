@@ -119,7 +119,7 @@ async function bootstrapFallback(sandbox: E2BSandbox): Promise<void> {
   // user already has root) -- mirrors apps/agent/agent/sandbox/sandbox.ts.
   await sandbox.commands.run(
     'sudo apt-get update -qq && sudo apt-get install -y -qq libnss3 libatk-bridge2.0-0 libgbm1 libasound2 libxss1 libxrandr2 libxkbcommon0 libgtk-3-0',
-    { timeoutMs: 5 * 60 * 1000 },
+    { timeoutMs: 60 * 60 * 1000 },
   );
   // Node 24 (2026-07-16, corrected from an earlier Node-22 attempt): Vitest
   // only needed >=20.19/22+, but agent-browser@0.32.0 itself declares
@@ -127,9 +127,9 @@ async function bootstrapFallback(sandbox: E2BSandbox): Promise<void> {
   // EBADENGINE against Node 22 for exactly this package. Node 24 satisfies
   // both. `n`/npm global installs work fine as the non-root user here (no
   // sudo needed for these two, confirmed live) -- only apt-get needs it.
-  await sandbox.commands.run('npm install -g n && n 24', { timeoutMs: 5 * 60 * 1000 });
-  await sandbox.commands.run('pip3 install --quiet --break-system-packages numpy pandas matplotlib', { timeoutMs: 5 * 60 * 1000 });
-  await sandbox.commands.run('npm install -g agent-browser && agent-browser install', { timeoutMs: 5 * 60 * 1000 });
+  await sandbox.commands.run('npm install -g n && n 24', { timeoutMs: 60 * 60 * 1000 });
+  await sandbox.commands.run('pip3 install --quiet --break-system-packages numpy pandas matplotlib', { timeoutMs: 60 * 60 * 1000 });
+  await sandbox.commands.run('npm install -g agent-browser && agent-browser install', { timeoutMs: 60 * 60 * 1000 });
 }
 
 async function createFreshSandbox(apiKey: string): Promise<E2BSandbox> {
@@ -251,7 +251,7 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
       // gets absorbed instead of surfacing as a bare tool failure -- same
       // class of fix as e2b-backend.ts's own withRetry.
       const result = await withRetry('commands.run', () =>
-        sandbox.commands.run(command, { timeoutMs: 5 * 60 * 1000, envs: env, signal }),
+        sandbox.commands.run(command, { timeoutMs: 60 * 60 * 1000, envs: env, signal }),
       );
       return { exitCode: result.exitCode ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
     },

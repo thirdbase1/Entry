@@ -1,4 +1,4 @@
-import { generateText, tool, stepCountIs, type LanguageModel } from 'ai';
+import { generateText, tool, type LanguageModel } from 'ai';
 import { gateway } from '@ai-sdk/gateway';
 import { z } from 'zod';
 import { resolveModelIdForProvider, getCatalogMenu } from '../model-catalog.js';
@@ -141,7 +141,6 @@ const AgentDelegateInputSchema = z.object({
     .number()
     .int()
     .min(1)
-    .max(40)
     .optional()
     .describe(
       'Step budget for this subtask (default 15). Raise this (up to 40) for a genuinely large/long-running subtask — multi-part research, reading ' +
@@ -152,7 +151,6 @@ const AgentDelegateInputSchema = z.object({
     .number()
     .int()
     .positive()
-    .max(3600)
     .optional()
     .describe(
       'Optional explicit wall-clock ceiling for this whole delegated subtask, in seconds -- overrides the default budget-derived timeout ' +
@@ -335,16 +333,8 @@ function isTruncatedFinish(steps: { finishReason?: string }[], maxSteps: number)
 // entirely -- see runDelegatedTask's `explicitTimeoutMs` param), but the
 // DEFAULT case (no maxSteps given) no longer gets an artificially short
 // ceiling no other tool in this codebase has.
-const BASE_TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
-const PER_EXTRA_STEP_MS = 8_000;
-const MAX_TIMEOUT_MS = DEFAULT_TOOL_TIMEOUT_MS;
-const DEFAULT_STEP_BUDGET = 15;
-
-function timeoutForBudget(budget: number): number {
-  const extraSteps = Math.max(0, budget - DEFAULT_STEP_BUDGET);
-  return Math.min(MAX_TIMEOUT_MS, BASE_TIMEOUT_MS + extraSteps * PER_EXTRA_STEP_MS);
-}
-
+// No implicit timeout or step budget: delegated work inherits only the parent
+// turn cancellation signal. An explicit timeout_seconds remains opt-in.
 /**
  * Wraps a ctx-dependent tool-impl (bash, file I/O, code_artifact, browser_use,
  * ...) as a real ai-sdk `tool()` bound to a FIXED ctx -- these all take
@@ -468,7 +458,7 @@ async function tryBranchSandbox(
   if (!apiKey) return null;
   try {
     const snapshot = await E2BSandbox.createSnapshot(baseSandboxId);
-    const branched = await E2BSandbox.create(snapshot.snapshotId, { apiKey, timeoutMs: 15 * 60 * 1000 });
+    const branched = await E2BSandbox.create(snapshot.snapshotId, { apiKey, timeoutMs: 24 * 60 * 60 * 1000 });
     return {
       id: branched.sandboxId,
       run: async (opts: { command: string; env?: Record<string, string>; signal?: AbortSignal }) => {
@@ -479,7 +469,7 @@ async function tryBranchSandbox(
         // e2b-backend.ts's own real run() exactly (cwd/envs/timeoutMs only -- that implementation never actually
         // forwards its own declared `abortSignal` option into the real E2B SDK call either, so `signal` is accepted
         // on this wrapper's input type for interface compatibility but intentionally not passed further, same as there).
-        const r = await branched.commands.run(opts.command, { cwd: '/workspace', envs: opts.env, timeoutMs: 10 * 60 * 1000 });
+        const r = await branched.commands.run(opts.command, { cwd: '/workspace', envs: opts.env, timeoutMs: 60 * 60 * 1000 });
         return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
       },
     };
@@ -531,7 +521,7 @@ async function runDelegatedTask(
   progressLog: string[];
   isolatedSandboxId?: string;
 }> {
-  const t = withTimeoutSignal(outerCtx?.abortSignal, explicitTimeoutMs ?? timeoutForBudget(budget), 'agent');
+  const t = withTimeoutSignal(outerCtx?.abortSignal, explicitTimeoutMs ?? 0, 'agent');
   // Same ctx nested tools bind to, except abortSignal is swapped for `t.signal`
   // -- so if THIS delegation's own timeout fires (not just the outer turn's
   // cancellation), any in-flight bash/browser/file call the sub-agent is
@@ -567,7 +557,7 @@ async function runDelegatedTask(
         system: buildSubagentSystemPrompt({ isolated: Boolean(isolatedSandboxId), channelId: options.channelId }),
         messages: [{ role: 'user', content: message }],
         tools: delegateTools(delegateCtx, options.allowedTools),
-        stopWhen: stepCountIs(budget),
+        // No implicit step budget: the delegated model finishes naturally.
         abortSignal: t.signal,
         onStepFinish: step => {
           if (progressLog.length >= MAX_PROGRESS_ENTRIES) return;

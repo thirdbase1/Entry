@@ -28,7 +28,7 @@ export const pythonCoding = {
   description: 'Generate Python code that satisfies a natural-language requirements description.',
   inputSchema: z.object({
     requirements: z.string().describe('The requirements to generate python code for'),
-    timeout_seconds: z.number().int().positive().max(3600).optional()
+    timeout_seconds: z.number().int().positive().optional()
       .describe('Optional override for how long this generation may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),
   async execute({ requirements, timeout_seconds }: { requirements: string; timeout_seconds?: number }, ctx?: ToolExecCtx) {

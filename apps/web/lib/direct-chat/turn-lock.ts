@@ -101,17 +101,13 @@ export async function releaseTurnLock(chatId: string, turnId: string): Promise<v
 // just the first 25 min, or the lock expires and the UI shows "idle"
 // while the server keeps working (the exact bug the user reported: "it
 // stops at 1 min but runs for 21 min in background").
-const MAX_HEARTBEAT_MS = 60 * 60 * 1000; // 60 min — above SOFT_DEADLINE_MS's 55 min
-
 export function startTurnHeartbeat(chatId: string, turnId: string): () => void {
   const interval = setInterval(() => {
     void renewTurnLock(chatId, turnId);
   }, HEARTBEAT_INTERVAL_MS);
-  const maxTimer = setTimeout(() => clearInterval(interval), MAX_HEARTBEAT_MS);
-  return () => {
-    clearInterval(interval);
-    clearTimeout(maxTimer);
-  };
+  // No maximum heartbeat lifetime: the lock follows the actual turn until
+  // the model finishes or the route explicitly releases it.
+  return () => clearInterval(interval);
 }
 
 // SAFETY-NET TTL (2026-07-26, real leak found while auditing this exact
@@ -128,7 +124,7 @@ export function startTurnHeartbeat(chatId: string, turnId: string): () => void {
 // real long turn the same way the lock's own heartbeat does), generous
 // enough to never race a legitimate long turn, but bounded -- a crashed
 // turn's stream is now reclaimed within this window instead of never.
-const STREAM_SAFETY_NET_TTL_SECONDS = 70 * 60; // 70m, comfortably above MAX_HEARTBEAT_MS (60m)
+const STREAM_SAFETY_NET_TTL_SECONDS = 24 * 60 * 60; // 70m, comfortably above MAX_HEARTBEAT_MS (60m)
 
 // CROSS-TURN STREAM BLEED FIX (2026-07-27, real bug, owner report:
 // "it's showing previous model response [after] reconnect sync poll" --

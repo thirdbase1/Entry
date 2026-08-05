@@ -138,7 +138,6 @@ export const bash = {
       .number()
       .int()
       .positive()
-      .max(3600)
       .optional()
       .describe('Optional override for how long this command may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),

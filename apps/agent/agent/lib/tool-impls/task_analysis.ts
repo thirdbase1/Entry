@@ -43,7 +43,7 @@ export const taskAnalysis = {
     task: z.string().min(1, 'Task description cannot be empty'),
     context: z.string().optional(),
     availableTools: z.array(z.string()).optional(),
-    timeout_seconds: z.number().int().positive().max(3600).optional()
+    timeout_seconds: z.number().int().positive().optional()
       .describe('Optional override for how long this analysis may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),
   outputSchema: TaskAnalysisResultSchema,
