@@ -45,8 +45,24 @@
 import { cache, getRawRedis } from '@entry/cache';
 import { REPLAY_KEEPALIVE_BLOCK_MS, makeHeartbeatChunk } from './timing';
 
-const LOCK_TTL_MS = 30_000;
-const HEARTBEAT_INTERVAL_MS = Math.floor(LOCK_TTL_MS / 2);
+// TIGHTENED (2026-08-05, explicit owner instruction: "if agent is not
+// working it should stop instantly"). Was 30_000/15_000 (a bare 2x
+// heartbeat/TTL ratio -- thinner than this same codebase's own
+// established 3x-safety-margin convention elsewhere, see timing.ts's
+// WRITER_HEARTBEAT_MS/STALL_MS pairing and CLIENT_IDLE_TIMEOUT_MS's own
+// comment). A genuinely crashed turn (process OOM/SIGKILL/host restart --
+// anything that skips every JS finally/catch and therefore never calls
+// releaseTurnLock) previously stayed looking "active" to every client
+// for up to the full 30s TTL, stacked on top of the client's own 4.5s
+// SETTLE_QUIET_MS wait before it even checks -- up to ~34.5s of a
+// visibly "still working" UI for a turn that's actually already dead.
+// Now: heartbeat every 5s (same cadence as the writer/stream heartbeat
+// elsewhere, for consistency), TTL 15s -- a real 3x safety margin
+// (tolerates 2 fully missed renewals before falsely expiring a healthy
+// turn, same tolerance timing.ts already relies on elsewhere) while
+// cutting worst-case dead-turn detection from ~34.5s down to ~19.5s.
+const LOCK_TTL_MS = 15_000;
+const HEARTBEAT_INTERVAL_MS = 5_000;
 const STREAM_TTL_SECONDS = 600;
 
 function lockKey(chatId: string): string {

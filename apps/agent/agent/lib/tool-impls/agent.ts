@@ -2,7 +2,7 @@ import { generateText, tool, type LanguageModel } from 'ai';
 import { gateway } from '@ai-sdk/gateway';
 import { z } from 'zod';
 import { resolveModelIdForProvider, getCatalogMenu } from '../model-catalog.js';
-import { resolveUserCustomProviderModel, listUserCustomProviderLabels, resolveDefaultSharedModel } from '../custom-model-provider.js';
+import { resolveUserCustomProviderModel, listUserCustomProviderLabels } from '../custom-model-provider.js';
 import { webSearch } from './web_search.js';
 import { webCrawl } from './web_crawl.js';
 import { bash } from './bash.js';
@@ -724,32 +724,32 @@ export const agentDelegate = {
           `Pass a full id like "anthropic/claude-opus-4.8", or add "provider".`
       );
     } else {
-      // DEFAULT SUB-AGENT MODEL (owner ask 2026-07-27: "free model and
-      // hncsec should be the default sub agent... model should only call
-      // another provider if user specifically ask"): no explicit
-      // provider/model was given, so try a shared free model FIRST --
-      // this is a real API call/cost difference from the old default
-      // (a paid Gateway "anthropic" call on every no-ask delegate), not
-      // just a label change. Only falls back to the Gateway anthropic
-      // family (the pre-existing "copy of the root's own model family"
-      // behavior) when no shared provider is configured at all.
-      const shared = await resolveDefaultSharedModel().catch(() => null);
-      if (shared) {
-        const { text, steps, artifacts, progressLog, isolatedSandboxId } = await runDelegatedTask(shared.model, message, budget, ctx, explicitTimeoutMs, delegateOptions);
-        const truncated = isTruncatedFinish(steps, budget);
-        return {
-          result: text,
-          modelUsed: `${shared.providerLabel}/${shared.modelId}`,
-          stepsTaken: steps.length,
-          truncated,
-          note: truncated
-            ? `Ran out of its ${budget}-step budget before finishing on its own — treat "result" as partial progress, not a final answer.`
-            : undefined,
-          artifacts: artifacts.length > 0 ? artifacts : undefined,
-          progressLog: progressLog.length > 0 ? progressLog : undefined,
-          isolatedSandboxId,
-        };
-      }
+      // DEFAULT SUB-AGENT MODEL (SUPERSEDES the 2026-07-27 rule this
+      // replaces -- explicit owner instruction 2026-08-05: "sub agent by
+      // default use same model as the one the user pick on the model
+      // selector unless specify to the agent"). No explicit provider/
+      // model was given on this call, so mirror the PARENT turn's own
+      // model instead of silently substituting a different (free/
+      // shared) one behind the scenes.
+      //
+      // NOTE ctx?.byokModel is checked and returned on FURTHER UP this
+      // function (right after the custom-provider-label attempt) --
+      // reaching this `else` branch at all already proves ctx.byokModel
+      // is unset, i.e. this is the pure default eve-agent chat path
+      // (apps/agent/agent.ts), which has no per-turn model selection at
+      // all. `resolveModelIdForProvider('anthropic')` below is the exact
+      // same call that path's own `primaryModelId` is computed from --
+      // so this still satisfies "same model as the parent turn", just
+      // sourced from the one place that path keeps it (there is no ctx
+      // field to read it from, unlike the explicit-model-picked path).
+      //
+      // OLD BEHAVIOR (2026-07-27, reversed by the instruction above):
+      // used to try `resolveDefaultSharedModel()` (HCNSec/freemodel.dev)
+      // FIRST here, only falling back to this same anthropic default
+      // when no shared provider was configured -- i.e. every no-ask
+      // delegate on this path silently ran on a different, cheaper model
+      // than the parent turn almost 100% of the time. Removed entirely;
+      // always mirror the parent now.
       modelId = await resolveModelIdForProvider('anthropic');
     }
 
