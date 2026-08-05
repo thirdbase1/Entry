@@ -153,7 +153,7 @@ export const codeArtifact = {
     // strictly one-shot — any tweak ("make the button green") forced a
     // from-scratch regeneration that usually changed unrelated things.
     previousHtml: z.string().optional().describe('Pass the html from a previous code_artifact result to REVISE it (userPrompt becomes a change request against it) instead of regenerating from scratch. Strongly preferred for any follow-up tweak.'),
-    timeout_seconds: z.number().int().positive().max(3600).optional()
+    timeout_seconds: z.number().int().positive().optional()
       .describe('Optional override for how long this generation may run, in seconds. Defaults to 600s (10 min) if omitted.'),
   }),
   async execute({ title, userPrompt, previousHtml, timeout_seconds }: { title: string; userPrompt: string; previousHtml?: string; timeout_seconds?: number }, ctx?: ToolExecCtx) {

@@ -59,21 +59,9 @@
  */
 import { NextRequest } from 'next/server';
 
-// REMOVED (2026-07-23) the stale `export const maxDuration = 300` that
-// used to live here. That's a Vercel-only build-time directive -- Next.js
-// itself never reads or enforces it at runtime (confirmed by grepping
-// the actual request-serving code in node_modules/next/dist; every hit
-// for "maxDuration" lives only in build/typegen files, never in
-// next-server.js/base-server.js/route-modules). Since this route moved
-// to Render 2026-07-22 (persistent server, no serverless duration cap at
-// all), the constant was already 100% inert dead code -- kept only as a
-// misleading relic of the old Vercel deploy that made this route look
-// artificially capped at 300s when nothing was actually enforcing that
-// anymore. The route's real ceiling is SOFT_DEADLINE_MS below (55 min).
 import {
   streamText,
   tool,
-  stepCountIs,
   convertToModelMessages,
   smoothStream,
   createUIMessageStream,
@@ -158,6 +146,13 @@ import { acquireTurnLock, releaseTurnLock, startTurnHeartbeat, publishTurnChunk,
 // every other tool here, and `ctx.byokModel` so BYOK turns never touch
 // the Gateway for it either -- same policy as every other sub-generation
 // tool), it's safe to tell the model about it again.
+// Vercel is the actual deployment target for this repository. The previous
+// code removed this route-level setting while assuming a Render process, so
+// the platform default terminated long model turns. Pro/Enterprise Node 24
+// supports the extended 30-minute duration; the client still recovers from
+// disconnects through the persisted turn mirror.
+export const maxDuration = 1800;
+
 export const POST = withApiErrorHandling(async (req: NextRequest) => {
   const { session } = await getUserSessionFromRequest(req);
   if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -696,23 +691,11 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   let lastFinishReason: string | undefined;
   let lastRawFinishReason: string | undefined;
   let stepCount = 0;
-  // Soft, in-process deadline INSIDE the sync route's own 300s Vercel
-  // ceiling (2026-07-21) -- mirrors agent-turn.ts's identical pattern for
-  // the durable worker's 3600s ceiling, just scaled to this route's much
-  // tighter budget. 230s leaves ~70s of real headroom for the current
-  // step's model call to actually finish, onFinish's persistence/version-
-  // capture work, and the background-handoff trigger call below, all
-  // before Vercel's hard 300s kill (which -- same as agent-turn.ts's
-  // comment on its own hard ceiling -- would otherwise leave onFinish
-  // never running at all).
+  // Render keeps this request alive independently of the browser connection.
+  // There is deliberately no wall-clock deadline here: a live turn can keep
+  // working for as long as its tools/provider need, while incremental saves
+  // and the Redis turn lock preserve recovery if the client disconnects.
   const requestStartedAt = Date.now();
-  // Render (persistent server, no serverless 300s kill) replaced Vercel for
-  // this route 2026-07-22 -- raised from 230_000 (which existed purely to
-  // leave margin under Vercel's hard 300s ceiling) since that constraint is
-  // gone. Still finite so a genuinely runaway turn eventually wraps up in
-  // text instead of never stopping.
-  const SOFT_DEADLINE_MS = 3_300_000;
-  let softDeadlineHit = false;
 
   // CRITICAL-SAVE GATE (2026-07-19, real data-loss bug: "agent done and
   // stop, instantly the whole page reload, and all AI response and work
@@ -826,46 +809,8 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // second, much slower retry system on top of a problem the inner
     // wrapper now already solves quickly.
     maxRetries: 2,
-    stopWhen: [
-      stepCountIs(400), // generous ceiling so a long agentic turn is bounded by the SOFT_DEADLINE_MS time budget, not an arbitrary low step count
-      // FIXED (2026-07-27, real bug from a user-recorded video: a shared
-      // relay-routed model -- e.g. an alias that "routes to" a different
-      // underlying model at the relay -- kept regenerating the same
-      // trivial greeting ("What's good, how can I help?") dozens of times
-      // in a row, ~4s apart, never stopping on its own. Root cause: the AI
-      // SDK's tool-loop only stops naturally when a step's finishReason is
-      // something OTHER than "tool-calls" (or a stop condition matches) --
-      // this specific relay was lying, reporting finishReason "tool-calls"
-      // on every step while never actually emitting any tool call at all,
-      // so the SDK correctly-per-spec kept feeding it another step forever
-      // (up to the 400-step/55-minute ceiling above, which is far too long
-      // a leash for something this clearly broken). Defensive guard: if
-      // the two most recent steps BOTH made zero tool calls, that's not a
-      // state a genuine multi-step turn can ever legitimately reach (every
-      // step past the first only exists because the previous step made a
-      // real tool call) -- stop immediately instead of trusting the
-      // relay's own claimed finish reason.
-      // IMPROVED (2026-07-27, "model stop working everytime without
-      // completing a task"): the original guard stopped the turn if two
-      // consecutive steps had zero tool calls. But a legitimate multi-step
-      // turn CAN have two consecutive no-tool-call steps — e.g. the model
-      // produces text in step N (finishReason 'tool-calls' due to a relay
-      // lie, or the SDK re-entering for another reason), then produces more
-      // text in step N+1. That's the model WORKING, not spinning. The real
-      // failure mode this guard targets is a relay lying about
-      // finishReason 'tool-calls' while producing the SAME trivial output
-      // repeatedly — zero tool calls AND zero meaningful text. So: only
-      // stop if BOTH consecutive steps have no tool calls AND no text
-      // output. A step with real text (even short) is doing real work.
-      ({ steps }) => {
-        if (steps.length < 2) return false;
-        const last = steps[steps.length - 1];
-        const prev = steps[steps.length - 2];
-        const noToolCalls = (s: { toolCalls?: unknown[] }) => !s.toolCalls || s.toolCalls.length === 0;
-        const noText = (s: { text?: string }) => !s.text || s.text.trim().length === 0;
-        return noToolCalls(last) && noToolCalls(prev) && noText(last) && noText(prev);
-      },
-    ],
+    // No artificial step-count stop: a live model turn must finish from its
+    // own terminal response, not from a UI/runtime budget.
     // FIXED (2026-07-19, confirmed live from production logs): a 'Free'
     // BYOK relay (model id "claude-fable-5") hung completely on a turn --
     // zero chunks, zero onStepFinish, nothing -- for the FULL 300s
@@ -935,7 +880,9 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // the thing that actually catches a truly dead connection; stepMs
     // only needs to catch the pathological "trickles forever, never
     // finishes" case, which 30 minutes still does just fine.
-    timeout: { chunkMs: 240_000, stepMs: 1_800_000 },
+    // Disable AI SDK wall-clock/stall aborts; recovery is handled by the
+    // persisted turn stream and DB snapshots, not by killing a live model.
+    timeout: false,
     // See modelMessages' own comment above for why this (persona prompt +
     // optional compaction summary) moved here instead of being spliced
     // into `messages` as fake `role: 'system'` entries -- this is the
@@ -1027,29 +974,6 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
         : {};
 
       if (stepNumber > 0 && FLAKY_PROVIDERS_DROP_TOOLS_AFTER_STEP_1.has(providerLabel)) {
-        return { activeTools: [], ...reasoningStripOverride };
-      }
-      // SOFT DEADLINE (bumped 20min -> 55min, 2026-07-23, real ask: "fix
-      // entry so model can do a very long task" -- e.g. a full admin-page
-      // build in one continuous turn). STALE COMMENT REMOVED: the previous
-      // version of this comment (2026-07-21) said onFinish "hands whatever's
-      // left off to the durable Trigger.dev worker" -- that entire
-      // Trigger.dev handoff path was retired 2026-07-22 when this route
-      // moved to Render (see onFinish's own 2026-07-22 comment below, which
-      // already correctly says "No Trigger.dev dependency anywhere in this
-      // path" -- this comment just hadn't caught up to that yet). There is
-      // no background handoff of any kind here: once past SOFT_DEADLINE_MS,
-      // tools are dropped on the NEXT step so the model wraps up in plain
-      // text instead of starting new tool work with no deadline at all --
-      // durability of everything done so far is handled entirely by the
-      // incremental per-step saves (see onStepEnd below), and the user can
-      // send another message to continue past this point if the task
-      // genuinely wasn't done yet. Render itself has no hard request-kill
-      // like Vercel's old 300s ceiling, so this number is now a deliberate
-      // choice (not a platform constraint) -- kept finite so a genuinely
-      // runaway turn still wraps up eventually instead of running forever.
-      if (Date.now() - requestStartedAt > SOFT_DEADLINE_MS) {
-        softDeadlineHit = true;
         return { activeTools: [], ...reasoningStripOverride };
       }
       return { ...reasoningStripOverride };
@@ -1523,17 +1447,17 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       // no Trigger.dev): this app now runs on Render (a persistent server, not
       // Vercel serverless), so there's no hard 300s kill forcing a background
       // handoff anymore -- the turn just keeps running in this same process
-      // until it genuinely finishes (see SOFT_DEADLINE_MS/stepCountIs(120) above,
+      // until it genuinely finishes (see the model terminal callback above,
       // both raised generously now that there's no platform timeout to race).
       // `finishedNaturally` is kept only as an observability signal for the rare
       // case a turn still hits the step cap or gets cut mid-tool-call --
       // `sanitizedFinalMessages` is already durably persisted above either way,
       // so the user can just send another message ("continue") to pick up from
       // the real last checkpoint. No Trigger.dev dependency anywhere in this path.
-      const finishedNaturally = !softDeadlineHit && stepCount < 120 && lastFinishReason !== 'tool-calls';
-      if (!finishedNaturally) {
-        console.log('[direct chat] turn ended without a natural finish (rare -- user can send "continue")', { chatId, softDeadlineHit, stepCount, lastFinishReason });
-      }
+      // Completion is determined by the model/SDK terminal callback only;
+      // no local deadline or step budget is allowed to label a live turn as
+      // incomplete or ask the user to continue manually.
+      console.log('[direct chat] turn finished', { chatId, stepCount, lastFinishReason });
     },
   });
 

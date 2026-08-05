@@ -90,6 +90,32 @@ function messageTextLength(m: UIMessage): number {
   return (m.parts ?? []).reduce((sum: number, p: any) => sum + (typeof p?.text === 'string' ? p.text.length : 0), 0);
 }
 
+function mergeMessagesAppendOnly(current: UIMessage[], persisted: UIMessage[]): UIMessage[] {
+  const persistedById = new Map(persisted.map(message => [message.id, message]));
+  const merged = current.map(message => {
+    const incoming = persistedById.get(message.id);
+    if (!incoming) return message;
+    // A database snapshot may lag the live stream. Keep the richer version
+    // already on screen; only adopt a snapshot that is at least as complete.
+    return isMessageAtLeastAsComplete(incoming, message) ? incoming : message;
+  });
+  const currentIds = new Set(current.map(message => message.id));
+  for (const message of persisted) {
+    if (!currentIds.has(message.id)) merged.push(message);
+  }
+  return merged;
+}
+
+function isMessageAtLeastAsComplete(incoming: UIMessage, current: UIMessage): boolean {
+  const incomingText = messageTextLength(incoming);
+  const currentText = messageTextLength(current);
+  if (incomingText !== currentText) return incomingText > currentText;
+  const incomingParts = incoming.parts?.length ?? 0;
+  const currentParts = current.parts?.length ?? 0;
+  if (incomingParts !== currentParts) return incomingParts > currentParts;
+  return JSON.stringify(incoming).length >= JSON.stringify(current).length;
+}
+
 function isSafeToAdopt(persisted: UIMessage[], current: UIMessage[]): boolean {
   if (persisted.length < current.length) return false;
   const persistedById = new Map(persisted.map(m => [m.id, m]));
@@ -273,7 +299,6 @@ export function DirectChatInterface(props: DirectChatInterfaceProps) {
   // per-message timestamp of their own, so the row's own updatedAt is the
   // only trustworthy "when did the server last touch this turn" signal
   // available on load.
-  const [snapshotUpdatedAt, setSnapshotUpdatedAt] = useState<string | null>(null);
   useEffect(() => {
     if (!sessionId) return;
     setInitialMessages(null);
@@ -283,7 +308,6 @@ export function DirectChatInterface(props: DirectChatInterfaceProps) {
       .then(snap => {
         if (cancelled) return;
         setInitialMessages(Array.isArray(snap?.events) ? snap.events : []);
-        setSnapshotUpdatedAt(typeof snap?.updatedAt === 'string' ? snap.updatedAt : null);
       })
       .catch(() => {
         if (!cancelled) setInitialMessages([]);
@@ -309,7 +333,6 @@ export function DirectChatInterface(props: DirectChatInterfaceProps) {
       key={sessionId ?? 'new'}
       {...props}
       initialMessages={initialMessages}
-      snapshotUpdatedAt={snapshotUpdatedAt}
     />
   );
 }
@@ -332,8 +355,7 @@ function DirectChatSession({
   integrationCallback,
   initialTurnActive = false,
   initialMessages,
-  snapshotUpdatedAt,
-}: DirectChatInterfaceProps & { initialMessages: any[]; snapshotUpdatedAt: string | null }) {
+}: DirectChatInterfaceProps & { initialMessages: any[] }) {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const createdRef = useRef(!!sessionId);
@@ -377,7 +399,6 @@ function DirectChatSession({
   // user's device and the server (this compares a server-issued updatedAt
   // against a client-side Date.now()); the exact value is not load-bearing,
   // only the existence of SOME finite bound is.
-  const MAX_RESUMABLE_AGE_MS = 2 * 60 * 60 * 1000;
   const SETTLE_QUIET_MS = 4_500;
   const lastGrowthAtRef = useRef(Date.now());
   // STALENESS BOUND (2026-07-28, owner bug report: thinking indicator
@@ -413,8 +434,7 @@ function DirectChatSession({
     // (the recovery poll flips pendingTurn true within one 800ms tick as
     // soon as it sees new content), whereas failing open is exactly the
     // permanently-stuck-chat bug being fixed here.
-    const lastAtMs = snapshotUpdatedAt ? new Date(snapshotUpdatedAt).getTime() : NaN;
-    const pendingTurn = Number.isFinite(lastAtMs) && Date.now() - lastAtMs < MAX_RESUMABLE_AGE_MS;
+    const pendingTurn = initialTurnActive;
     return { pendingTurn, turnError: null, isReconnecting: false };
   });
   const { pendingTurn, turnError, isReconnecting } = turnLifecycle;
@@ -690,7 +710,7 @@ function DirectChatSession({
           const snap = await res.json();
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
           if (persisted && persisted.length >= chat.messages.length && isSafeToAdopt(persisted, chat.messages)) {
-            chat.setMessages(persisted);
+            chat.setMessages(mergeMessagesAppendOnly(chat.messages, persisted));
             return;
           }
         } catch {
@@ -974,7 +994,7 @@ function DirectChatSession({
             // 'submitted' = actively streaming → keep locked.
             const stillActive = chat.status !== 'ready';
             lastGrowthAtRef.current = Date.now();
-            chat.setMessages(persisted);
+            chat.setMessages(mergeMessagesAppendOnly(chat.messages, persisted));
             dispatchTurn({ type: 'RECONNECT_PROGRESS', stillActive });
             chat.clearError();
             // Mirror onFinish's own first-turn navigation: if the client's

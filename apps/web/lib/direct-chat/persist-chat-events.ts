@@ -91,6 +91,47 @@ import { prisma } from '@entry/db';
  * in-progress message, so the later copy is always the more complete
  * one).
  */
+function messageCompleteness(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  const message = value as { parts?: unknown[] };
+  const parts = Array.isArray(message.parts) ? message.parts : [];
+  const textLength = parts.reduce((sum, part) => {
+    if (!part || typeof part !== 'object') return sum;
+    const text = (part as { text?: unknown }).text;
+    return sum + (typeof text === 'string' ? text.length : 0);
+  }, 0);
+  return parts.length * 1_000_000 + textLength * 10 + JSON.stringify(value).length;
+}
+
+/**
+ * Merge snapshots without ever deleting a message or regressing a message's
+ * streamed content. This is used inside the row-locked write transaction,
+ * so a stale request can only add its own newer messages/progress to the
+ * current row; it cannot replace the row with an older transcript.
+ */
+export function mergeMessagesAppendOnly(current: unknown[], incoming: unknown[]): unknown[] {
+  const incomingById = new Map<string, unknown>();
+  for (const message of incoming) {
+    const id = (message as { id?: unknown } | null)?.id;
+    if (typeof id === 'string') incomingById.set(id, message);
+  }
+  const merged = current.map(message => {
+    const id = (message as { id?: unknown } | null)?.id;
+    if (typeof id !== 'string') return message;
+    const next = incomingById.get(id);
+    if (next === undefined) return message;
+    return messageCompleteness(next) >= messageCompleteness(message) ? next : message;
+  });
+  const currentIds = new Set(
+    current.map(message => (message as { id?: unknown } | null)?.id).filter((id): id is string => typeof id === 'string'),
+  );
+  for (const message of incoming) {
+    const id = (message as { id?: unknown } | null)?.id;
+    if (typeof id !== 'string' || !currentIds.has(id)) merged.push(message);
+  }
+  return merged;
+}
+
 export function dedupeMessagesById(events: unknown[]): unknown[] {
   const lastIndexById = new Map<string, number>();
   events.forEach((ev, i) => {
@@ -143,8 +184,6 @@ async function runMergeTransaction(
   newMessages: unknown[],
   extraFields: Record<string, unknown>,
 ): Promise<unknown[]> {
-  const delta = newMessages.slice(baseMessages.length);
-
   // Widened maxWait/timeout (2026-07-24, real user-confirmed bug found
   // live in Render's logs: "Transaction API error: Unable to start a
   // transaction in the given time" firing repeatedly during a real
@@ -173,8 +212,10 @@ async function runMergeTransaction(
       // Something newer DID land (another turn committed while we were
       // running) -> the current row is the authoritative base now; append
       // only OUR delta on top of it instead of clobbering that newer state.
-      const rawMerged = currentEvents.length > baseMessages.length ? [...currentEvents, ...delta] : newMessages;
-      const merged = dedupeMessagesById(rawMerged);
+      // Always merge by message id and completeness. The old length-based
+      // branch could treat a stale snapshot as authoritative and overwrite
+      // a longer reply, especially during a reload or concurrent save.
+      const merged = dedupeMessagesById(mergeMessagesAppendOnly(currentEvents, newMessages));
 
       await tx.eveChatSession.update({
         where: { id: chatId, userId },

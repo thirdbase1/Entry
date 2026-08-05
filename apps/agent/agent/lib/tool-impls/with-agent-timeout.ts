@@ -2,7 +2,11 @@ import { z } from 'zod';
 import { withTimeoutSignal } from './with-timeout-signal.js';
 
 /**
- * Default tool-call ceiling: 20 minutes (raised 2026-07-25, real
+ * Tool timeout policy: no implicit wall-clock ceiling. A tool may be
+ * explicitly bounded with `timeout_seconds` when the caller wants that;
+ * otherwise it inherits only the parent turn's cancellation signal.
+ *
+ * Default tool-call ceiling history: 20 minutes (raised 2026-07-25, real
  * user-reported bug: long BYOK turns doing genuine sustained work --
  * builds, installs, browser sessions -- kept getting cut off, and the
  * model had no reason to know it needed to pass a larger
@@ -24,10 +28,9 @@ import { withTimeoutSignal } from './with-timeout-signal.js';
  * MAX_TIMEOUT_SECONDS (1 hour) explicitly for a call it knows will be
  * genuinely long-running.
  */
-export const DEFAULT_TOOL_TIMEOUT_MS = 20 * 60 * 1000;
+export const DEFAULT_TOOL_TIMEOUT_MS = 0; // 0 means no implicit timeout
 
 /** Model-facing cap on the override itself -- generous, but not unbounded. */
-const MAX_TIMEOUT_SECONDS = 3600; // 1 hour
 
 type ToolImpl = {
   description: string;
@@ -67,11 +70,9 @@ export function withAgentTimeout<T extends ToolImpl>(toolName: string, impl: T, 
       .number()
       .int()
       .positive()
-      .max(MAX_TIMEOUT_SECONDS)
       .optional()
       .describe(
-        `Optional override for how long this call is allowed to run, in seconds. Defaults to ${Math.round(defaultMs / 1000)}s ` +
-          `(${Math.round(defaultMs / 60000)} min) if omitted. Raise it for a genuinely long-running call; lower it to fail fast instead of waiting.`
+        'Optional explicit wall-clock timeout in seconds. If omitted, this tool is not locally timed out and runs until it finishes or the parent turn is cancelled.'
       ),
   });
 
@@ -79,10 +80,15 @@ export function withAgentTimeout<T extends ToolImpl>(toolName: string, impl: T, 
 
   const wrappedExecute = async (input: any, ctx?: any) => {
     const { timeout_seconds, ...rest } = input ?? {};
-    const timeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : defaultMs;
-    const t = withTimeoutSignal(ctx?.abortSignal, timeoutMs, toolName);
-    const shadowCtx = ctx ? { ...ctx, abortSignal: t.signal } : ctx;
+    const timeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0
+      ? timeout_seconds * 1000
+      : defaultMs > 0
+        ? defaultMs
+        : undefined;
+    const t = timeoutMs === undefined ? null : withTimeoutSignal(ctx?.abortSignal, timeoutMs, toolName);
+    const shadowCtx = ctx ? { ...ctx, ...(t ? { abortSignal: t.signal } : {}) } : ctx;
     try {
+      if (!t) return await rawExecute(rest, shadowCtx);
       return await Promise.race([
         rawExecute(rest, shadowCtx),
         new Promise<never>((_, reject) => {
@@ -92,9 +98,9 @@ export function withAgentTimeout<T extends ToolImpl>(toolName: string, impl: T, 
         }),
       ]);
     } catch (err) {
-      throw t.rethrow(err);
+      throw t ? t.rethrow(err) : err;
     } finally {
-      t.clear();
+      t?.clear();
     }
   };
 

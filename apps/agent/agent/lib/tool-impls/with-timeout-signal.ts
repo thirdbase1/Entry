@@ -20,20 +20,20 @@
  */
 export function withTimeoutSignal(outerSignal: AbortSignal | undefined, timeoutMs: number, toolName: string) {
   const timeoutController = new AbortController();
-  const timer = setTimeout(
-    () => timeoutController.abort(new Error(`${toolName} timed out after ${timeoutMs / 1000}s`)),
-    timeoutMs
-  );
+  const hasTimeout = timeoutMs > 0;
+  const timer = hasTimeout
+    ? setTimeout(() => timeoutController.abort(new Error(`${toolName} timed out after ${timeoutMs / 1000}s`)), timeoutMs)
+    : undefined;
   const signal = outerSignal ? AbortSignal.any([outerSignal, timeoutController.signal]) : timeoutController.signal;
 
   return {
     signal,
     clear() {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     },
     /** Call from a catch block: converts a timeout-triggered abort into a readable Error, passes any other error through unchanged. */
     rethrow(err: unknown): unknown {
-      if (timeoutController.signal.aborted) {
+      if (hasTimeout && timeoutController.signal.aborted) {
         return new Error(`${toolName} timed out after ${timeoutMs / 1000}s — try a smaller or simpler request, or split it into parts.`);
       }
       return err;
