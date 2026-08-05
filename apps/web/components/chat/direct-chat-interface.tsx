@@ -362,6 +362,30 @@ function DirectChatSession({
   // Give-up counters for the 3s recovery poll below (2026-07-21 fix --
   // see the poll's own comment for why this exists).
   const missedPollsRef = useRef(0);
+  // FIXED (2026-08-05, real bug reproduced from a screen recording: chat
+  // UI permanently freezes ~2min into a long background tool call --
+  // no error, no reconnecting indicator, just stuck -- while the server
+  // keeps working and finishes minutes later, only visible again after a
+  // full page reload). Root cause: missedPollsRef above used to count
+  // ANY non-OK `/api/chats/{id}` response toward the 8-strikes give-up
+  // below, but that give-up is only actually correct for a genuine 404
+  // (per its own original comment: "a chat id that will NEVER resolve").
+  // A transient 5xx/502/503 from the exact same proxy hop that's already
+  // known to drop long-lived connections (see timing.ts/turn-lock.ts's
+  // own comments on this) would ALSO occasionally hit this snapshot GET
+  // -- and during the fast 800ms poll cadence (which is exactly when a
+  // long background turn is being watched most closely) 8 consecutive
+  // hits is only ~6.4s of bad luck, not the ~24s of real grace the give-
+  // up was designed around. Once tripped, `gaveUpRef` permanently stops
+  // ALL future polling for this chat (see scheduleNext below) and
+  // RECONNECT_GAVE_UP clears pendingTurn -- exactly the silent freeze
+  // symptom. Now: only a REAL 404 counts toward give-up at all (tracked
+  // by wall-clock time below, not raw poll count, so it's immune to the
+  // 800ms/3000ms adaptive-cadence swing); any other non-OK status is
+  // treated exactly like a network hiccup -- logged, never counted,
+  // retried indefinitely on the next tick, same as the catch-block below
+  // already does for a thrown fetch rejection.
+  const firstNotFoundAtRef = useRef<number | null>(null);
   const gaveUpRef = useRef(false);
   // FIXED (2026-07-24, real user report: "if I reload the page while the
   // model is working, does the send button still turn black?" -- it
@@ -865,22 +889,27 @@ function DirectChatSession({
         try {
           const res = await fetch(`/api/chats/${activeId}`);
           if (!res.ok) {
-            // FIXED (2026-07-21, real production trace: `vercel logs`
-            // showed this exact GET 404-ing every 3s for MINUTES straight,
-            // nonstop, for a chat whose very first turn never actually got
-            // persisted server-side at all -- e.g. the initiating POST
-            // itself never reached the server (a genuine client-network
-            // failure, see send-with-retry.ts). Previously there was no
-            // give-up condition here: a chat id that will NEVER resolve
-            // (there is nothing server-side to recover, ever) polled
-            // silently forever, burning a request every 3s with no visible
-            // feedback to the user at all beyond whatever the original
-            // send's own catch handler showed. 8 consecutive misses (~24s
-            // of real wall time given the 3s cadence) is well past any
-            // plausible transient blip -- surface a clear terminal error
-            // and stop, instead of polling a dead endpoint indefinitely.
-            missedPollsRef.current += 1;
-            if (missedPollsRef.current >= 8) {
+            // Only a genuine 404 (this exact chat id truly does not exist
+            // server-side, e.g. the initiating POST never reached the
+            // server at all -- see send-with-retry.ts) is evidence this
+            // will NEVER resolve. Anything else (502/503/504 from a flaky
+            // proxy hop, a transient 500, etc.) says nothing about whether
+            // the chat/turn itself is fine -- treat it exactly like the
+            // network-level catch block below: log, don't touch the
+            // give-up counter, just retry on the next tick.
+            if (res.status !== 404) {
+              console.warn('[direct-chat recovery poll] non-404 non-OK response, retrying next tick', res.status);
+              return;
+            }
+            // Wall-clock-based, not raw-poll-count-based (2026-08-05 fix,
+            // see firstNotFoundAtRef's own comment above): immune to the
+            // adaptive 800ms/3000ms cadence swing that made the old "8
+            // consecutive polls" threshold mean anywhere from ~6.4s to
+            // ~24s of real grace depending on which cadence happened to be
+            // active. 30s of CONTINUOUS real 404s is well past any
+            // plausible transient blip.
+            if (firstNotFoundAtRef.current === null) firstNotFoundAtRef.current = Date.now();
+            if (Date.now() - firstNotFoundAtRef.current >= 30_000) {
               gaveUpRef.current = true;
               window.clearTimeout(pollIdRef.current);
               dispatchTurn({
@@ -890,6 +919,7 @@ function DirectChatSession({
             }
             return;
           }
+          firstNotFoundAtRef.current = null;
           missedPollsRef.current = 0;
           const snap = await res.json();
           const persisted = Array.isArray(snap?.events) ? snap.events : null;
@@ -1145,6 +1175,7 @@ function DirectChatSession({
     };
     tryRecover();
     missedPollsRef.current = 0;
+    firstNotFoundAtRef.current = null;
     scheduleNext();
     return () => {
       cancelled = true;

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@entry/db';
+import { isMythosClassModelId, MYTHOS_CLASS_MODEL_IDS as MYTHOS_CLASS_MODEL_IDS_FOR_BULK } from '@entry/db/mythos-guard';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { featureService } from '@entry/features';
 import { isAdminBearerAuthorized } from '@/lib/admin-auth';
@@ -90,7 +91,21 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: 'Shared provider not found' }, { status: 404 });
   }
 
+  // MYTHOS GUARD (2026-08-05, real bug found by code audit -- owner
+  // standing instruction: "Hide 'Mythos' models entirely from the model
+  // picker"). Before this, isEnabled:true here was accepted unconditionally
+  // for any row -- nothing stopped an admin (or a future automated re-seed)
+  // from flipping a Mythos-class model back on through this exact toggle.
+  // See @entry/db/mythos-guard for the single source of truth this now
+  // shares with seed-freemodel-provider/route.ts.
   if (body.modelRowId) {
+    const targetRow = await prisma.userModelProviderModel.findUnique({
+      where: { id: body.modelRowId, providerId: body.providerId },
+      select: { modelId: true },
+    });
+    if (body.enabled && targetRow && isMythosClassModelId(targetRow.modelId)) {
+      return NextResponse.json({ error: `${targetRow.modelId} is a Mythos-class model and cannot be enabled in the picker.` }, { status: 400 });
+    }
     const updated = await prisma.userModelProviderModel.update({
       where: { id: body.modelRowId, providerId: body.providerId },
       data: { isEnabled: body.enabled },
@@ -99,9 +114,17 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ ok: true, model: updated });
   }
 
-  const result = await prisma.userModelProviderModel.updateMany({
-    where: { providerId: body.providerId },
-    data: { isEnabled: body.enabled },
-  });
+  // Bulk provider-level toggle: enabling never touches Mythos-class rows
+  // under that provider (they silently stay off), disabling still clears
+  // everything as before.
+  const result = body.enabled
+    ? await prisma.userModelProviderModel.updateMany({
+        where: { providerId: body.providerId, NOT: { modelId: { in: Array.from(MYTHOS_CLASS_MODEL_IDS_FOR_BULK) } } },
+        data: { isEnabled: true },
+      })
+    : await prisma.userModelProviderModel.updateMany({
+        where: { providerId: body.providerId },
+        data: { isEnabled: false },
+      });
   return NextResponse.json({ ok: true, updatedCount: result.count });
 }

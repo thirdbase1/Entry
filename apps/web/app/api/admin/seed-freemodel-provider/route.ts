@@ -35,6 +35,7 @@
 import { prisma } from '@entry/db';
 import { encryptApiKey } from '@entry/db';
 import { isAdminBearerAuthorized } from '@/lib/admin-auth';
+import { isMythosClassModelId } from '@entry/db/mythos-guard';
 
 const PROVIDER_LABEL = 'freemodel.dev';
 // No cap was specified by the owner -- defaulting to the same $20
@@ -53,6 +54,29 @@ const MODELS = [
   { modelId: 'claude-sonnet-4-6', displayLabel: 'Claude Sonnet 4.6' },
   { modelId: 'claude-sonnet-5', displayLabel: 'Claude Sonnet 5' },
 ] as const;
+
+// FIXED (2026-08-05, real bug found by code audit -- explicit owner
+// standing instruction: "Hide 'Mythos' models entirely from the model
+// picker"). This route's own loop below used to blindly set
+// `isEnabled: true` for EVERY entry in MODELS above on every POST,
+// including claude-fable-5 -- which this exact file's own header comment
+// already correctly identifies as "Mythos-class". Nothing anywhere else
+// in the codebase actually filters Mythos models out of the picker by
+// name (confirmed: no such check exists in resolve-model.ts or the chat
+// model-selector component -- isEnabled on the DB row is the ONLY real
+// gate) -- so every time this idempotent seed route was re-run (e.g. a
+// future pricing refresh), it would silently re-enable Fable 5 again,
+// undoing the hide with no visible signal that it had happened. It was
+// only actually hidden right now because someone had separately clicked
+// it off by hand in the new Admin > Providers toggle UI -- one seed re-run
+// away from quietly coming back. Listing it here, checked explicitly in
+// the loop below, closes that hole at the source instead of relying on a
+// manual toggle to keep re-happening to catch it.
+// Delegates to the shared @entry/db/mythos-guard module (2026-08-05,
+// see that file's comment) instead of keeping its own separate list --
+// this route was the ORIGINAL source of the bug (blindly enabling every
+// entry in MODELS above, Mythos-class included), so it must never fall
+// out of sync with the same guard the admin toggle route now also uses.
 
 export async function POST(req: Request) {
   if (!isAdminBearerAuthorized(req)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -105,22 +129,26 @@ export async function POST(req: Request) {
     }
   }
 
-  const modelResults: Array<{ modelId: string; modelRowId: string }> = [];
+  const modelResults: Array<{ modelId: string; modelRowId: string; isEnabled: boolean }> = [];
   for (const m of MODELS) {
     const existing = await prisma.userModelProviderModel.findFirst({
       where: { providerId: provider.id, modelId: m.modelId },
     });
+    // Mythos-class models (see MYTHOS_CLASS_MODEL_IDS above) are seeded
+    // for pricing/rate-row purposes only -- always forced isEnabled:
+    // false here, never true, no matter what this route is called with.
+    const shouldEnable = !isMythosClassModelId(m.modelId);
     // reasoningEnabled: true -- same one-time product decision as HCNSec:
     // shared, platform-picked models default to thinking ON.
     const row = existing
       ? await prisma.userModelProviderModel.update({
           where: { id: existing.id },
-          data: { label: m.displayLabel, isEnabled: true, reasoningEnabled: true },
+          data: { label: m.displayLabel, isEnabled: shouldEnable, reasoningEnabled: true },
         })
       : await prisma.userModelProviderModel.create({
-          data: { providerId: provider.id, modelId: m.modelId, label: m.displayLabel, isEnabled: true, reasoningEnabled: true },
+          data: { providerId: provider.id, modelId: m.modelId, label: m.displayLabel, isEnabled: shouldEnable, reasoningEnabled: true },
         });
-    modelResults.push({ modelId: m.modelId, modelRowId: row.id });
+    modelResults.push({ modelId: m.modelId, modelRowId: row.id, isEnabled: shouldEnable });
   }
 
   return Response.json({
