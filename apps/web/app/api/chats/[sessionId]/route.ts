@@ -5,6 +5,7 @@
  * toggle favorite, toggle public sharing, or delete.
  */
 import { getUserSessionFromRequest } from '@entry/auth';
+import { getActiveTurnId, hasTurnStreamEnded } from '@/lib/direct-chat/turn-lock';
 import { getChatSession, removeChatSession, saveChatSnapshot, toggleChatCollected, setChatPublic } from '@entry/copilot';
 
 export async function GET(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
@@ -22,7 +23,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   // recovery already happens client-side (direct-chat-interface.tsx's
   // own recovery poll re-fetches this same route), so no server-side
   // reconciliation is needed here anymore.
-  return Response.json(chat);
+  const activeTurnId = await getActiveTurnId(sessionId);
+  const turnActive = Boolean(activeTurnId && !hasTurnStreamEnded(sessionId, activeTurnId));
+  return Response.json({ ...chat, turnActive });
 }
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {

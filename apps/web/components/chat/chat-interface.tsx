@@ -25,6 +25,8 @@ interface ChatInterfaceProps {
    *  error follow-up message so the agent resumes without the user
    *  retyping anything. */
   integrationCallback?: IntegrationCallback;
+  /** Server-confirmed live turn state used to gate reconnect on mount. */
+  initialTurnActive?: boolean;
 }
 
 /** localStorage key for the user's last-selected model, so a BYOK choice
@@ -35,7 +37,7 @@ const LAST_MODEL_STORAGE_KEY = 'entry:lastSelectedModel';
 async function fetchSnapshot(sessionId: string) {
   const res = await fetch(`/api/chats/${sessionId}`);
   if (!res.ok) return null;
-  return res.json() as Promise<{ events?: unknown; cursor?: unknown; byokModelId?: string | null; requestedModel?: string | null }>;
+  return res.json() as Promise<{ events?: unknown; cursor?: unknown; byokModelId?: string | null; requestedModel?: string | null; turnActive?: boolean }>;
 }
 
 /**
@@ -71,7 +73,7 @@ export function ChatInterface({
   integrationCallback,
 }: ChatInterfaceProps) {
   const router = useRouter();
-  const [initial, setInitial] = useState<{ events?: unknown; cursor?: unknown; byokModelId?: string | null; requestedModel?: string | null } | null>(
+  const [initial, setInitial] = useState<{ events?: unknown; cursor?: unknown; byokModelId?: string | null; requestedModel?: string | null; turnActive?: boolean } | null>(
     sessionId ? null : {}
   );
 
@@ -285,6 +287,7 @@ export function ChatInterface({
       className={className}
       initialMessage={initialMessage}
       integrationCallback={integrationCallback}
+      initialTurnActive={!!initial.turnActive}
     />
   );
 }
