@@ -67,7 +67,7 @@ const GENERIC_BODY_MAX_LENGTH = 400;
 // condition that cannot possibly succeed until the cap resets hours
 // later. Adding this keyword makes it fail on the first attempt instead
 // of wasting several real seconds retrying something permanent-for-now.
-const PERMANENT_SIGNAL_PATTERN = /invalid[_ ]?api[_ ]?key|unauthorized|authentication|insufficient[_ ]?quota|insufficient[_ ]?balance|rate[_ ]?limit|usage[_ ]?limit|monthly[_ ]?limit|model[_ ]?not[_ ]?found|does not exist|permission|forbidden/i;
+const PERMANENT_SIGNAL_PATTERN = /invalid[_ ]?api[_ ]?key|unauthorized|authentication|insufficient[_ ]?quota|insufficient[_ ]?balance|rate[_ ]?limit|usage[_ ]?limit|monthly[_ ]?limit|model[_ ]?not[_ ]?found|model[_ ]?is[_ ]?disabled|does not exist|permission|forbidden/i;
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
