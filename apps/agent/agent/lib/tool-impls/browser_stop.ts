@@ -44,9 +44,23 @@ export const browserStop = {
     if (row.status === 'stopped') {
       return { stopped: true, alreadyStopped: true, sessionId: session_id };
     }
-    const taskOnly = Boolean(cancel_task_only) && row.provider !== 'steel' && row.provider !== 'brightdata' && row.provider !== 'anchorbrowser';
+    const taskOnly = Boolean(cancel_task_only) && row.provider !== 'agent_browser' && row.provider !== 'steel' && row.provider !== 'brightdata' && row.provider !== 'anchorbrowser';
     try {
-      if (row.provider === 'steel') {
+      if (row.provider === 'agent_browser') {
+        // ADDED (2026-08-05) -- close the actual local Chrome/CLI session
+        // running in this chat's own sandbox (see browser_use.ts's
+        // agent_browser lane) so it doesn't sit around idle after the
+        // agent is done with it. Best-effort: the sandbox itself may
+        // already be paused/gone by the time this runs, which is fine --
+        // there's nothing left to clean up in that case either way.
+        try {
+          const sandbox = await ctx.getSandbox();
+          const safeSessionName = row.providerSessionId.replace(/[^a-zA-Z0-9._-]/g, '');
+          await sandbox.run({ command: `agent-browser --session ${safeSessionName} close` });
+        } catch {
+          // best-effort only -- never block freeing the local slot over this
+        }
+      } else if (row.provider === 'steel') {
         await stopSteelSession(row.providerSessionId);
       } else if (row.provider === 'brightdata') {
         // Bright Data has no create/release REST API -- the browser
