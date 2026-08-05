@@ -62,6 +62,7 @@ import { NextRequest } from 'next/server';
 import {
   streamText,
   tool,
+  stepCountIs,
   convertToModelMessages,
   smoothStream,
   createUIMessageStream,
@@ -809,8 +810,35 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
     // second, much slower retry system on top of a problem the inner
     // wrapper now already solves quickly.
     maxRetries: 2,
-    // No artificial step-count stop: a live model turn must finish from its
-    // own terminal response, not from a UI/runtime budget.
+    // RESTORED (2026-08-05, live bug: reported duplicate/looping assistant
+    // responses in production, traced back to this exact guard being
+    // dropped in the 'keep long turns alive through disconnects' pass).
+    // That change correctly removed the ARTIFICIAL wall-clock/step budget
+    // that used to cut long turns short (SOFT_DEADLINE_MS, stepCountIs(400)
+    // used as a generic ceiling) -- but stepCountIs(400) and the relay-lie
+    // detector below aren't a UI/runtime budget, they're the only thing
+    // stopping a step-loop that legitimately cannot stop itself. Without
+    // this, a relay that lies about finishReason ('tool-calls' with zero
+    // actual tool calls -- confirmed real behavior, see the guard's own
+    // history below) makes the AI SDK feed it another step FOREVER, each
+    // one persisted as its own assistant message -- which is exactly what
+    // reads as "duplicating agent response" in the UI, and separately
+    // explains reports of a needsConnect card never appearing: the turn
+    // never reaches the real tool call that would have produced it because
+    // it's stuck re-running the lying step instead. 400 is generous enough
+    // to never bound a genuine long turn in practice; it only bounds the
+    // pathological case this guard exists for.
+    stopWhen: [
+      stepCountIs(400),
+      ({ steps }) => {
+        if (steps.length < 2) return false;
+        const last = steps[steps.length - 1];
+        const prev = steps[steps.length - 2];
+        const noToolCalls = (s: { toolCalls?: unknown[] }) => !s.toolCalls || s.toolCalls.length === 0;
+        const noText = (s: { text?: string }) => !s.text || s.text.trim().length === 0;
+        return noToolCalls(last) && noToolCalls(prev) && noText(last) && noText(prev);
+      },
+    ],
     // FIXED (2026-07-19, confirmed live from production logs): a 'Free'
     // BYOK relay (model id "claude-fable-5") hung completely on a turn --
     // zero chunks, zero onStepFinish, nothing -- for the FULL 300s
