@@ -58,7 +58,7 @@ tunnel (`trycloudflare.com`) needs no signup/token and is materially more reliab
 primary path in `get_preview_url.ts`, falling back to localtunnel only if the cloudflared binary
 itself can't be downloaded.
 
-## 7. Always attribute commits to `Thirdbase1 <miraclethirdbase1@gmail.com>` and push after every real fix
+## 7. Always attribute commits to `Thirdbase1 <entry-bot@users.noreply.github.com>` and push after every real fix
 Uncommitted local fixes are invisible to the next session and at risk of being lost entirely if the
 sandbox resets. After any set of real code changes (not just at the end of a long session), run
 `git add -A && git commit` with that identity and `git push origin main` — don't batch it up and

@@ -5,11 +5,11 @@ Last updated: 2026-08-02 (account correction pending — see notice below)
 ## ACCOUNT CORRECTION (2026-08-02)
 
 The owner has corrected this: the actual Pxxl login/deploy account is
-**vwhehj@gmail.com**. Earlier notes in this doc calling that account
+**the Pxxl account (see sandbox rule file)**. Earlier notes in this doc calling that account
 "dead" were wrong. Project ID / production URL under this account are
 being re-confirmed — do not assume `proj_ibab5ldta4l63qoentq7` or
 `entry.pxxl.pro` still apply until re-verified with `pxxl whoami` /
-`pxxl projects list` while logged into vwhehj@gmail.com.
+`pxxl projects list` while logged into the Pxxl account (see sandbox rule file).
 
 Never embed a literal API key value in this file (or any repo file) —
 reference the sandbox rule file instead. A key was previously leaked this
@@ -52,7 +52,7 @@ projectId = "proj_ibab5ldta4l63qoentq7"
 
 1. **Env var override**: `$PXXL_TOKEN`/`$PXXL_API_KEY` in the sandbox may
    point at a different account than intended. Always run `pxxl whoami`
-   first — it should say `vwhehj@gmail.com`. If not:
+   first — it should say `the Pxxl account (see sandbox rule file)`. If not:
    `pxxl login --api-key <key from .agents rule>`.
 2. **~16MB hard cap on the CLI upload endpoint**: exceeding it returns a
    raw/unhelpful `502`, not a clean error. Binary-search the zip size if
@@ -92,7 +92,7 @@ projectId = "proj_ibab5ldta4l63qoentq7"
 ## The correct procedure (current, working)
 
 ```bash
-pxxl whoami   # confirm vwhehj@gmail.com
+pxxl whoami   # confirm the Pxxl account (see sandbox rule file)
 
 git pull origin main
 
