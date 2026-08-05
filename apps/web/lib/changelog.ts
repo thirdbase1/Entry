@@ -13,6 +13,30 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-14',
+    title: 'A real in-chat coding environment: editor, live files, terminal',
+    items: [
+      "Added a real code editor tab, a live file tree that updates as the agent writes, and an actual terminal tab -- so you can watch and touch what the agent is doing to your project, not just read a transcript of it.",
+      "Chat no longer \"forgets\" halfway through a long conversation -- long chats are now automatically compacted so the agent keeps real context instead of silently losing earlier instructions.",
+      "Smoothed out choppy, stuttery agent replies during fast streaming.",
+    ],
+  },
+  {
+    date: '2026-07-11',
+    title: 'Dark mode, and BYOK reasoning/effort controls actually work',
+    items: [
+      "Added dark mode.",
+      "Fixed the reasoning-effort toggle for your own connected (BYOK) models -- it was silently ignored, so \"thinking\" mode never actually turned on no matter what you picked.",
+    ],
+  },
+  {
+    date: '2026-07-09',
+    title: 'Bring your own key (BYOK): connect your own model providers',
+    items: [
+      "You can now connect your own AI provider accounts (OpenAI-compatible, Anthropic, Google, and more) with your own API key, pick exactly which of that provider's models show up in your chat model picker, and use them right alongside the built-in models.",
+    ],
+  },
+  {
     date: '2026-08-04',
     title: 'New models available: Opencode Zen (Free Tier)',
     items: [
