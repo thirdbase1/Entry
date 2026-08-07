@@ -66,6 +66,7 @@ import { mergeAndPersistChatEvents } from '@/lib/direct-chat/persist-chat-events
 import { sanitizeDanglingToolCalls } from '@/lib/direct-chat/sanitize-messages';
 import { applyToolCacheBreakpoint } from '@/lib/direct-chat/prompt-cache';
 import { buildDirectChatToolContext } from '@/lib/direct-chat/build-tool-context';
+import { WRITER_HEARTBEAT_MS, makeHeartbeatChunk } from '@/lib/direct-chat/timing';
 
 const FLAKY_PROVIDERS_DROP_TOOLS_AFTER_STEP_1 = new Set(['Woino']);
 
@@ -102,8 +103,19 @@ interface LegResult {
   doneNaturally: boolean;
 }
 
-async function runChatTurnLegStep(input: LegInput, writable: WritableStream<UIMessageChunk>): Promise<LegResult> {
+async function runChatTurnLegStep(input: LegInput): Promise<LegResult> {
   'use step';
+  // Called fresh inside the step, not threaded in as a workflow-level
+  // argument (2026-08-07, cross-checked against workflow-sdk.dev/docs/
+  // foundations/streaming's "Streams Cannot Be Used Directly in Workflow
+  // Context" + its own canonical good-example: getWritable() with no
+  // namespace always resolves to the SAME run-scoped default writable
+  // regardless of which step calls it or how many times, so there's
+  // nothing to gain from obtaining it once in the workflow function and
+  // passing the reference through -- and doing so risked sitting right
+  // on the documented "don't touch streams in workflow context" line for
+  // no benefit. Every leg gets the identical persistent stream this way.
+  const writable = getWritable<UIMessageChunk>();
   const { chatId, userId, turnUiMessages: uiMessages, legMessages, legNumber, disabledToolNames, byokModelId, requestedModel, reasoningRequested } = input;
 
   // Re-resolve fresh every leg -- see this file's header comment. Cheap
@@ -837,7 +849,41 @@ async function runChatTurnLegStep(input: LegInput, writable: WritableStream<UIMe
   let sawRealContent = false;
   let turnErrored = false;
   try {
-    for await (const chunk of innerUiStream) {
+    // HEARTBEAT DURING SILENT GAPS (reinstated 2026-08-07 -- this was
+    // dropped when the old single-request writer loop (route.ts) got
+    // replaced by this leg's plain `for await`, which is WRONG: workflow
+    // durability answers "does the server keep working across a dropped
+    // connection", a completely different question from "does an
+    // intermediate proxy/carrier gateway kill an HTTP connection after N
+    // seconds of raw byte silence" -- the exact, previously-incident-
+    // confirmed failure mode (see timing.ts's file header: "agent stops
+    // at 1 min but runs for 21 min"). A long silent tool call (e.g. an
+    // E2B sandbox build step deep inside a tool's execute()) still
+    // produces zero chunks from `innerUiStream` for its whole duration --
+    // that silence is now on THIS leg's writable, same physical HTTP
+    // connection concern as before, workflow or not. Fix: race each
+    // `.next()` against WRITER_HEARTBEAT_MS and write a padded no-op
+    // chunk on timeout, looping until the real next chunk actually
+    // arrives -- functionally identical to the old writer's race, just
+    // relocated to where the forwarding loop now lives. This is the ONLY
+    // place this needs fixing: a reattaching client (WorkflowChatTransport
+    // reconnect, or the [chatId]/stream GET route) reads from the SAME
+    // underlying run stream this writes to, so it inherits these
+    // heartbeats automatically -- no separate reader-side keepalive
+    // needed, unlike the old two-sided Redis-mirror design.
+    const iterator = innerUiStream[Symbol.asyncIterator]();
+    while (true) {
+      const HEARTBEAT = Symbol('heartbeat');
+      const next = await Promise.race([
+        iterator.next(),
+        new Promise<typeof HEARTBEAT>(resolve => setTimeout(() => resolve(HEARTBEAT), WRITER_HEARTBEAT_MS)),
+      ]);
+      if (next === HEARTBEAT) {
+        await writer.write(makeHeartbeatChunk());
+        continue;
+      }
+      const { value: chunk, done } = next as IteratorResult<UIMessageChunk>;
+      if (done) break;
       if (chunk.type === 'text-delta' && chunk.delta.trim().length > 0) {
         sawRealContent = true;
       } else if (chunk.type.startsWith('tool-')) {
@@ -895,13 +941,16 @@ async function runChatTurnLegStep(input: LegInput, writable: WritableStream<UIMe
  */
 export async function runDirectChatTurnWorkflow(input: TurnWorkflowInput): Promise<{ legCount: number }> {
   'use workflow';
-  const writable = getWritable<UIMessageChunk>();
+  // No getWritable() call here anymore -- see runChatTurnLegStep's own
+  // comment. The workflow function's only job is orchestrating which
+  // step runs next with which accumulated message history; it never
+  // touches the stream itself.
   let legMessages = input.initialModelMessages;
   let legNumber = 0;
   let doneNaturally = false;
   while (!doneNaturally && legNumber < MAX_LEGS) {
     legNumber += 1;
-    const legResult = await runChatTurnLegStep({ ...input, legMessages, legNumber }, writable);
+    const legResult = await runChatTurnLegStep({ ...input, legMessages, legNumber });
     legMessages = legResult.updatedModelMessages;
     doneNaturally = legResult.doneNaturally;
   }
