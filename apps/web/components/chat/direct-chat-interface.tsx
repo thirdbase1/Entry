@@ -39,7 +39,8 @@
  * remount too, not just a stale patched-over instance).
  */
 import { useChat } from '@ai-sdk/react';
-import { DefaultChatTransport, type UIMessage } from 'ai';
+import { type UIMessage } from 'ai';
+import { WorkflowChatTransport } from '@ai-sdk/workflow';
 import { fetchWithIdleTimeout } from '@/lib/chat/fetch-with-idle-timeout';
 import { CLIENT_IDLE_TIMEOUT_MS } from '@/lib/direct-chat/timing';
 import { Suspense, useEffect, useMemo, useReducer, useRef, useState } from 'react';
@@ -507,7 +508,7 @@ function DirectChatSession({
 
   const transport = useMemo(
     () =>
-      new DefaultChatTransport({
+      new WorkflowChatTransport({
         // RETIRED (2026-07-22): the standalone Pxxl/Fly worker
         // (`${EVE_AGENT_HOST}/message`) this used to conditionally route to
         // is dead and this whole kill-switch is permanently disabled -- see
@@ -516,7 +517,30 @@ function DirectChatSession({
         // instead of this deployment's own /api/direct/chat). Always
         // same-origin now, no conditional left to accidentally re-arm.
         api: '/api/direct/chat',
-        body: byokModelId ? { byokModelId } : { requestedModel },
+        // MIGRATED (2026-08-07) off DefaultChatTransport onto
+        // WorkflowChatTransport -- see turn-workflow.ts's file header for
+        // the full "why a leg-based durable workflow" writeup. Behavior
+        // this preserves unchanged: same api endpoint, same effective
+        // body shape, same idle-timeout-guarded fetch (a mid-turn server
+        // restart still needs this client-side watchdog regardless of
+        // transport, since it's about detecting a fetch that silently
+        // died with no bytes, no close, no error -- nothing to do with
+        // reconnection itself). What it adds: WorkflowChatTransport's own
+        // automatic reconnect-on-drop retry loop DURING an in-flight send
+        // (reads this route's `x-workflow-run-id` response header, see
+        // route.ts), on top of the existing on-mount `resume` behavior
+        // below.
+        //
+        // WorkflowChatTransport has no static `body` option (unlike
+        // DefaultChatTransport) -- `prepareSendMessagesRequest` is the
+        // replacement, and it must be merged with any PER-CALL body a
+        // caller passes to `chat.sendMessage(msg, { body })` (see the
+        // `disabledTools` override further down this file) rather than
+        // clobbering it.
+        prepareSendMessagesRequest: ({ body }) => ({
+          api: '/api/direct/chat',
+          body: { ...body, ...(byokModelId ? { byokModelId } : { requestedModel }) },
+        }),
         // ADDED (2026-07-24, real confirmed incident: a mid-turn Render
         // health-check-kill restarted the server -- the turn itself
         // survived and finished correctly server-side, but the open
@@ -553,22 +577,23 @@ function DirectChatSession({
     // working in background I can still send multiple prompts and I get
     // multiple responses" + "if I reload the page [it] should not
     // disconnect [from a turn that's still running]"). `resume: true`
-    // makes useChat call `resumeStream()` once on mount -- the AI SDK's
-    // own built-in reconnect protocol (confirmed directly against
-    // node_modules/ai's `reconnectToStream`: GETs
-    // `/api/direct/chat/{chatId}/stream`, a 204 means nothing to resume,
-    // otherwise it's a normal live UI-message-stream body). Server side:
-    // see the new [chatId]/stream/route.ts GET route + turn-lock.ts. This
-    // is what lets a fresh page load (reload, new tab, another device)
-    // discover a turn that's STILL running server-side and attach to its
-    // live remaining output instead of only finding out once it's fully
-    // done via the DB recovery poll below -- and, just as importantly,
-    // it flips `chat.status` to 'streaming' immediately on mount for a
-    // truly-still-running turn, closing the exact window where `isBusy`
-    // could read false right after a reload even though the server was
-    // still working (the bug behind both reports above: the send button
-    // looking free to use, and a second prompt racing the still-running
-    // first one).
+    // makes useChat call the transport's `reconnectToStream()` once on
+    // mount. MIGRATED (2026-08-07): now WorkflowChatTransport's version
+    // of that call (confirmed directly against
+    // node_modules/@ai-sdk/workflow's workflow-chat-transport.ts) -- GETs
+    // `/api/direct/chat/{chatId}/stream`, resolves the chat's durable
+    // workflow run (see resolve-active-run.ts) and streams straight from
+    // it via `getRun(runId).getReadable()`. A genuinely missing/expired
+    // run still 204s. This is what lets a fresh page load (reload, new
+    // tab, another device) discover a turn that's STILL running
+    // server-side and attach to its live remaining output instead of
+    // only finding out once it's fully done via the DB recovery poll
+    // below -- and, just as importantly, it flips `chat.status` to
+    // 'streaming' immediately on mount for a truly-still-running turn,
+    // closing the exact window where `isBusy` could read false right
+    // after a reload even though the server was still working (the bug
+    // behind both reports above: the send button looking free to use,
+    // and a second prompt racing the still-running first one).
     // FIXED (2026-08-05, reproduced from the screen recording): only
     // existing chats may resume. A brand-new `/chats` page still gets a
     // client-generated chat.id, but there is no server row or stream yet.

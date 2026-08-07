@@ -5,7 +5,8 @@
  * toggle favorite, toggle public sharing, or delete.
  */
 import { getUserSessionFromRequest } from '@entry/auth';
-import { getActiveTurnId, hasTurnStreamEnded } from '@/lib/direct-chat/turn-lock';
+import { getRun } from 'workflow/api';
+import { resolveOwnedRunId } from '@/lib/direct-chat/resolve-active-run';
 import { getChatSession, removeChatSession, saveChatSnapshot, toggleChatCollected, setChatPublic } from '@entry/copilot';
 
 export async function GET(req: Request, { params }: { params: Promise<{ sessionId: string }> }) {
@@ -23,8 +24,20 @@ export async function GET(req: Request, { params }: { params: Promise<{ sessionI
   // recovery already happens client-side (direct-chat-interface.tsx's
   // own recovery poll re-fetches this same route), so no server-side
   // reconciliation is needed here anymore.
-  const activeTurnId = await getActiveTurnId(sessionId);
-  const turnActive = Boolean(activeTurnId && !hasTurnStreamEnded(sessionId, activeTurnId));
+  //
+  // MIGRATED (2026-08-07): turn-lock.ts's Redis heartbeat lock is
+  // retired -- see turn-workflow.ts's file header. "Is a turn active"
+  // now just means "does this chat's last workflow run still exist and
+  // report pending/running", read straight off the durable run itself.
+  const runId = await resolveOwnedRunId(sessionId, session.user.id);
+  const turnActive = runId
+    ? await (async () => {
+        const run = getRun(runId);
+        if (!(await run.exists)) return false;
+        const status = await run.status;
+        return status === 'pending' || status === 'running';
+      })()
+    : false;
   return Response.json({ ...chat, turnActive });
 }
 

@@ -619,7 +619,11 @@ model EveChatSession {
   requestedModel String? @map("requested_model") @db.VarChar
   chatWorkingMemory ChatWorkingMemory?
   events     Json?    @db.JsonB // persisted HandleMessageStreamEvent[] snapshot (or plain messages[] for direct-chat rows)
-  cursor     Json?    @db.JsonB // persisted { sessionId, continuationToken, streamIndex } (eve rows only)
+  cursor     Json?    @db.JsonB // two shapes depending on row type:
+  // eve rows (legacy, playback/share only): { sessionId, continuationToken, streamIndex }
+  // direct-chat rows (2026-08-07+): { workflowRunId } -- the live/last turn-workflow run
+  // backing this chat, see lib/direct-chat/resolve-active-run.ts. Never both on the same
+  // row -- a row is either-or, distinguished by byokModelId/requestedModel presence.
   // Public-sharing schema decision (flagged in an earlier session as a real
   // gap, resolved here): the original's `/playback` route was genuinely
   // public/unauthenticated but had no persisted "may anyone view this" bit
