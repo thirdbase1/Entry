@@ -1,5 +1,6 @@
 import type { NextConfig } from 'next';
 import { resolve } from 'node:path';
+import { withWorkflow } from 'workflow/next';
 
 const nextConfig: NextConfig = {
   // Standalone output: see the long comment block near the bottom of this
@@ -151,4 +152,8 @@ const nextConfig: NextConfig = {
 // implementation with no eve dependency at all. Removing withEve() drops
 // the `eve` package from this app's server bundle entirely (smaller
 // bundle, one less framework mounted into every cold start).
-export default nextConfig;
+// withWorkflow enables the "use workflow" / "use step" directives used
+// by lib/direct-chat/sandbox-workflow.ts (added 2026-08-07 to make
+// long-running sandbox commands durable against Vercel serverless's
+// per-invocation ceiling -- see that file's comment for the full why).
+export default withWorkflow(nextConfig);

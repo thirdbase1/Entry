@@ -40,6 +40,8 @@
  * missing persistence layer that makes resume-across-turns work here too.
  */
 import { Sandbox as E2BSandbox, RateLimitError as E2BRateLimitError } from 'e2b';
+import { start } from 'workflow/api';
+import { runSandboxCommandWorkflow } from './sandbox-workflow';
 import { prisma } from '@entry/db';
 import { restoreLatestFilesToSandbox } from '@entry/db/chat-versioning';
 
@@ -242,18 +244,29 @@ export async function getSandboxForChat(chatId: string): Promise<DirectChatSandb
       // Refresh the sandbox's TTL on every command so it never expires
       // mid-turn, even on very long turns (>15 min).
       refreshTimeout();
-      // 5 min per-command ceiling is a server-side SAFETY NET only now --
-      // in practice the caller's own signal (bash.ts's 120s
-      // withTimeoutSignal) fires first and actually cancels the in-flight
-      // E2B command via `signal` below, rather than just abandoning the
-      // wait. PLUS the shared withRetry wrapper around the dispatch
-      // itself, so a transient E2B 429/5xx getting the command started
-      // gets absorbed instead of surfacing as a bare tool failure -- same
-      // class of fix as e2b-backend.ts's own withRetry.
-      const result = await withRetry('commands.run', () =>
-        sandbox.commands.run(command, { timeoutMs: 60 * 60 * 1000, envs: env, signal }),
-      );
-      return { exitCode: result.exitCode ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+      // WIRED TO WORKFLOW SDK (2026-08-07, see ./sandbox-workflow.ts's file
+      // comment for the full "why"): the actual E2B call now runs as a
+      // durable step, decoupled from this request's own lifetime, instead
+      // of a direct inline `sandbox.commands.run()`. 1hr hard ceiling
+      // (unchanged from before) is enforced inside the step itself; the
+      // caller's own signal (bash.ts's withTimeoutSignal, typically 10 min)
+      // still fires first in practice and is wired below as a best-effort
+      // cancel of the durable run -- can't pass a live AbortSignal across
+      // the step boundary directly (not serializable), so this is the
+      // closest equivalent: cancel the run, don't block waiting on it.
+      const workflowRun = await start(runSandboxCommandWorkflow, [id, command, env, 60 * 60 * 1000]);
+      const cancelOnAbort = () => {
+        void workflowRun.cancel().catch(() => {});
+      };
+      if (signal) {
+        if (signal.aborted) cancelOnAbort();
+        else signal.addEventListener('abort', cancelOnAbort, { once: true });
+      }
+      try {
+        return await workflowRun.returnValue;
+      } finally {
+        signal?.removeEventListener('abort', cancelOnAbort);
+      }
     },
   };
 }
