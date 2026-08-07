@@ -101,6 +101,7 @@ export const auth = betterAuth({
   trustedOrigins: [
     'https://entry.pxxl.run',
     'https://ec.pxxl.click',
+    'https://entryv1.vercel.app', // current production Vercel URL (2026-08-07 Pxxl->Vercel migration) — was missing, broke sign-in from this exact domain
     'https://entry-nine-pi.vercel.app',
     'https://entry-thirdbase1s-projects.vercel.app',
     'https://entry-oneshotsx-thirdbase1s-projects.vercel.app',
