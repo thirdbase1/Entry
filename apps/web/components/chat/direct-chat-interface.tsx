@@ -537,9 +537,20 @@ function DirectChatSession({
         // caller passes to `chat.sendMessage(msg, { body })` (see the
         // `disabledTools` override further down this file) rather than
         // clobbering it.
-        prepareSendMessagesRequest: ({ body }) => ({
+        // FIXED (2026-08-07, real production bug caught live: every single
+        // send was 400ing with "messages is required"). Root cause: this
+        // callback only destructured `body` (the PER-CALL body from
+        // `chat.sendMessage(msg, { body })`) and returned `{ ...body,
+        // byokModelId/requestedModel }` -- but `id` and `messages` are
+        // separate top-level params the library passes into THIS callback,
+        // not nested inside `body` at all. The route (route.ts) reads
+        // `{ id, messages, byokModelId, requestedModel }` straight off the
+        // POST body, so every request was missing `messages` entirely and
+        // got rejected before ever reaching the model. Must explicitly
+        // forward `id` and `messages` into the returned body.
+        prepareSendMessagesRequest: ({ id, messages, body }) => ({
           api: '/api/direct/chat',
-          body: { ...body, ...(byokModelId ? { byokModelId } : { requestedModel }) },
+          body: { id, messages, ...body, ...(byokModelId ? { byokModelId } : { requestedModel }) },
         }),
         // ADDED (2026-07-24, real confirmed incident: a mid-turn Render
         // health-check-kill restarted the server -- the turn itself
