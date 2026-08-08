@@ -10,7 +10,7 @@ export async function GET() {
   const push = (m: string) => log.push(`${Date.now() - t0}ms: ${m}`);
 
   push('start');
-  const slowFetch = fetch('https://httpbin.org/delay/10', { cache: 'no-store' })
+  const slowFetch = fetch('https://postman-echo.com/delay/10', { cache: 'no-store' })
     .then(r => { push(`slow fetch resolved status=${r.status}`); return 'fetch'; })
     .catch(e => { push(`slow fetch rejected: ${e.message}`); return 'fetch-error'; });
 
