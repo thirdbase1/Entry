@@ -179,6 +179,33 @@ export interface CatalogMenu {
 
 const FALLBACK_PROVIDERS = ['anthropic', 'google', 'openai', 'deepseek', 'xai', 'moonshotai', 'zai'];
 
+/**
+ * Synchronous, zero-latency, zero-risk CatalogMenu -- the exact same
+ * shape getCatalogMenu()'s own catch branch already falls back to.
+ * Exported (2026-08-08, real production incident: a real request's
+ * server logs showed 4+ MINUTES of dead air between "before" and "after"
+ * a `getCatalogMenu()` call that agent.ts used to run as a blocking
+ * top-level `await` at module-eval time -- despite fetchCatalog()'s own
+ * 4s AbortController bound, SOMETHING in this environment (Vercel Fluid
+ * Compute's suspend/resume model is the leading suspect: a container can
+ * genuinely be paused mid-fetch between actual incoming requests, which
+ * stretches real wall-clock time for anything in flight at that instant
+ * regardless of an in-process timer's nominal deadline) made that
+ * "bounded" fetch anything but bounded from the CALLER's perspective. A
+ * brand-new chat's very first request landing on a cold container hung
+ * for that entire 4+ minutes with ZERO visible progress -- not even a
+ * request-received log line -- because nothing downstream of this
+ * blocking await could run at all yet. The fix isn't a longer timeout,
+ * it's removing the blocking dependency on network I/O from module-eval
+ * entirely: callers needing a synchronous value at schema-definition time
+ * (agent.ts's z.enum()) should use THIS instead, and fetch the live menu
+ * lazily, per-call, inside actual tool execution (which already has its
+ * own per-request time budget and error handling either way).
+ */
+export function getStaticFallbackCatalogMenu(): CatalogMenu {
+  return { providers: FALLBACK_PROVIDERS, menuText: FALLBACK_PROVIDERS.join(', '), allModelIds: new Set() };
+}
+
 export async function getCatalogMenu(): Promise<CatalogMenu> {
   try {
     const { models } = await fetchCatalog();
@@ -212,7 +239,7 @@ export async function getCatalogMenu(): Promise<CatalogMenu> {
     // works normally at real call time; this fallback only affects the enum/menu, and
     // an empty allModelIds means the agent.ts caller's own validation step is skipped
     // entirely on a cold-start hiccup, rather than wrongly rejecting everything).
-    return { providers: FALLBACK_PROVIDERS, menuText: FALLBACK_PROVIDERS.join(', '), allModelIds: new Set() };
+    return getStaticFallbackCatalogMenu();
   }
 }
 

@@ -1,7 +1,7 @@
 import { generateText, tool, type LanguageModel } from 'ai';
 import { gateway } from '@ai-sdk/gateway';
 import { z } from 'zod';
-import { resolveModelIdForProvider, getCatalogMenu } from '../model-catalog.js';
+import { resolveModelIdForProvider, getCatalogMenu, getStaticFallbackCatalogMenu, type CatalogMenu } from '../model-catalog.js';
 import { resolveUserCustomProviderModel, listUserCustomProviderLabels } from '../custom-model-provider.js';
 import { webSearch } from './web_search.js';
 import { webCrawl } from './web_crawl.js';
@@ -102,9 +102,41 @@ import type { ToolExecCtx } from './types.js';
  * A cold-start catalog hiccup can't take the tool down: getCatalogMenu()
  * falls back to a small known-good provider list on any fetch failure.
  */
+/**
+ * FIXED (2026-08-08, real production incident: a brand-new chat's very
+ * first message got NO response at all -- confirmed via the boot-trace
+ * lines directly below, still left in place as the smoking gun: a real
+ * request showed a 4+ MINUTE gap between "before" and "after" this call
+ * when it was a blocking top-level `await`. See
+ * getStaticFallbackCatalogMenu's own comment in model-catalog.ts for the
+ * full "why" (short version: fetchCatalog()'s own 4s AbortController
+ * bound does not actually bound real wall-clock time in this environment
+ * -- a suspended/resumed container can stretch anything in flight at the
+ * moment of suspension arbitrarily). Module-eval (which runs once per
+ * cold container, on the very first request that container ever handles)
+ * must NEVER block on network I/O -- this schema now builds instantly
+ * off the static fallback list every time, and the live catalog is
+ * fetched lazily, per-call, inside execute() below instead (which
+ * already had -- and still has -- its own per-request error handling and
+ * validation-skip-on-empty-catalog fallback logic; this is a strict
+ * improvement over the old snapshot-at-cold-start value too, since a
+ * long-lived warm container now sees a genuinely fresh catalog on every
+ * call instead of whatever the catalog looked like at that container's
+ * cold start, potentially hours earlier). The one thing this trades away:
+ * the z.enum()/description text below is now always the static 7-provider
+ * fallback list, never the fuller live one -- an acceptable, deliberate
+ * trade since correctness (execute()'s real validation) still uses the
+ * live catalog; only the advisory schema description text is static now.
+ */
 console.error('[BOOT-TRACE] tool-impls/agent.ts: before getCatalogMenu', new Date().toISOString());
-const catalogMenu = await getCatalogMenu();
-console.error('[BOOT-TRACE] tool-impls/agent.ts: after getCatalogMenu, providers=', catalogMenu.providers.length, new Date().toISOString());
+const catalogMenu: CatalogMenu = getStaticFallbackCatalogMenu();
+console.error('[BOOT-TRACE] tool-impls/agent.ts: after getCatalogMenu (static, non-blocking), providers=', catalogMenu.providers.length, new Date().toISOString());
+// Fire-and-forget warm of the shared 5-minute cache (model-catalog.ts's
+// original intent #3) -- never awaited here, so it can never block
+// module-eval; a slow/failed warm just means the FIRST real execute()
+// call below pays a normal (still 4s-bounded) cold fetch instead of
+// hitting an already-warm cache.
+void getCatalogMenu().catch(() => {});
 
 const AgentDelegateInputSchema = z.object({
   message: z
@@ -628,6 +660,16 @@ export const agentDelegate = {
     const explicitTimeoutMs = typeof timeout_seconds === 'number' && timeout_seconds > 0 ? timeout_seconds * 1000 : undefined;
     const userId = ctx?.session?.auth?.current?.principalId;
     const delegateOptions = { allowedTools, isolated, channelId: channel_id };
+    // LIVE catalog, fetched fresh per call (2026-08-08, part of removing
+    // the blocking top-level await -- see the module-eval comment above
+    // this file's `catalogMenu` const for the full story). Shadows the
+    // outer static-fallback `catalogMenu` for the rest of this execute()
+    // call: real validation below always uses genuinely live data instead
+    // of whatever the module-eval-time snapshot looked like, and
+    // getCatalogMenu() itself already has its own bounded fetch + cache +
+    // graceful fallback, so this can never be slower or less safe than
+    // what execute() already relied on before.
+    const catalogMenu = await getCatalogMenu();
 
     // ADDED (2026-07-18, "it can also specify... provider aerolink, model
     // gpt-5.6-sol" -- a user's own saved custom/BYOK provider from their

@@ -1829,8 +1829,29 @@ function DirectChatSession({
           // one heartbeat tick by turn-workflow.ts's cooperative stop
           // check -- see that file's comment). Fire-and-forget: stopping
           // the UI must never be blocked on this network round-trip.
+          // FIXED (2026-08-08, live bug confirmed on video: clicking Stop
+          // did nothing). This was gated on raw `chat.status ===
+          // 'streaming' || 'submitted'` -- but the button's own visibility/
+          // active look is driven by `isBusy` above, which is
+          // `chat.status === 'submitted' || 'streaming' || pendingTurn`
+          // (the durable, server-confirmed signal). This file has
+          // documented `chat.status` drifting back to 'ready' while a turn
+          // is still genuinely running server-side more than once already
+          // (see the STALL_MS/reconnect-poll comments above) -- exactly in
+          // that state, the button rendered as active (isBusy true via
+          // pendingTurn) but this handler evaluated to `undefined` because
+          // chat.status alone said 'ready', so the click was a silent
+          // no-op. Gating on `isBusy` instead means the button is
+          // clickable in EXACTLY the same states it visibly appears active
+          // in -- no more silent mismatch between "looks stoppable" and
+          // "actually does something when clicked". `chat.stop()` is still
+          // safe to call even when chat.status isn't literally
+          // 'streaming'/'submitted' (a no-op if there's nothing local to
+          // abort); the POST to /stop is what actually matters here since
+          // that's what reaches the durable server-side run regardless of
+          // this tab's own local status.
           onAbort={
-            chat.status === 'streaming' || chat.status === 'submitted'
+            isBusy
               ? () => {
                   chat.stop();
                   fetch(`/api/direct/chat/${activeId}/stop`, { method: 'POST' }).catch(err =>
