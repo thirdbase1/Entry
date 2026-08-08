@@ -89,7 +89,17 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
 async function handleDirectChatPost(req: NextRequest) {
   console.error('[direct-chat-diag] before auth session lookup', new Date().toISOString());
-  const { session } = await withDeadline(getUserSessionFromRequest(req), 'auth session lookup');
+  const cookieHeader = req.headers.get('cookie') ?? '';
+  console.error('[direct-chat-diag] cookie header present:', cookieHeader.length > 0, 'length:', cookieHeader.length, 'names:', cookieHeader.split(';').map(c => c.trim().split('=')[0]).join(','));
+  let session: any = null;
+  try {
+    const result = await withDeadline(getUserSessionFromRequest(req), 'auth session lookup');
+    session = result.session;
+    console.error('[direct-chat-diag] getUserSessionFromRequest resolved, session is null?', session === null);
+  } catch (sessionErr: any) {
+    console.error('[direct-chat-diag] getUserSessionFromRequest THREW:', sessionErr?.message, sessionErr?.stack);
+    throw sessionErr;
+  }
   console.error('[direct-chat-diag] after auth session lookup', new Date().toISOString());
   if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });
   const userId = session.user.id;
