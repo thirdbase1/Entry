@@ -475,6 +475,24 @@ function DirectChatSession({
   // creates a NEW retry loop, overlapping with the first — up to 4 nested
   // loops, each making 4 attempts = 16 concurrent resumeStream() calls.
   const resumingRef = useRef(false);
+  // EXPLICIT-STOP GUARD (2026-08-08, confirmed via screen recording +
+  // narrated audio: "press stop, nothing is happening... it automatically
+  // started again and refused to stop"). Root cause: chat.stop() aborts
+  // the fetch reader, which throws an AbortError straight into onError
+  // below -- and onError had NO check at all for that being a
+  // deliberate, user-initiated stop vs. a real dropped connection. It ran
+  // the exact same "reconnect-first" retry loop (up to 4 attempts with
+  // backoff, calling chat.resumeStream() each time) either way, which
+  // means clicking Stop would reliably reattach to -- and visibly resume
+  // -- the very stream the user just tried to kill. Set true the instant
+  // the Stop button fires (before chat.stop() is even called), consumed
+  // and cleared at the very top of onError so a genuine abort short-
+  // circuits straight to "stopped, don't reconnect" instead of falling
+  // into any reconnect path. This is purely about THIS tab's own local
+  // reconnect logic; the actual server-side cancellation still goes
+  // through the dedicated POST /stop endpoint regardless (see the
+  // onAbort handler below), which is unaffected by this flag.
+  const explicitStopRef = useRef(false);
   // Track when resumeStream was last attempted to avoid a failure cycle
   // (see recovery poll's 30s cooldown comment).
   if (!('lastResumeAttemptMs' in turnLifecycleRef.current)) {
@@ -634,6 +652,20 @@ function DirectChatSession({
     throttle: 50,
     onError(error) {
       console.error('[direct chat turn error]', error);
+      // Consume the explicit-stop flag FIRST, before any other check --
+      // see explicitStopRef's own comment above for the full incident.
+      // A deliberate stop must never fall into the turn_in_progress OR
+      // the generic reconnect-first branches below, both of which exist
+      // specifically to fight against an turn ending unexpectedly; this
+      // one ended exactly as intended.
+      if (explicitStopRef.current) {
+        explicitStopRef.current = false;
+        dispatchTurn({ type: 'SET_PENDING', value: false });
+        dispatchTurn({ type: 'SET_RECONNECTING', value: false });
+        dispatchTurn({ type: 'CLEAR_ERROR' });
+        resumingRef.current = false;
+        return;
+      }
       // A 409 from the new turn-lock guard (see route.ts / turn-lock.ts)
       // means a turn for this chat was ALREADY in flight when this send
       // fired -- never a real failure. Attach to the live turn instead of
@@ -1441,6 +1473,11 @@ function DirectChatSession({
     // tab) -- this is just the fast, no-network first line of defense for
     // the overwhelmingly common single-tab case.
     if (isBusy) return;
+    // Defensive reset: a brand-new send means any previous stop has
+    // fully resolved one way or another -- never let a stale flag from
+    // an earlier turn suppress reconnect logic on a turn that hasn't
+    // even started yet.
+    explicitStopRef.current = false;
     // Switching to a different model mid-chat is handled by the parent
     // (chat-interface.tsx remounts into the right path); here we only ever
     // send under the current byokModelId/requestedModel.
@@ -1853,6 +1890,12 @@ function DirectChatSession({
           onAbort={
             isBusy
               ? () => {
+                  // Flip BEFORE chat.stop() -- the abort it triggers is
+                  // synchronous-ish (fires onError on the same tick/next
+                  // microtask in practice), so this must already be true
+                  // by the time onError runs. See explicitStopRef's own
+                  // comment for the full incident this guards against.
+                  explicitStopRef.current = true;
                   chat.stop();
                   fetch(`/api/direct/chat/${activeId}/stop`, { method: 'POST' }).catch(err =>
                     console.error('[direct chat] stop request failed', activeId, err),
