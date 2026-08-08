@@ -110,6 +110,29 @@ async function isStopRequested(chatId: string): Promise<boolean> {
   }
 }
 
+/**
+ * Step-wrapped version of isStopRequested, for the ONE call site that
+ * needs it OUTSIDE a step function: the outer `runDirectChatTurnWorkflow`
+ * loop itself carries the `'use workflow'` directive, and the Workflow
+ * SDK's bundler statically scans everything directly reachable from a
+ * `'use workflow'` function's own body and rejects any Node-dependent
+ * import in that reachable graph (confirmed via a real failed build:
+ * calling `isStopRequested` -- which pulls in `@entry/db`'s Prisma client,
+ * which pulls in `node:crypto`/`node:url` -- directly from the workflow
+ * loop broke the build with "Node.js modules are not available in
+ * workflow functions"). `isStopRequested`'s OTHER call site, inside
+ * `runChatTurnLegStep`, is fine as-is: that function already carries its
+ * own `'use step'` directive, so it runs in a normal Node runtime and was
+ * never part of the restricted bundle to begin with. Wrapping this one
+ * call in its own step keeps the DB read out of the workflow bundle
+ * entirely, same as every other DB-touching call in this file already
+ * does.
+ */
+async function checkStopRequestedStep(chatId: string): Promise<boolean> {
+  'use step';
+  return isStopRequested(chatId);
+}
+
 export interface TurnWorkflowInput {
   chatId: string;
   userId: string;
@@ -610,6 +633,25 @@ async function runChatTurnLegStep(input: LegInput): Promise<LegResult> {
           toolCallCount: toolCalls.length,
           toolErrors,
         });
+        // DURABLE COPY (2026-08-08, live bug: user hit "No response came
+        // back this turn (provider reported: error)" and by the time this
+        // was investigated, Vercel's own log tail (short-lived, and this
+        // project's polling volume alone scrolls ~100 lines every minute
+        // or two) had already lost the ONLY record of what actually
+        // happened -- the line above, console.warn only. That left no way
+        // to root-cause it after the fact at all. This is exactly the gap
+        // error-log.ts's own file header calls out ("Vercel's own log
+        // tail is too short-lived to catch a real production error after
+        // the fact"), just missed for this one specific call site.
+        // fire-and-forget, same as every other logError call in this
+        // file -- must never itself block or fail the turn.
+        logError({
+          source: 'direct-chat-turn-step-finish-reason',
+          error: new Error(`Step finished with reason "${finishReason}" (raw: "${rawFinishReason ?? 'n/a'}")${toolErrors.length ? ` and ${toolErrors.length} tool error(s)` : ''}`),
+          userId,
+          chatId,
+          context: { providerLabel, modelId, stepNumber, finishReason, rawFinishReason, toolCallCount: toolCalls.length, toolErrors },
+        });
       }
 
       // INCREMENTAL VERSION CAPTURE (2026-07-18, user-reported: "sandbox
@@ -991,7 +1033,7 @@ export async function runDirectChatTurnWorkflow(input: TurnWorkflowInput): Promi
     // window right after one leg finishes naturally but before the next
     // one starts (e.g. a leg that just wrapped up a tool call and was
     // about to loop for another turn of the model).
-    if (legNumber > 0 && (await isStopRequested(input.chatId))) break;
+    if (legNumber > 0 && (await checkStopRequestedStep(input.chatId))) break;
     legNumber += 1;
     const legResult = await runChatTurnLegStep({ ...input, legMessages, legNumber });
     legMessages = legResult.updatedModelMessages;
