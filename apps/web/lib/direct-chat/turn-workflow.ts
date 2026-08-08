@@ -52,6 +52,7 @@ import {
   type UIMessageChunk,
 } from 'ai';
 import { getWritable } from 'workflow';
+import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
 import { captureIncrementalSnapshot, captureTurnVersion } from '@entry/db/chat-versioning';
 import { recordUsageEvent } from '@entry/db/usage-metering';
@@ -81,6 +82,33 @@ const MAX_LEG_DURATION_MS = 4.5 * 60 * 1000;
 // rather than per turn. A turn that needs more than this across ONE leg's
 // worth of internal steps just continues into another leg anyway.
 const MAX_LEGS = 200;
+
+/**
+ * COOPERATIVE STOP CHECK (added 2026-08-08, "stop button doesn't work").
+ * `route.ts`'s /stop endpoint calls the Workflow SDK's `Run.cancel()`,
+ * which stops the orchestrator from scheduling any FUTURE leg -- but a
+ * leg already mid-flight (streaming from the model, running a tool) has
+ * no SDK-exposed signal telling it a cancellation was requested, so it
+ * would otherwise run to its own natural end (up to MAX_LEG_DURATION_MS)
+ * regardless. The stop endpoint also flips a plain `stopRequested` flag
+ * into the chat row's existing `cursor` JSON column (no schema change
+ * needed); this cheap read piggybacks on the SAME cadence as the
+ * already-existing WRITER_HEARTBEAT_MS heartbeat check in the leg's
+ * forwarding loop below, so a stop request is noticed within one
+ * heartbeat interval (~5s worst case) instead of never.
+ */
+async function isStopRequested(chatId: string): Promise<boolean> {
+  try {
+    const row = await prisma.eveChatSession.findUnique({ where: { id: chatId }, select: { cursor: true } });
+    const cursor = row?.cursor;
+    return !!(cursor && typeof cursor === 'object' && (cursor as { stopRequested?: boolean }).stopRequested === true);
+  } catch {
+    // A transient DB hiccup checking the flag should never itself abort a
+    // healthy turn -- treat "couldn't check" as "not stopped" and let the
+    // next heartbeat tick retry.
+    return false;
+  }
+}
 
 export interface TurnWorkflowInput {
   chatId: string;
@@ -879,6 +907,15 @@ async function runChatTurnLegStep(input: LegInput): Promise<LegResult> {
         new Promise<typeof HEARTBEAT>(resolve => setTimeout(() => resolve(HEARTBEAT), WRITER_HEARTBEAT_MS)),
       ]);
       if (next === HEARTBEAT) {
+        // STOP CHECK (2026-08-08): piggyback on this existing heartbeat
+        // cadence to notice a user-requested stop -- see isStopRequested's
+        // own comment. Aborting the leg's own controller here (not just
+        // breaking this loop) is what actually cuts the in-flight
+        // streamText call short instead of letting it keep consuming
+        // tokens in the background after the user already asked to stop.
+        if (!legAbortController.signal.aborted && (await isStopRequested(chatId))) {
+          legAbortController.abort();
+        }
         await writer.write(makeHeartbeatChunk());
         continue;
       }
@@ -949,6 +986,12 @@ export async function runDirectChatTurnWorkflow(input: TurnWorkflowInput): Promi
   let legNumber = 0;
   let doneNaturally = false;
   while (!doneNaturally && legNumber < MAX_LEGS) {
+    // STOP CHECK (2026-08-08): also gate the NEXT leg, not just the
+    // in-flight one -- covers the case where a stop lands in the small
+    // window right after one leg finishes naturally but before the next
+    // one starts (e.g. a leg that just wrapped up a tool call and was
+    // about to loop for another turn of the model).
+    if (legNumber > 0 && (await isStopRequested(input.chatId))) break;
     legNumber += 1;
     const legResult = await runChatTurnLegStep({ ...input, legMessages, legNumber });
     legMessages = legResult.updatedModelMessages;

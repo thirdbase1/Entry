@@ -41,8 +41,54 @@ import { runDirectChatTurnWorkflow } from '@/lib/direct-chat/turn-workflow';
 
 export const maxDuration = 300;
 
+/**
+ * HARD RESPONSE DEADLINE (added 2026-08-08, live bug: "message doesn't
+ * get to agent"). Reproduced directly against production: a real POST
+ * here uploaded fully, then got ZERO response bytes and no HTTP status at
+ * all until the client gave up -- and nothing about that request showed
+ * up in server logs either, meaning whatever hung did so before any of
+ * this handler's own log lines ever ran. Everything before the workflow
+ * actually starts streaming (auth lookup, the concurrency-guard read,
+ * `start()` itself) is plain `await`ed with no bound of its own -- a
+ * stuck DB connection-pool acquire or a slow `start()` call against the
+ * Workflow orchestrator had no ceiling and would hang the whole request
+ * forever, leaving the user staring at nothing with no error, no retry,
+ * no explanation. `sendWithRetry` client-side and the 30s recovery-poll
+ * give-up both assume SOME response eventually comes back -- neither
+ * covers a request that never resolves at all. This wraps that
+ * unbounded prefix in a deadline so the absolute worst case is now a
+ * clean, fast, retryable error instead of an infinite silent hang.
+ */
+const PRE_STREAM_DEADLINE_MS = 25_000;
+class PreStreamTimeoutError extends Error {}
+
+function withDeadline<T>(promise: Promise<T>, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new PreStreamTimeoutError(`[direct chat] "${label}" exceeded ${PRE_STREAM_DEADLINE_MS}ms deadline`)), PRE_STREAM_DEADLINE_MS),
+    ),
+  ]);
+}
+
 export const POST = withApiErrorHandling(async (req: NextRequest) => {
-  const { session } = await getUserSessionFromRequest(req);
+  console.log('[direct chat] request received', { at: new Date().toISOString() });
+  try {
+    return await handleDirectChatPost(req);
+  } catch (err) {
+    if (err instanceof PreStreamTimeoutError) {
+      console.error('[direct chat] pre-stream deadline hit -- returning error instead of hanging forever', err.message);
+      return Response.json(
+        { error: "Couldn't reach the server in time -- please try sending that again." },
+        { status: 503 },
+      );
+    }
+    throw err;
+  }
+});
+
+async function handleDirectChatPost(req: NextRequest) {
+  const { session } = await withDeadline(getUserSessionFromRequest(req), 'auth session lookup');
   if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });
   const userId = session.user.id;
 
@@ -69,7 +115,10 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
   // answer to "is a turn already in flight for this chat", no separate
   // lock primitive/heartbeat/TTL needed at all: a workflow run's status
   // IS its own liveness signal, durably tracked by the platform itself.
-  const existingRow = await prisma.eveChatSession.findFirst({ where: { id: chatId, userId }, select: { cursor: true } });
+  const existingRow = await withDeadline(
+    prisma.eveChatSession.findFirst({ where: { id: chatId, userId }, select: { cursor: true } }),
+    'concurrency-guard DB read',
+  );
   const existingRunId = existingRow?.cursor && typeof existingRow.cursor === 'object' && 'workflowRunId' in existingRow.cursor
     ? (existingRow.cursor as { workflowRunId?: string }).workflowRunId
     : undefined;
@@ -316,16 +365,19 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 
   const disabledToolNames = Array.isArray(disabledTools) ? disabledTools.filter((t: unknown): t is string => typeof t === 'string') : [];
 
-  const run = await start(runDirectChatTurnWorkflow, [{
-    chatId,
-    userId,
-    turnUiMessages: uiMessages,
-    initialModelMessages,
-    disabledToolNames,
-    byokModelId: byokModelId ?? null,
-    requestedModel: byokModelId ? null : (requestedModel ?? null),
-    reasoningRequested,
-  }]);
+  const run = await withDeadline(
+    start(runDirectChatTurnWorkflow, [{
+      chatId,
+      userId,
+      turnUiMessages: uiMessages,
+      initialModelMessages,
+      disabledToolNames,
+      byokModelId: byokModelId ?? null,
+      requestedModel: byokModelId ? null : (requestedModel ?? null),
+      reasoningRequested,
+    }]),
+    'workflow start()',
+  );
 
   await prisma.eveChatSession.update({ where: { id: chatId, userId }, data: { cursor: { workflowRunId: run.runId } } }).catch(err => {
     console.error('[direct chat] failed to persist workflow run id', chatId, err);
@@ -344,4 +396,4 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
       'X-Accel-Buffering': 'no',
     },
   });
-});
+}

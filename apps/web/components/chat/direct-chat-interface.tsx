@@ -1818,7 +1818,27 @@ function DirectChatSession({
           // the voice/mic state merely because this tab's local AI SDK
           // status fell back to `ready` after a disconnect.
           streaming={isBusy}
-          onAbort={chat.status === 'streaming' || chat.status === 'submitted' ? chat.stop : undefined}
+          // REAL STOP (2026-08-08, live bug: "stop button doesn't work to
+          // stop agent"). `chat.stop()` alone only ever aborted THIS TAB's
+          // own fetch/reader -- the durable workflow run kept executing
+          // server-side regardless (that survival is the whole point of
+          // the workflow migration, but nobody had wired an actual
+          // cancellation path for it). Now fires both: the local abort for
+          // instant UI feedback, and a POST to the new /stop endpoint so
+          // the server-side run is actually cancelled (picked up within
+          // one heartbeat tick by turn-workflow.ts's cooperative stop
+          // check -- see that file's comment). Fire-and-forget: stopping
+          // the UI must never be blocked on this network round-trip.
+          onAbort={
+            chat.status === 'streaming' || chat.status === 'submitted'
+              ? () => {
+                  chat.stop();
+                  fetch(`/api/direct/chat/${activeId}/stop`, { method: 'POST' }).catch(err =>
+                    console.error('[direct chat] stop request failed', activeId, err),
+                  );
+                }
+              : undefined
+          }
           placeholder={placeholder}
           model={model}
           onModelChange={setModel}

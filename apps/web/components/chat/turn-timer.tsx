@@ -50,20 +50,57 @@ export function formatTurnDuration(ms: number): string {
 }
 
 /**
+ * How long `active` may sit false before this hook treats the turn as
+ * genuinely over and actually clears the clock. Added 2026-08-08 (live
+ * bug: "timer resets every ~1 minute"). Root cause: `active` here is fed
+ * by `isBusy` = `chat.status === 'submitted' || 'streaming' || pendingTurn`
+ * -- across a leg boundary in the workflow-based turn pipeline (or any
+ * brief reconnect gap) `chat.status` can fall back to 'ready' for a
+ * render or two before the recovery poll re-confirms `pendingTurn`, so
+ * `active` genuinely DOES flicker false->true within the same still-in-
+ * -flight turn. The old code treated every `active===false` instant as
+ * "the turn ended", wiping `startRef` and restarting the count from 0 the
+ * moment `active` flipped back on -- indistinguishable, visually, from
+ * the timer randomly resetting mid-turn. A short grace window absorbs
+ * exactly that kind of blip: the start time is only actually forgotten if
+ * `active` stays false for the whole window, i.e. the turn is really
+ * done (or was already reset by the `active` effect below moving on to a
+ * genuinely NEW turn, in which case a fresh startRef is set right away
+ * regardless of any pending clear).
+ */
+const RESET_GRACE_MS = 4_000;
+
+/**
  * Ticks roughly every 100ms while `active` is true, tracking elapsed time
- * from the moment `active` FIRST became true. Resets cleanly the instant
- * `active` goes false (returns null) so a new turn always starts a fresh
- * count instead of ever continuing/inheriting a previous turn's clock.
+ * from the moment `active` FIRST became true. A brief `active` flicker
+ * false (see RESET_GRACE_MS's comment) does not restart the clock -- only
+ * `active` staying false past the grace window actually clears it, so a
+ * genuinely new turn still always starts a fresh count.
  */
 export function useLiveTurnElapsedMs(active: boolean): number | null {
   const startRef = useRef<number | null>(null);
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [elapsed, setElapsed] = useState<number | null>(null);
 
   useEffect(() => {
     if (!active) {
-      startRef.current = null;
-      setElapsed(null);
+      // Don't nuke startRef synchronously -- give it RESET_GRACE_MS to see
+      // if this is a real end-of-turn or just a transient reconnect blip.
+      if (clearTimerRef.current == null) {
+        clearTimerRef.current = setTimeout(() => {
+          startRef.current = null;
+          setElapsed(null);
+          clearTimerRef.current = undefined;
+        }, RESET_GRACE_MS);
+      }
       return;
+    }
+    // Genuinely active again -- cancel any pending clear from a blip, and
+    // keep the EXISTING startRef (if this is a same-turn reconnect) so
+    // the count continues seamlessly instead of jumping back to 0.
+    if (clearTimerRef.current != null) {
+      clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = undefined;
     }
     if (startRef.current == null) {
       startRef.current = Date.now();
@@ -74,6 +111,15 @@ export function useLiveTurnElapsedMs(active: boolean): number | null {
     }, 100);
     return () => clearInterval(id);
   }, [active]);
+
+  // Pending-clear timer must survive unmount cleanup only for as long as
+  // the component itself does -- clear it if the component goes away
+  // entirely so it never fires setState on an unmounted component.
+  useEffect(() => {
+    return () => {
+      if (clearTimerRef.current != null) clearTimeout(clearTimerRef.current);
+    };
+  }, []);
 
   return elapsed;
 }
