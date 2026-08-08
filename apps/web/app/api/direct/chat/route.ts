@@ -88,11 +88,14 @@ export const POST = withApiErrorHandling(async (req: NextRequest) => {
 });
 
 async function handleDirectChatPost(req: NextRequest) {
+  console.error('[direct-chat-diag] before auth session lookup', new Date().toISOString());
   const { session } = await withDeadline(getUserSessionFromRequest(req), 'auth session lookup');
+  console.error('[direct-chat-diag] after auth session lookup', new Date().toISOString());
   if (!session) return Response.json({ error: 'Unauthorized' }, { status: 401 });
   const userId = session.user.id;
 
   const body = await req.json().catch(() => ({}));
+  console.error('[direct-chat-diag] after body parse', new Date().toISOString());
   const { id, messages, byokModelId, requestedModel, disabledTools } = body ?? {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return Response.json({ error: 'messages is required' }, { status: 400 });
@@ -115,10 +118,12 @@ async function handleDirectChatPost(req: NextRequest) {
   // answer to "is a turn already in flight for this chat", no separate
   // lock primitive/heartbeat/TTL needed at all: a workflow run's status
   // IS its own liveness signal, durably tracked by the platform itself.
+  console.error('[direct-chat-diag] before concurrency-guard DB read', new Date().toISOString());
   const existingRow = await withDeadline(
     prisma.eveChatSession.findFirst({ where: { id: chatId, userId }, select: { cursor: true } }),
     'concurrency-guard DB read',
   );
+  console.error('[direct-chat-diag] after concurrency-guard DB read', new Date().toISOString());
   const existingRunId = existingRow?.cursor && typeof existingRow.cursor === 'object' && 'workflowRunId' in existingRow.cursor
     ? (existingRow.cursor as { workflowRunId?: string }).workflowRunId
     : undefined;
