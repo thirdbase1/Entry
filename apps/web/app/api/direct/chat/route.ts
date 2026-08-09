@@ -4,26 +4,26 @@
  * BYOK provider models (`byokModelId`) or a Vercel AI Gateway model
  * (`requestedModel`).
  *
- * MIGRATED (2026-08-07) to start a durable turn-workflow.ts run instead of
- * calling streamText() directly in this handler -- see turn-workflow.ts's
- * file header for the full "why": this route's own function invocation is
- * still Vercel-capped at 300s same as always, but starting a workflow run
- * and streaming FROM it has no such cap on the run's own total duration.
- * This handler is now genuinely thin: auth, parse, sanitize, the
- * concurrency guard, preSave, and model resolution (needed up front for
- * the one-time UIMessage->ModelMessage conversion + relay-flag detection)
- * -- then it hands off to the workflow and streams its native output
- * straight through. Everything else (the actual model+tool loop, onFinish/
- * onError/prepareStep, per-step persistence, version capture) now lives in
- * turn-workflow.ts, unchanged in substance from this file's old inline
- * version, just re-homed so it can run across as many workflow steps as a
- * turn actually needs.
+ * REVERTED OFF THE VERCEL WORKFLOW SDK (2026-08-09) -- was migrated
+ * 2026-08-07 to start a durable turn-workflow.ts run via `start()`, then
+ * stream from `run.readable`. Live incident: every turn came back as a
+ * completely empty ~120s-then-[DONE] stream, with nothing in this app's
+ * own durable ErrorLog table at all -- meaning the failure happened
+ * inside the Workflow SDK's own step/stream plumbing, below the level
+ * our own try/catch could ever observe it (matches a known open upstream
+ * bug, vercel/workflow#943). This handler now creates a plain
+ * TransformStream, hands its writable side to turn-workflow.ts's
+ * (also-reverted, no longer `'use workflow'`) runDirectChatTurnWorkflow
+ * as a fire-and-forget call, and streams the readable side straight
+ * through -- functionally the same shape as the pre-2026-08-07 inline
+ * version, just still split across turn-workflow.ts for file-size
+ * reasons rather than folded back in here. Everything else (auth, parse,
+ * sanitize, concurrency guard, preSave, model resolution) is unchanged.
  */
 import { NextRequest } from 'next/server';
 import { withApiErrorHandling } from '@/lib/api-error';
 
-import { convertToModelMessages, createUIMessageStreamResponse, type UIMessage } from 'ai';
-import { start, getRun } from 'workflow/api';
+import { convertToModelMessages, createUIMessageStreamResponse, type UIMessage, type UIMessageChunk } from 'ai';
 import { getUserSessionFromRequest } from '@entry/auth';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
@@ -134,23 +134,24 @@ async function handleDirectChatPost(req: NextRequest) {
     'concurrency-guard DB read',
   );
   console.error('[direct-chat-diag] after concurrency-guard DB read', new Date().toISOString());
-  const existingRunId = existingRow?.cursor && typeof existingRow.cursor === 'object' && 'workflowRunId' in existingRow.cursor
-    ? (existingRow.cursor as { workflowRunId?: string }).workflowRunId
-    : undefined;
-  if (existingRunId) {
-    try {
-      const existingRun = getRun(existingRunId);
-      const status = await existingRun.status;
-      if (status === 'pending' || status === 'running') {
-        return Response.json(
-          { error: 'turn_in_progress', chatId, message: 'Still working on your last message in this chat.' },
-          { status: 409 }
-        );
-      }
-    } catch {
-      // Run genuinely gone (expired/never existed) -- fall through and
-      // start a fresh one, same as if cursor had never been set.
-    }
+  // REVERTED OFF WORKFLOW SDK (2026-08-09, see turn-workflow.ts's
+  // TurnWorkflowInput comment for the full incident) -- there's no
+  // durable run id to ask "is this still going" anymore, so the guard is
+  // now a plain turnActive+timestamp flag on the chat row itself, with a
+  // staleness override: a flag older than TURN_STALE_MS almost certainly
+  // means the previous invocation crashed/got killed without ever
+  // reaching its own `finally` cleanup below, and must never be allowed
+  // to permanently wedge a chat shut.
+  const TURN_STALE_MS = 6 * 60 * 1000;
+  const cursorObj = existingRow?.cursor && typeof existingRow.cursor === 'object' ? (existingRow.cursor as Record<string, unknown>) : undefined;
+  const turnStartedAtRaw = cursorObj?.turnStartedAt;
+  const turnStartedAt = typeof turnStartedAtRaw === 'string' ? Date.parse(turnStartedAtRaw) : NaN;
+  const turnIsFresh = Number.isFinite(turnStartedAt) && (Date.now() - turnStartedAt) < TURN_STALE_MS;
+  if (cursorObj?.turnActive === true && turnIsFresh) {
+    return Response.json(
+      { error: 'turn_in_progress', chatId, message: 'Still working on your last message in this chat.' },
+      { status: 409 }
+    );
   }
 
   // BYOK TTFT FIX (2026-07-19): resolving a BYOK model reads/decrypts its
@@ -380,29 +381,47 @@ async function handleDirectChatPost(req: NextRequest) {
 
   const disabledToolNames = Array.isArray(disabledTools) ? disabledTools.filter((t: unknown): t is string => typeof t === 'string') : [];
 
-  const run = await withDeadline(
-    start(runDirectChatTurnWorkflow, [{
-      chatId,
-      userId,
-      turnUiMessages: uiMessages,
-      initialModelMessages,
-      disabledToolNames,
-      byokModelId: byokModelId ?? null,
-      requestedModel: byokModelId ? null : (requestedModel ?? null),
-      reasoningRequested,
-    }]),
-    'workflow start()',
-  );
+  // REVERTED OFF WORKFLOW SDK (2026-08-09) -- a plain TransformStream
+  // stands in for the run-scoped writable `getWritable()` used to hand
+  // back: turn-workflow.ts's `writable.getWriter()/.write()/.releaseLock()`
+  // calls are completely unchanged, they just write into this stream's
+  // writable side instead. The turn runs fire-and-forget (not awaited
+  // here) -- the readable side being actively piped into the HTTP
+  // response is what keeps this invocation alive while it runs, exactly
+  // like every plain streamText()-backed route already works.
+  const { readable, writable } = new TransformStream<UIMessageChunk, UIMessageChunk>();
 
-  await prisma.eveChatSession.update({ where: { id: chatId, userId }, data: { cursor: { workflowRunId: run.runId } } }).catch(err => {
-    console.error('[direct chat] failed to persist workflow run id', chatId, err);
-    logError({ source: 'direct-chat-persist-run-id', error: err, userId, chatId });
+  await prisma.eveChatSession.update({ where: { id: chatId, userId }, data: { cursor: { turnActive: true, turnStartedAt: new Date().toISOString() } } }).catch(err => {
+    console.error('[direct chat] failed to persist turnActive flag', chatId, err);
+    logError({ source: 'direct-chat-persist-turn-active', error: err, userId, chatId });
   });
 
+  runDirectChatTurnWorkflow({
+    chatId,
+    userId,
+    turnUiMessages: uiMessages,
+    initialModelMessages,
+    disabledToolNames,
+    byokModelId: byokModelId ?? null,
+    requestedModel: byokModelId ? null : (requestedModel ?? null),
+    reasoningRequested,
+    writable,
+  })
+    .catch(err => {
+      console.error('[direct chat] turn crashed', chatId, err);
+      logError({ source: 'direct-chat-turn-crash', error: err, userId, chatId });
+      // Best-effort: make sure a crashed turn's stream still closes
+      // instead of hanging the client forever with no [DONE]/error ever
+      // written -- exactly the failure mode this whole revert fixes.
+      writable.close().catch(() => {});
+    })
+    .finally(() => {
+      prisma.eveChatSession.update({ where: { id: chatId, userId }, data: { cursor: { turnActive: false } } }).catch(() => {});
+    });
+
   return createUIMessageStreamResponse({
-    stream: run.readable,
+    stream: readable,
     headers: {
-      'x-workflow-run-id': run.runId,
       'x-direct-chat-session-id': chatId,
       'x-direct-chat-provider': providerLabel,
       'x-direct-chat-model': modelId,

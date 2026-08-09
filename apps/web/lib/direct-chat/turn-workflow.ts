@@ -51,7 +51,6 @@ import {
   type UIMessage,
   type UIMessageChunk,
 } from 'ai';
-import { getWritable } from 'workflow';
 import { prisma } from '@entry/db';
 import { logError } from '@entry/db/error-log';
 import { captureIncrementalSnapshot, captureTurnVersion } from '@entry/db/chat-versioning';
@@ -110,29 +109,6 @@ async function isStopRequested(chatId: string): Promise<boolean> {
   }
 }
 
-/**
- * Step-wrapped version of isStopRequested, for the ONE call site that
- * needs it OUTSIDE a step function: the outer `runDirectChatTurnWorkflow`
- * loop itself carries the `'use workflow'` directive, and the Workflow
- * SDK's bundler statically scans everything directly reachable from a
- * `'use workflow'` function's own body and rejects any Node-dependent
- * import in that reachable graph (confirmed via a real failed build:
- * calling `isStopRequested` -- which pulls in `@entry/db`'s Prisma client,
- * which pulls in `node:crypto`/`node:url` -- directly from the workflow
- * loop broke the build with "Node.js modules are not available in
- * workflow functions"). `isStopRequested`'s OTHER call site, inside
- * `runChatTurnLegStep`, is fine as-is: that function already carries its
- * own `'use step'` directive, so it runs in a normal Node runtime and was
- * never part of the restricted bundle to begin with. Wrapping this one
- * call in its own step keeps the DB read out of the workflow bundle
- * entirely, same as every other DB-touching call in this file already
- * does.
- */
-async function checkStopRequestedStep(chatId: string): Promise<boolean> {
-  'use step';
-  return isStopRequested(chatId);
-}
-
 export interface TurnWorkflowInput {
   chatId: string;
   userId: string;
@@ -142,6 +118,26 @@ export interface TurnWorkflowInput {
   byokModelId: string | null;
   requestedModel: string | null;
   reasoningRequested: boolean;
+  /**
+   * REVERTED OFF VERCEL WORKFLOW SDK (2026-08-09, live incident: every
+   * direct-chat turn came back as a totally empty ~120s-then-[DONE]
+   * stream, with NOTHING in the app's own durable ErrorLog -- meaning
+   * the failure happened inside the Workflow SDK's own step/stream
+   * plumbing, below the level our own try/catch could ever see. Root-
+   * caused against a matching open upstream bug (vercel/workflow#943,
+   * steps/streams not behaving as documented). Rather than keep chat
+   * broken while chasing a third-party SDK bug, this function (and
+   * runChatTurnLegStep below) are now PLAIN functions again -- no 'use
+   * workflow'/'use step', no getWritable() -- and the caller (route.ts)
+   * passes in a plain WritableStream side of a TransformStream it
+   * constructed itself, same shape `getWritable()` used to hand back, so
+   * every `writable.getWriter()/.write()/.releaseLock()` call below is
+   * untouched. This trades away cross-invocation durability for turns
+   * over ~4.5min and true resumable-stream-on-reconnect (both already
+   * degrade gracefully to their pre-migration behavior, see stop/stream
+   * routes) in exchange for chat actually working again.
+   */
+  writable: WritableStream<UIMessageChunk>;
 }
 
 interface LegInput extends TurnWorkflowInput {
@@ -155,18 +151,11 @@ interface LegResult {
 }
 
 async function runChatTurnLegStep(input: LegInput): Promise<LegResult> {
-  'use step';
-  // Called fresh inside the step, not threaded in as a workflow-level
-  // argument (2026-08-07, cross-checked against workflow-sdk.dev/docs/
-  // foundations/streaming's "Streams Cannot Be Used Directly in Workflow
-  // Context" + its own canonical good-example: getWritable() with no
-  // namespace always resolves to the SAME run-scoped default writable
-  // regardless of which step calls it or how many times, so there's
-  // nothing to gain from obtaining it once in the workflow function and
-  // passing the reference through -- and doing so risked sitting right
-  // on the documented "don't touch streams in workflow context" line for
-  // no benefit. Every leg gets the identical persistent stream this way.
-  const writable = getWritable<UIMessageChunk>();
+  // PLAIN FUNCTION (2026-08-09 revert, see TurnWorkflowInput's own
+  // comment above for the full "why") -- was `'use step'` + `getWritable()`
+  // under the Workflow SDK; now just uses the WritableStream the route
+  // handler created and threaded straight through in `input`.
+  const writable = input.writable;
   const { chatId, userId, turnUiMessages: uiMessages, legMessages, legNumber, disabledToolNames, byokModelId, requestedModel, reasoningRequested } = input;
 
   // Re-resolve fresh every leg -- see this file's header comment. Cheap
@@ -1013,17 +1002,20 @@ async function runChatTurnLegStep(input: LegInput): Promise<LegResult> {
 }
 
 /**
- * Outer orchestrator -- suspends between legs at essentially zero cost
- * (Fluid Compute is enabled on this project, confirmed 2026-08-07), and
- * has no overall duration limit of its own. See this file's header
- * comment for the full "why legs" writeup.
+ * Outer orchestrator -- PLAIN function again (2026-08-09 revert, see
+ * TurnWorkflowInput's own comment for the full "why"). Every leg now
+ * runs in-process within THIS one request/invocation instead of crossing
+ * separate workflow-step invocations, so the combined total across every
+ * leg is back to being bounded by Vercel's one hard 300s-per-invocation
+ * ceiling -- exactly the pre-2026-08-07 behavior this restores. In
+ * practice almost every turn finishes in a single leg well under that;
+ * a turn that legitimately needs longer just gets cut at whatever point
+ * Vercel kills the function, same as it always did before the Workflow
+ * SDK migration -- already-generated messages are persisted incrementally
+ * throughout (see persistIncremental/persistFinal above), so nothing is
+ * silently lost, and the user can just send another message to continue.
  */
 export async function runDirectChatTurnWorkflow(input: TurnWorkflowInput): Promise<{ legCount: number }> {
-  'use workflow';
-  // No getWritable() call here anymore -- see runChatTurnLegStep's own
-  // comment. The workflow function's only job is orchestrating which
-  // step runs next with which accumulated message history; it never
-  // touches the stream itself.
   let legMessages = input.initialModelMessages;
   let legNumber = 0;
   let doneNaturally = false;
@@ -1033,7 +1025,7 @@ export async function runDirectChatTurnWorkflow(input: TurnWorkflowInput): Promi
     // window right after one leg finishes naturally but before the next
     // one starts (e.g. a leg that just wrapped up a tool call and was
     // about to loop for another turn of the model).
-    if (legNumber > 0 && (await checkStopRequestedStep(input.chatId))) break;
+    if (legNumber > 0 && (await isStopRequested(input.chatId))) break;
     legNumber += 1;
     const legResult = await runChatTurnLegStep({ ...input, legMessages, legNumber });
     legMessages = legResult.updatedModelMessages;
