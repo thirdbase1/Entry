@@ -60,6 +60,7 @@ const STATIC_FALLBACK_MODEL_ID: Record<string, string> = {
   anthropic: 'anthropic/claude-sonnet-4.5',
   openai: 'openai/gpt-5',
   google: 'google/gemini-2.5-pro',
+  stepfun: 'stepfun/step-5-preview',
 };
 
 async function fetchCatalog(): Promise<CatalogResponse> {
@@ -177,7 +178,7 @@ export interface CatalogMenu {
   allModelIds: Set<string>;
 }
 
-const FALLBACK_PROVIDERS = ['anthropic', 'google', 'openai', 'deepseek', 'xai', 'moonshotai', 'zai'];
+const FALLBACK_PROVIDERS = ['anthropic', 'google', 'openai', 'deepseek', 'xai', 'moonshotai', 'zai', 'stepfun'];
 
 /**
  * Synchronous, zero-latency, zero-risk CatalogMenu -- the exact same
